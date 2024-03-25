@@ -42,17 +42,6 @@ def parse_args(print=False):
         return
     return parser.parse_args()
 
-# TODO: remove this function
-def start_camera_simulator():
-    try:
-        p = subprocess.Popen(['./camera-simulator.sh'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = p.communicate()
-        if stderr:
-            print("Error starting the camera simulator: %s" % stderr)
-        return stdout.strip(), stderr, p.returncode
-    except:
-        print('Error running camera simulator: ' + traceback.format_exc())
-
 
 def docker_compose_containers(command, compose_files=[], compose_pre_args="", compose_post_args="", env_vars=os.environ.copy()):
     try:
