@@ -199,7 +199,7 @@ def main(mode, stream_index=0, file="", min_detections=15,
             for key in obj:
                 if isinstance(obj[key], Counter):
                     if key == "text":
-                        obj[key] = {k:v for k, v in obj[key].items()
+                        obj[key] = {k: v for k, v in obj[key].items()
                                     if v > args.min_detections}
                     summary_obj[key] = list(obj[key].items())
                     obj[key] = list(obj[key].items())
