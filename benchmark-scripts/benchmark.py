@@ -64,7 +64,7 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
             print("Error bringing %s the compose files: %s" %
                   (command, stderr))
         return stdout.strip(), stderr, p.returncode
-    except:
+    except subprocess.CalledProcessError:
         print("Exception bringing %s the compose files: %s" %
               (command, traceback.format_exc()))
 

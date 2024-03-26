@@ -67,8 +67,9 @@ def print_object(obj):
 def process(results, reclassify_interval):
     product_key = ("classification_layer_name:efficientnet-b0/model/head/" +
                    "dense/BiasAdd/Add")
-    text_keys = ["inference_layer_name:logits", 
-                 "inference_layer_name:shadow/LSTMLayers/transpose_time_major",
+    text_keys = ["inference_layer_name:logits",
+                 "inference_layer_name:shadow/LSTMLayers/" +
+                 "transpose_time_major",
                  "inference_layer_name:shadow/LSTMLayers/Reshape_1"]
     detections = {}
     objects = {}
@@ -137,7 +138,8 @@ def process_file(results_root, file, stream_index, reclassify_interval):
     if file:
         filename = file
     else:
-        filename = os.path.join(results_root, "/r{}.jsonl".format(stream_index))
+        filename = os.path.join(results_root, "/r{}.jsonl".
+                                format(stream_index))
     with open(filename, "r") as file:
         global frame_count
         for line in file:
@@ -162,9 +164,11 @@ def on_connect(client, user_data, _unused_flags, return_code):
         print("Error {} connecting to broker".format(return_code))
         sys.exit(1)
 
+
 def on_message(_unused_client, user_data, msg):
     results = json.loads(msg.payload)
     process(results)
+
 
 def process_mqtt(broker_address, broker_port):
     client = mqtt.Client("Gulfstream")
