@@ -5,7 +5,7 @@
 '''
 
 import mock
-import subprocess
+import subprocess  # nosec B404
 import unittest
 import benchmark
 

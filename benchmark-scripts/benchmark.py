@@ -7,7 +7,7 @@
 import argparse
 import os
 import shlex
-import subprocess
+import subprocess  # nosec B404
 import time
 import traceback
 
@@ -57,7 +57,7 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
         compose_args = shlex.split(compose_string)
 
         p = subprocess.Popen(compose_args, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, env=env_vars)
+                             stderr=subprocess.PIPE, env=env_vars)  # nosec B404
         stdout, stderr = p.communicate()
 
         if p.returncode and stderr:
