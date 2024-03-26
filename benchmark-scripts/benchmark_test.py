@@ -25,8 +25,9 @@ class Testing(unittest.TestCase):
 
     def test_docker_compose_containers_success(self):
         mock_popen = Testing.MockPopen()
-        mock_popen.communicate = mock.Mock(return_value=('',
-               '1Starting camera: rtsp://127.0.0.1:8554/camera_0 from *.mp4'))
+        mock_popen.communicate = mock.Mock(
+            return_value=('', '1Starting camera: rtsp://127.0.0.1:8554/' +
+                          'camera_0 from *.mp4'))
         mock_returncode = mock.PropertyMock(return_value=0)
         type(mock_popen).returncode = mock_returncode
 
@@ -34,7 +35,8 @@ class Testing(unittest.TestCase):
         res = benchmark.docker_compose_containers('up')
 
         self.assertEqual(res, ('',
-            '1Starting camera: rtsp://127.0.0.1:8554/camera_0 from *.mp4', 0))
+                               '1Starting camera: rtsp://127.0.0.1:8554/' +
+                               'camera_0 from *.mp4', 0))
         mock_popen.communicate.assert_called_once_with()
         mock_returncode.assert_called()
 

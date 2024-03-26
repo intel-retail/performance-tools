@@ -65,13 +65,16 @@ def print_object(obj):
 
 
 def process(results, reclassify_interval):
-    product_key = "classification_layer_name:efficientnet-b0/model/head/dense/BiasAdd/Add"
-    text_keys = ["inference_layer_name:logits", "inference_layer_name:shadow/LSTMLayers/transpose_time_major",
+    product_key = ("classification_layer_name:efficientnet-b0/model/head/" +
+                   "dense/BiasAdd/Add")
+    text_keys = ["inference_layer_name:logits", 
+                 "inference_layer_name:shadow/LSTMLayers/transpose_time_major",
                  "inference_layer_name:shadow/LSTMLayers/Reshape_1"]
     detections = {}
     objects = {}
     inferenceCounts.detection += 1
-    # Needed for additional entries like non-inference results like {"resolution":{"height":2160,"width":3840},"timestamp":201018476}
+    # Needed for additional entries like non-inference results like
+    # {"resolution":{"height":2160,"width":3840},"timestamp":201018476}
     if "objects" not in results:
         return
     for result in results["objects"]:
@@ -112,7 +115,8 @@ def process(results, reclassify_interval):
                     objects[parent_id]["text"].append(text)
 
     print("- Frame {}".format(frame_count))
-    for obj in sorted(objects.values(), key=lambda obj: obj["bounding_box"]["x_min"]):
+    for obj in sorted(objects.values(),
+                      key=lambda obj: obj["bounding_box"]["x_min"]):
         print_object(obj)
         update_tracked_object(obj,tracked_objects)
 
@@ -149,7 +153,8 @@ def process_file(results_root, file, stream_index, reclassify_interval):
 def on_connect(client, user_data, _unused_flags, return_code):
     if return_code == 0:
         args = user_data
-        print("Connected to broker at {}:{}".format(args.broker_address, args.broker_port))
+        print("Connected to broker at {}:{}".format(args.broker_address,
+                                                    args.broker_port))
         topic = "gulfstream/results_{}".format(args.stream_index)
         print("Subscribing to topic {}".format(topic))
         client.subscribe(topic)
@@ -169,7 +174,9 @@ def process_mqtt(broker_address, broker_port):
     client.loop_forever()
 
 
-def main(mode, stream_index=0, file="", min_detections=15, reclassify_interval=1, broker_address="localhost", broker_port=1883, results_root=os.path.join(os.path.curdir, 'results')):
+def main(mode, stream_index=0, file="", min_detections=15,
+         reclassify_interval=1, broker_address="localhost", broker_port=1883,
+         results_root=os.path.join(os.path.curdir, 'results')):
     try:
         if mode == "file":
             process_file(results_root, file, stream_index, reclassify_interval)
@@ -188,7 +195,8 @@ def main(mode, stream_index=0, file="", min_detections=15, reclassify_interval=1
             for key in obj:
                 if isinstance(obj[key], Counter):
                     if key == "text":
-                        obj[key] = {k:v for k, v in obj[key].items() if v > args.min_detections}
+                        obj[key] = {k:v for k, v in obj[key].items()
+                                    if v > args.min_detections}
                     summary_obj[key] = list(obj[key].items())
                     obj[key] = list(obj[key].items())
                     if key == "barcode":
@@ -202,18 +210,21 @@ def main(mode, stream_index=0, file="", min_detections=15, reclassify_interval=1
             if detections >= args.min_detections:
                 print_object(obj)
                 text_count += len(obj["text"])
-                # should this be a deep copy here? or does the summary actually have all the right values?
+                # should this be a deep copy here?
+                # or does the summary actually have all the right values?
                 summary.append(summary_obj)
         results["summary"] = summary
         # what should total_objects be?
         results["total_objects"] = len(obj)
         results["total_text_count"] = text_count
         results["total_barcode_count"] = barcode_count
-        with open(os.path.join(results_root, 'meta_summary.json'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(results_root, 'meta_summary.json'),
+                  'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=4)
     except:
         print(traceback.format_exc())
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.mode, args.file, args.min_detections, args.reclassify_interval, args.broker_address, args.broker_port)
+    main(args.mode, args.file, args.min_detections, args.reclassify_interval,
+         args.broker_address, args.broker_port)

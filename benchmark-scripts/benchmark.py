@@ -47,11 +47,13 @@ def parse_args(print=False):
 
 
 def docker_compose_containers(command, compose_files=[], compose_pre_args="",
-                            compose_post_args="", env_vars=os.environ.copy()):
+                              compose_post_args="",
+                              env_vars=os.environ.copy()):
     try:
         files = " -f ".join(compose_files)
         compose_string = ("docker compose %s -f %s %s %s" %
-                         (compose_pre_args, files, command, compose_post_args))
+                          (compose_pre_args, files, command,
+                           compose_post_args))
         compose_args = shlex.split(compose_string)
 
         p = subprocess.Popen(compose_args, stdout=subprocess.PIPE,
@@ -59,7 +61,8 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
         stdout, stderr = p.communicate()
 
         if p.returncode and stderr:
-            print("Error bringing %s the compose files: %s" % (command, stderr))
+            print("Error bringing %s the compose files: %s" %
+                  (command, stderr))
         return stdout.strip(), stderr, p.returncode
     except:
         print("Exception bringing %s the compose files: %s" %
