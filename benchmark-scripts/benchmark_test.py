@@ -15,15 +15,18 @@ class Testing(unittest.TestCase):
     class MockPopen(object):
         def __init__(self):
             pass
+
         def communicate(self, input=None):
             pass
+
         @property
         def returncode(self):
             pass
 
     def test_docker_compose_containers_success(self):
         mock_popen = Testing.MockPopen()
-        mock_popen.communicate = mock.Mock(return_value=('', '1Starting camera: rtsp://127.0.0.1:8554/camera_0 from *.mp4'))
+        mock_popen.communicate = mock.Mock(return_value=('',
+                                                         '1Starting camera: rtsp://127.0.0.1:8554/camera_0 from *.mp4'))
         mock_returncode = mock.PropertyMock(return_value=0)
         type(mock_popen).returncode = mock_returncode
 
@@ -46,6 +49,7 @@ class Testing(unittest.TestCase):
         self.assertEqual(res, ('', b'an error occurred', 1))
         mock_popen.communicate.assert_called_once_with()
         mock_returncode.assert_called()
+
 
 if __name__ == '__main__':
     unittest.main()
