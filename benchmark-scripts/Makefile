@@ -1,3 +1,5 @@
+# Copyright © 2024 Intel Corporation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 build-all: build-benchmark build-xpu build-igt
 
