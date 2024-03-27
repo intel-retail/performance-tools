@@ -85,6 +85,8 @@ def main():
     compose_files = []
     for file in my_args.compose_file:
         compose_files.append(os.path.abspath(file))
+
+    # add the benchmark docker compose file
     compose_files.append(os.path.abspath(os.path.join(
         os.curdir, '..', 'docker', 'docker-compose.yaml')))
     env_vars = os.environ.copy()
