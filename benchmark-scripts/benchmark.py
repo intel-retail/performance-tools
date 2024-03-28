@@ -13,6 +13,14 @@ import traceback
 
 
 def parse_args(print=False):
+    '''
+    parses the input arguments for the command line
+    Args:
+        print: boolean on whether to print the help or not
+    Returns:
+        None if print is True
+        parser object if the input arguments are parsed
+    '''
     parser = argparse.ArgumentParser(
         prog='benchmark',
         description='runs benchmarking using docker compose')
@@ -49,6 +57,21 @@ def parse_args(print=False):
 def docker_compose_containers(command, compose_files=[], compose_pre_args="",
                               compose_post_args="",
                               env_vars=os.environ.copy()):
+    '''
+    helper function to bring up or down containers using the provided params
+
+    Args:
+        command: valid docker compose command like "up" or "down"
+        compose_files: list of docker compose files
+        compose_pre_args: string of arguments called before the command
+        compose_post_args: string of arguments called after the command
+        env_vars: environment variables to use in the shell for calling compose
+
+    Returns:
+        stdout: console output from Popen when running the command
+        stderr: console error from Popen when running the command
+        returncode: Popen return code
+    '''
     try:
         files = " -f ".join(compose_files)
         compose_string = ("docker compose %s -f %s %s %s" %
@@ -72,6 +95,9 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
 
 
 def main():
+    '''
+    runs benchmarking using docker compose for the specified pipeline
+    '''
     my_args = parse_args()
 
     results_dir = os.path.abspath(my_args.results_dir)
