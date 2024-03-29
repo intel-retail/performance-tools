@@ -38,7 +38,7 @@ def parse_args(print=False):
                              'can be used multiple times')
     parser.add_argument('--retail_use_case_root',
                         default=os.path.join(
-                            os.curdir, '..', '..', 'retail-use-cases'),
+                            os.curdir, '..', '..'),
                         help='full path to the retail-use-cases repo root')
     if print:
         parser.print_help()
