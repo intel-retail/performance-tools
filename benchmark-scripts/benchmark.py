@@ -12,6 +12,7 @@ import time
 import traceback
 import csv
 import json
+import stream_density
 
 
 def parse_args(print=False):
@@ -28,18 +29,22 @@ def parse_args(print=False):
         description='runs benchmarking using docker compose')
     parser.add_argument('--pipelines', type=int, default=1,
                         help='number of pipelines')
-    parser.add_argument('--target_fps', type=int, default=None,
+    parser.add_argument('--target_fps', type=float, default=None,
                         help='stream density target FPS')
-    # TODO: add variable for stream density increment when implementing
+    parser.add_argument('--density_increment', type=int, default=None,
+                        help='pipeline increment number for ' +
+                             'stream density. If not specified, then ' +
+                             ' it will be dynamically adjusted.')
     parser.add_argument('--results_dir',
                         default=os.path.join(os.curdir, 'results'),
                         help='full path to the desired directory for logs ' +
                              'and results')
     parser.add_argument('--duration', type=int, default=30,
                         help='time in seconds, not needed when ' +
-                             '--stream_density is specified')
-    parser.add_argument('--init_duration', type=int, default=5,
-                        help='time in seconds')
+                             '--target_fps is specified')
+    parser.add_argument('--init_duration', type=int, default=20,
+                        help='initial time in seconds before ' +
+                             'starting metric data collection')
     # TODO: change target_device to an env variable in docker compose
     parser.add_argument('--target_device', default='CPU',
                         help='desired running platform [cpu|core|xeon|dgpu.x]')
@@ -53,7 +58,14 @@ def parse_args(print=False):
     if print:
         parser.print_help()
         return
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.density_increment and not args.target_fps:
+        parser.error(
+            '--density_increment needs to have --target_fps be specified')
+    if args.compose_file is None:
+        parser.error(
+            '--compose_file is empty, please provide compose files')
+    return args
 
 
 def docker_compose_containers(command, compose_files=[], compose_pre_args="",
@@ -146,20 +158,31 @@ def main():
     env_vars["DEVICE"] = my_args.target_device
     retail_use_case_root = os.path.abspath(my_args.retail_use_case_root)
     env_vars["RETAIL_USE_CASE_ROOT"] = retail_use_case_root
-    if my_args.pipelines > 0:
-        env_vars["PIPELINE_COUNT"] = str(my_args.pipelines)
+    if my_args.target_fps:
+        # stream density mode:
+        print('starting stream density...')
+        env_vars["TARGET_FPS"] = str(my_args.target_fps)
+        if my_args.density_increment:
+            env_vars["PIPELINE_INC"] = str(my_args.density_increment)
+        env_vars["INIT_DURATION"] = str(my_args.init_duration)
+        stream_density.run_stream_density(env_vars, compose_files)
+    else:
+        # regular --pipelines mode:
+        if my_args.pipelines > 0:
+            env_vars["PIPELINE_COUNT"] = str(my_args.pipelines)
+        docker_compose_containers("up", compose_files=compose_files,
+                                  compose_post_args="-d",
+                                  env_vars=env_vars)
+        print("Waiting for init duration to complete...")
+        time.sleep(my_args.init_duration)
 
-    docker_compose_containers("up", compose_files=compose_files,
-                              compose_post_args="-d", env_vars=env_vars)
-    print("Waiting for init duration to complete...")
-    time.sleep(my_args.init_duration)
-
-    # use duration to sleep
-    print("Waiting for %d seconds for workload to finish" % my_args.duration)
-    time.sleep(my_args.duration)
-    # stop all containers and camera-simulator
-    docker_compose_containers("down", compose_files=compose_files,
-                              env_vars=env_vars)
+        # use duration to sleep
+        print(
+        "Waiting for %d seconds for workload to finish" % my_args.duration)
+        time.sleep(my_args.duration)
+        # stop all containers and camera-simulator
+        docker_compose_containers("down", compose_files=compose_files,
+                                  env_vars=env_vars)
 
     # collect metrics using copy-platform-metrics
     print("workloads finished...")
