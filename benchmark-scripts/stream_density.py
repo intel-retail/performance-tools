@@ -89,6 +89,30 @@ def check_non_empty_result_logs(num_pipelines, results_dir, max_retries=5):
             time.sleep(1)
 
 
+def get_latest_pipeline_logs(num_pipelines, pipeline_log_files):
+    '''
+    obtains a list of the latest pipeline log files based on
+    the timestamps of the files and only returns num_pipelines
+    files if number of pipeline log files is more than num_pipelines
+    Args:
+        num_pipelines: number of currently running pipelines
+        pipeline_log_files: all matching pipeline log files
+    Return:
+        latest_files: number of num_pipelines files based on
+        the timestamps of files if number of pipeline log files
+        is more than num_pipelines; otherwise whatever the number
+        of the matching files will be returned
+    '''
+    timestamp_files = [
+        (file, os.path.getmtime(file)) for file in pipeline_log_files]
+    # sort timestamp_file by time in descending order
+    sorted_timestamp = sorted(
+        timestamp_files, key=lambda x: x[1], reverse=True)
+    latest_files = [
+        file for file, mtime in sorted_timestamp[:num_pipelines]]
+    return latest_files
+
+
 def calculate_total_fps(num_pipelines, results_dir):
     '''
     calculates averaged fps from the current running num_pipelines
@@ -103,7 +127,10 @@ def calculate_total_fps(num_pipelines, results_dir):
     total_fps_per_stream = 0
     matching_files = glob.glob(os.path.join(
         results_dir, 'pipeline*_*.log'))
-    for pipeline_file in matching_files:
+    print(f"DEBUG: num. of matching_files = {len(matching_files)}")
+    latest_pipeline_logs = get_latest_pipeline_logs(
+        num_pipelines, matching_files)
+    for pipeline_file in latest_pipeline_logs:
         print(f"DEBUG: in for loop pipeline_file:{pipeline_file}")
         with open(pipeline_file, "r") as file:
             stream_fps_list = [
@@ -130,6 +157,10 @@ def run_stream_density(env_vars, compose_files):
     Args:
         env_vars: the dict of current environment variables
         compose_files: the list of compose files to run pipelines
+    Returns:
+        num_pipelines: maximum number of pipelines to achieve TARGET_FPS
+        meet_target_fps: boolean to indicate whether the returned
+        number_pipelines can achieve the TARGET_FPS goal or not
     '''
     if not is_env_non_empty(env_vars, RESULTS_DIR_KEY):
         raise ArgumentError('ERROR: missing ' +
@@ -173,8 +204,8 @@ def run_stream_density(env_vars, compose_files):
         # stream density main logic:
         in_decrement = False
         increments = 1
-        meet_fps = False
-        while not meet_fps:
+        meet_target_fps = False
+        while not meet_target_fps:
             total_fps_per_stream = 0.0
             total_fps = 0.0
             env_vars["PIPELINE_COUNT"] = str(num_pipelines)
@@ -203,7 +234,7 @@ def run_stream_density(env_vars, compose_files):
                     # otherwise, we will try to adjust increments dynamically
                     # based on the rate of {total_fps_per_stream}
                     # and $TARGET_FPS
-                    if env_vars[PIPELINE_INCR_KEY]:
+                    if is_env_non_empty(env_vars, PIPELINE_INCR_KEY):
                         increments = int(env_vars[PIPELINE_INCR_KEY])
                     else:
                         increments = int(
@@ -221,16 +252,18 @@ def run_stream_density(env_vars, compose_files):
                 if total_fps_per_stream >= TARGET_FPS:
                     print(f"found maximum number of pipelines to reach "
                           f"target fps {TARGET_FPS}")
-                    meet_fps = True
+                    meet_target_fps = True
                     print(f"Max stream density achieved for target FPS "
                           f"{TARGET_FPS} is {num_pipelines}")
+                    increments = 0
                     print("Finished stream density benchmarking")
                 else:
                     if num_pipelines <= 1:
                         print(f"already reached num pipeline 1, and the "
                               f"fps per stream is {total_fps_per_stream} "
                               f"but target FPS is {TARGET_FPS}")
-                        meet_fps = False
+                        meet_target_fps = False
+                        break
                     else:
                         print(f"decrementing number of pipelines "
                               f"{num_pipelines} by 1")
@@ -248,3 +281,4 @@ def run_stream_density(env_vars, compose_files):
         # reset sys stdout and err back to it's own
         sys.stdout = orig_stdout
         sys.stderr = orig_stderr
+    return num_pipelines, meet_target_fps
