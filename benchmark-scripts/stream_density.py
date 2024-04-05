@@ -17,6 +17,7 @@ PIPELINE_INCR_KEY = "PIPELINE_INC"
 INIT_DURATION_KEY = "INIT_DURATION"
 RESULTS_DIR_KEY = "RESULTS_DIR"
 
+
 class ArgumentError(Exception):
     pass
 
@@ -74,10 +75,11 @@ def check_non_empty_result_logs(num_pipelines, results_dir, max_retries=5):
                     pipelines may have been failed...""")
         print("INFO: checking presence of all pipeline log files... " +
               "retry: {}".format(retry))
-        matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log'))
+        matching_files = glob.glob(os.path.join(
+            results_dir, 'pipeline*_*.log'))
         if len(matching_files) >= num_pipelines and all([
-            os.path.isfile(file) and os.path.getsize(file) > 0
-            for file in matching_files]):
+              os.path.isfile(file) and os.path.getsize(file) > 0
+              for file in matching_files]):
             print('found all non-empty log files')
             break
         else:
@@ -85,6 +87,7 @@ def check_non_empty_result_logs(num_pipelines, results_dir, max_retries=5):
             print('still having some missing or empty log files')
             retry += 1
             time.sleep(1)
+
 
 def calculate_total_fps(num_pipelines, results_dir):
     '''
@@ -100,11 +103,11 @@ def calculate_total_fps(num_pipelines, results_dir):
     total_fps_per_stream = 0
     matching_files = glob.glob(os.path.join(
         results_dir, 'pipeline*_*.log'))
-    
     for pipeline_file in matching_files:
         print(f"DEBUG: in for loop pipeline_file:{pipeline_file}")
         with open(pipeline_file, "r") as file:
-            stream_fps_list = [fps for fps in 
+            stream_fps_list = [
+                fps for fps in
                 file.readlines()[-20:] if 'na' not in fps]
         if not stream_fps_list:
             print(f"WARN: No FPS returned from {pipeline_file}")
@@ -140,9 +143,9 @@ def run_stream_density(env_vars, compose_files):
             'ERROR: stream density target fps should be greater than 0')
 
     if is_env_non_empty(env_vars, PIPELINE_INCR_KEY) and int(
-        env_vars[PIPELINE_INCR_KEY]) <= 0:
-       raise ArgumentError(
-        'ERROR: stream density increments should be greater than 0')
+            env_vars[PIPELINE_INCR_KEY]) <= 0:
+        raise ArgumentError(
+            'ERROR: stream density increments should be greater than 0')
 
     if not is_env_non_empty(env_vars, INIT_DURATION_KEY):
         env_vars[INIT_DURATION_KEY] = "120"
@@ -175,7 +178,7 @@ def run_stream_density(env_vars, compose_files):
             total_fps_per_stream = 0.0
             total_fps = 0.0
             env_vars["PIPELINE_COUNT"] = str(num_pipelines)
-            print("Starting num. of pipelines: %d" %num_pipelines)
+            print("Starting num. of pipelines: %d" % num_pipelines)
             benchmark.docker_compose_containers(
                 "up", compose_files=compose_files,
                 compose_post_args="-d", env_vars=env_vars)
@@ -190,15 +193,16 @@ def run_stream_density(env_vars, compose_files):
             total_fps, total_fps_per_stream = calculate_total_fps(
                 num_pipelines, results_dir)
             print('Total FPS:', total_fps)
-            print(f"Total averaged FPS per stream: {total_fps_per_stream} "
+            print(
+                f"Total averaged FPS per stream: {total_fps_per_stream} "
                 f"for {num_pipelines} pipeline(s)")
             if not in_decrement:
                 if total_fps_per_stream >= TARGET_FPS:
-                # if the increments hint from $PIPELINE_INC is not empty
-                # we will use it as the increments
-                # otherwise, we will try to adjust increments dynamically 
-                # based on the rate of {total_fps_per_stream}
-                # and $TARGET_FPS
+                    # if the increments hint from $PIPELINE_INC is not empty
+                    # we will use it as the increments
+                    # otherwise, we will try to adjust increments dynamically
+                    # based on the rate of {total_fps_per_stream}
+                    # and $TARGET_FPS
                     if env_vars[PIPELINE_INCR_KEY]:
                         increments = int(env_vars[PIPELINE_INCR_KEY])
                     else:

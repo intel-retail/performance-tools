@@ -178,7 +178,8 @@ def main():
 
         # use duration to sleep
         print(
-        "Waiting for %d seconds for workload to finish" % my_args.duration)
+            "Waiting for %d seconds for workload to finish"
+            % my_args.duration)
         time.sleep(my_args.duration)
         # stop all containers and camera-simulator
         docker_compose_containers("down", compose_files=compose_files,
