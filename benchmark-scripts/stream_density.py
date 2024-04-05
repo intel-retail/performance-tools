@@ -4,14 +4,8 @@
 * SPDX-License-Identifier: Apache-2.0
 '''
 
-import argparse
 import os
-import shlex
-import subprocess  # nosec B404
 import time
-import traceback
-import csv
-import json
 import benchmark
 import glob
 import sys
