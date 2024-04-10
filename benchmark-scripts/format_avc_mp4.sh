@@ -26,17 +26,17 @@ then
         exit 1
 fi
 
-if [ ! -z "$3" ]
+if [ -n "$3" ]
 then
 	WIDTH=$3
 fi
 
-if [ ! -z "$4" ]
+if [ -n "$4" ]
 then
         HEIGHT=$4
 fi
 
-if [ ! -z "$5" ]
+if [ -n "$5" ]
 then
         FPS=$5
 fi
@@ -60,18 +60,18 @@ then
 fi
 
 result=${1/.mp4/"-$WIDTH-$FPS-bench.mp4"}
-if [ -f ../sample-media/$result ]
+if [ -f "../sample-media/$result" ]
 then
 	echo "Skipping...conversion was already done for ../sample-media/$result."
 	exit 0
 fi
 
-if [ ! -f ../sample-media/$1 ] && [ ! -f ../sample-media/$result ]
+if [ ! -f "../sample-media/$1" ] && [ ! -f "../sample-media/$result" ]
 then	
-	wget -O ../sample-media/$1 $2
+	wget -O "../sample-media/$1" "$2"
 fi
 
-if [ ! -f ../sample-media/$1 ]
+if [ ! -f "../sample-media/$1" ]
 then
 	echo "ERROR: Can not find video file or 
 	"
