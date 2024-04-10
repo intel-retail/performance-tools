@@ -18,11 +18,13 @@ import stream_density
 def parse_args(print=False):
     '''
     parses the input arguments for the command line
+
     Args:
         print: boolean on whether to print the help or not
+
     Returns:
-        None if print is True
-        parser object if the input arguments are parsed
+        None: if print is True
+        parser_object: if the input arguments are parsed
     '''
     parser = argparse.ArgumentParser(
         prog='benchmark',
@@ -111,11 +113,10 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
 def convert_csv_results_to_json(results_dir, log_name):
     '''
     convert the csv output to json format for readability
+
     Args:
-        results_dir: directory holding the benchmark results
-        log_name: first portion of the log you would like to search for
-    Returns:
-        None if print is True
+        results_dir: directory containing the benchmark results
+        log_name: first portion of the log filename to search for
     '''
     for entry in os.scandir(results_dir):
         if entry.name.startswith(log_name) and entry.is_file():
