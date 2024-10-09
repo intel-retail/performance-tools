@@ -24,7 +24,9 @@ build-minikube: build
 	# cd ./xpum && minikube image build -t benchmark:xpum -f ./Dockerfile . && cd ../
 
 helm-convert:
-	log_dir=/tmp/results kompose -f ./docker-compose.yaml convert -o ./kubernetes -c
+	log_dir=/tmp/results kompose -f ./docker-compose.yaml convert -o edge-video-performance-evaluation-tool  -c
+	sed -i 's/version: [0-9].[0-9].[0-9]/version: 3.2.0/' ./edge-video-performance-evaluation-tool/Chart.yaml
+	helm package edge-video-performance-evaluation-tool
 
 run-minikube-demo: build-minikube
 	log_dir=/tmp/results kompose -f docker-compose.yaml convert -o kubernetes/ && \
