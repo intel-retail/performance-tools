@@ -5,14 +5,18 @@
 
 name: trivy_image_scan
 
-on: workflow_dispatch
-
+on: 
+  workflow_dispatch:
+  pull_request: 
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
-    trivy_image_scan_benchmark:
+    trivy_image_scan_platform:
       permissions:
         contents: read # for actions/checkout to fetch code
         security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
@@ -27,12 +31,12 @@ jobs:
 
         - name: Build an image from Dockerfile
           run: |
-            echo "running make build benchmark"
-            make build-benchmark
+            echo "running make build platform benchmark"
+            cd docker && make build-platform
         - name: Run Trivy vulnerability scanner
           uses: aquasecurity/trivy-action@7b7aa264d83dc58691451798b4d117d53d21edfe
           with:
-            image-ref: 'benchmark:dev'
+            image-ref: 'benchmark:platform'
             format: 'template'
             template: '@/contrib/sarif.tpl'
             output: 'trivy-results.sarif'
@@ -43,7 +47,7 @@ jobs:
           with:
             sarif_file: 'trivy-results.sarif'
 
-    trivy_image_scan_xpu:
+    trivy_image_scan_xpum:
       permissions:
         contents: read # for actions/checkout to fetch code
         security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
@@ -58,12 +62,12 @@ jobs:
 
         - name: Build an image from Dockerfile
           run: |
-            echo "running make build benchmark"
-            make build-xpu
+            echo "running make build xpum benchmark"
+            cd docker && make build-xpum
         - name: Run Trivy vulnerability scanner
           uses: aquasecurity/trivy-action@7b7aa264d83dc58691451798b4d117d53d21edfe
           with:
-            image-ref: 'benchmark:xpu'
+            image-ref: 'benchmark:xpum'
             format: 'template'
             template: '@/contrib/sarif.tpl'
             output: 'trivy-results.sarif'
@@ -89,8 +93,8 @@ jobs:
 
         - name: Build an image from Dockerfile
           run: |
-            echo "running make build benchmark"
-            make build-igt
+            echo "running make build igt benchmark"
+            cd docker && make build-igt
         - name: Run Trivy vulnerability scanner
           uses: aquasecurity/trivy-action@7b7aa264d83dc58691451798b4d117d53d21edfe
           with:

@@ -1,27 +1,32 @@
 name: Build docker images
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  pull_request: 
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
-  build_benchmark:
+  build_platform:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
             uses: actions/checkout@v3
-          - name: Make benchmark Docker images
+          - name: Make platform Docker images
             run: |
-              make build-benchmark
-  build_XPU:
+              cd docker && make build-platform
+  build_XPUM:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
             uses: actions/checkout@v3
-          - name: Make xpu Docker images
+          - name: Make xpum Docker images
             run: |
-              make build-xpu
+              cd docker && make build-xpum
   build_IGT:
       runs-on: ubuntu-latest
       steps:
@@ -29,4 +34,4 @@ jobs:
             uses: actions/checkout@v3
           - name: Build igt Docker images
             run: |
-              make build-igt
+              cd docker && make build-igt
