@@ -434,15 +434,15 @@ class PCMExtractor(KPIExtractor):
 KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "camera":FPSExtractor,
                        "pipeline":PIPELINEFPSExtractor,
-                       "(?:^r).*\.jsonl$":PIPELINLastModifiedExtractor,
+                       r"(?:^r).*\.jsonl$": PIPELINLastModifiedExtractor,
                        "cpu_usage.log":CPUUsageExtractor, 
                        "memory_usage.log":MemUsageExtractor, 
                        "memory_bandwidth.csv":MemBandwidthExtractor,
                        "disk_bandwidth.log":DiskBandwidthExtractor,
                        "power_usage.log":PowerUsageExtractor,
                        "pcm.csv":PCMExtractor,
-                       "(?:^xpum).*\.json$":XPUMUsageExtractor,
-                       '(?:^igt).*\\.json': GPUUsageExtractor, }
+                       r"(?:^xpum).*\.json$":XPUMUsageExtractor,
+                       r"(?:^igt).*\\.json": GPUUsageExtractor, }
 
 def add_parser():
     parser = argparse.ArgumentParser(description='Consolidate data')

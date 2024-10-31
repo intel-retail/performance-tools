@@ -168,9 +168,10 @@ def main():
         env_vars["INIT_DURATION"] = str(my_args.init_duration)
         max_num_pipelines, met_fps = stream_density.run_stream_density(
             env_vars, compose_files)
+        input_target_fps = env_vars["TARGET_FPS"]
         print(
             f"Max number of pipelines in stream density found for "
-            f"target FPS {env_vars["TARGET_FPS"]} is "
+            f"target FPS = {input_target_fps} is "
             f"{max_num_pipelines}. met target fps? {met_fps}")
     else:
         # regular --pipelines mode:

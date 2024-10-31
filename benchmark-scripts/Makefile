@@ -4,7 +4,10 @@
 
 ROOT_DIRECTORY ?= results
 
-consolidate:
+init-packages:
+	pip3 install -r requirements.txt
+
+consolidate: init-packages
 	python3 consolidate_multiple_run_of_metrics.py --root_directory $(ROOT_DIRECTORY)/ --output $(ROOT_DIRECTORY)/summary.csv
 
 python-test:
