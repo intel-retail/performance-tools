@@ -441,7 +441,7 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "disk_bandwidth.log":DiskBandwidthExtractor,
                        "power_usage.log":PowerUsageExtractor,
                        "pcm.csv":PCMExtractor,
-                       r"(?:^xpum).*\.json$":XPUMUsageExtractor,
+                       r"(?:^xpum).*\.json$": XPUMUsageExtractor,
                        r"(?:^igt).*\\.json": GPUUsageExtractor, }
 
 def add_parser():
