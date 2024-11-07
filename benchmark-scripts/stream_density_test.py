@@ -369,9 +369,13 @@ class Testing(unittest.TestCase):
     @patch('stream_density.run_pipeline_iterations')
     @patch('stream_density.benchmark.docker_compose_containers')
     @patch('builtins.open', new_callable=mock_open)
-    def test_run_stream_density(self,
-        mock_open_file, mock_docker_compose,
-        mock_run_pipeline_iterations, mock_validate_env):
+    def test_run_stream_density(
+        self,
+        mock_open_file,
+        mock_docker_compose,
+        mock_run_pipeline_iterations,
+        mock_validate_env
+    ):
         test_cases = [
             # Test case 1: Valid scenario where all parameters are correct
             {
