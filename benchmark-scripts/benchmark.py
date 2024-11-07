@@ -31,8 +31,20 @@ def parse_args(print=False):
         description='runs benchmarking using docker compose')
     parser.add_argument('--pipelines', type=int, default=1,
                         help='number of pipelines')
-    parser.add_argument('--target_fps', type=float, default=None,
-                        help='stream density target FPS')
+    # allowed multiple inputs for target_fps: e.g.: --target_fps 14.95 8.5
+    parser.add_argument('--target_fps', type=float, nargs='*', default=None,
+                        help='stream density target FPS; ' +
+                        'can take multiple values for multiple different ' +
+                        'pipelines with 1-to-1 mapping with pipeline ' +
+                        'container name via --container_names')
+    # when multiple target_fps is specified, the 1-to-1 mapping between
+    # target_fps and container_names are used; examples are given below
+    # --target_fps 14.95 8.5 14.95 \
+    # --container_names container1 container2 container3
+    parser.add_argument('--container_names', type=str, nargs='*',
+                        default=None, help='stream density target ' +
+                        'container names; used together with --target_fps ' +
+                        'to have 1-to-1 mapping with the pipeline')
     parser.add_argument('--density_increment', type=int, default=None,
                         help='pipeline increment number for ' +
                              'stream density. If not specified, then ' +
@@ -138,6 +150,20 @@ def main():
     '''
     my_args = parse_args()
 
+    target_fps_list = my_args.target_fps if my_args.target_fps else []
+    container_names_list = (
+        my_args.container_names
+        if my_args.container_names else []
+    )
+
+    if (len(target_fps_list) > 1
+            and len(target_fps_list) != len(container_names_list)):
+        raise ValueError(
+            "For stream density, the number of target FPS "
+            "values must match the number of "
+            "container names provided."
+        )
+
     results_dir = os.path.abspath(my_args.results_dir)
     if not os.path.exists(results_dir):
         os.mkdir(results_dir)
@@ -159,20 +185,39 @@ def main():
     env_vars["DEVICE"] = my_args.target_device
     retail_use_case_root = os.path.abspath(my_args.retail_use_case_root)
     env_vars["RETAIL_USE_CASE_ROOT"] = retail_use_case_root
-    if my_args.target_fps:
-        # stream density mode:
+    if my_args.density_increment:
+        env_vars["PIPELINE_INC"] = str(my_args.density_increment)
+    if len(target_fps_list) > 1 and container_names_list:
+        # stream density for multiple target FPS values and containers
+        print('starting stream density for multiple running pipelines...')
+        results = stream_density.run_stream_density(env_vars, compose_files,
+                                                    target_fps_list,
+                                                    container_names_list)
+        for result in results:
+            target_fps, container_name, num_pipelines, met_fps = result
+            print(
+                f"Completed stream density for target FPS: {target_fps} in "
+                f"container: {container_name}. "
+                f"Max pipelines: {num_pipelines}, "
+                f"Met target FPS? {met_fps}")
+    elif len(target_fps_list) == 1:
+        # single target_fps stream density mode:
         print('starting stream density...')
-        env_vars["TARGET_FPS"] = str(my_args.target_fps)
+        env_vars["TARGET_FPS"] = str(target_fps_list[0])
         if my_args.density_increment:
             env_vars["PIPELINE_INC"] = str(my_args.density_increment)
         env_vars["INIT_DURATION"] = str(my_args.init_duration)
-        max_num_pipelines, met_fps = stream_density.run_stream_density(
-            env_vars, compose_files)
-        input_target_fps = env_vars["TARGET_FPS"]
+        # use a default name since there is no
+        # --container_names provided in this case
+        container_name = (container_names_list[0]
+                          if container_names_list else "default_container")
+        results = stream_density.run_stream_density(
+            env_vars, compose_files, [target_fps_list[0]], [container_name])
+        target_fps, container_name, num_pipelines, met_fps = results[0]
         print(
-            f"Max number of pipelines in stream density found for "
-            f"target FPS = {input_target_fps} is "
-            f"{max_num_pipelines}. met target fps? {met_fps}")
+            f"Max number of pipelines in stream density found for target "
+            f"FPS = {target_fps} is {num_pipelines}. "
+            f"Met target FPS? {met_fps}")
     else:
         # regular --pipelines mode:
         if my_args.pipelines > 0:
