@@ -237,9 +237,6 @@ def run_pipeline_iterations(
                 num_pipelines, results_dir, container_name, 50)
         except ValueError as e:
             print(f"ERROR: {e}")
-            benchmark.docker_compose_containers(
-                "down", compose_files=compose_files,
-                env_vars=env_vars)
             # since we are not able to get all non-empty log
             # the best we can do is to use the previous num_pipelines
             # before this current num_pipelines
@@ -361,27 +358,35 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                 env_vars[TARGET_FPS_KEY] = str(target_fps)
                 env_vars[CONTAINER_NAME_KEY] = container_name
                 # stream density main logic:
-                num_pipelines, meet_target_fps = run_pipeline_iterations(
-                    env_vars, compose_files, results_dir,
-                    container_name, target_fps
-                )
-                results.append(
-                    (
-                        target_fps,
-                        container_name,
-                        num_pipelines,
-                        meet_target_fps
+                try:
+                    num_pipelines, meet_target_fps = run_pipeline_iterations(
+                        env_vars, compose_files, results_dir,
+                        container_name, target_fps
                     )
-                )
+                    results.append(
+                        (
+                            target_fps,
+                            container_name,
+                            num_pipelines,
+                            meet_target_fps
+                        )
+                    )
+                finally:
+                    # better to compose-down before the next iteration
+                    benchmark.docker_compose_containers(
+                        "down",
+                        compose_files=compose_files,
+                        env_vars=env_vars
+                    )
+                    # give some time for processes to clean up:
+                    time.sleep(10)
+
             # end of for-loop
             print("stream_density done!")
     except Exception as ex:
         print(f'ERROR: found exception: {ex}')
         raise
     finally:
-        benchmark.docker_compose_containers(
-            "down", compose_files=compose_files,
-            env_vars=env_vars)
         # reset sys stdout and err back to it's own
         sys.stdout = orig_stdout
         sys.stderr = orig_stderr

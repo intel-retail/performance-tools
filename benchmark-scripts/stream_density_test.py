@@ -10,13 +10,13 @@ import unittest
 from unittest.mock import patch, mock_open, MagicMock
 import stream_density
 from stream_density import validate_and_setup_env, ArgumentError
+from stream_density import (
+    RESULTS_DIR_KEY,
+    PIPELINE_INCR_KEY,
+    INIT_DURATION_KEY,
+    DEFAULT_TARGET_FPS
+)
 import os
-
-
-RESULTS_DIR_KEY = "RESULTS_DIR"
-PIPELINE_INCR_KEY = "PIPELINE_INC"
-INIT_DURATION_KEY = "INIT_DURATION"
-DEFAULT_TARGET_FPS = 14.95
 
 
 class Testing(unittest.TestCase):
@@ -365,6 +365,7 @@ class Testing(unittest.TestCase):
                         meet_target_fps,
                         test_case["expected_meet_target_fps"])
 
+    @patch('time.sleep', return_value=None)
     @patch('stream_density.validate_and_setup_env')
     @patch('stream_density.run_pipeline_iterations')
     @patch('stream_density.benchmark.docker_compose_containers')
@@ -374,7 +375,8 @@ class Testing(unittest.TestCase):
         mock_open_file,
         mock_docker_compose,
         mock_run_pipeline_iterations,
-        mock_validate_env
+        mock_validate_env,
+        mock_sleep
     ):
         test_cases = [
             # Test case 1: Valid scenario where all parameters are correct
@@ -390,7 +392,9 @@ class Testing(unittest.TestCase):
                 "expected_results": [
                     (15.0, "container1", 5, True),
                     (25.0, "container2", 7, False)
-                ]
+                ],
+                # Expected number of compose down calls
+                "expected_down_call_count": 2
             },
             # Test case 2: Exception occurs during run_pipeline_iterations()
             {
@@ -399,12 +403,16 @@ class Testing(unittest.TestCase):
                 "target_fps_list": [15.0],
                 "container_names_list": ["container1"],
                 "run_pipeline_side_effect": Exception("Test exception"),
-                "expect_exception": True
+                "expect_exception": True,
+                # Expected number of compose down calls
+                # even if an exception occurs, it should call down
+                "expected_down_call_count": 1
             }
         ]
 
         for i, test_case in enumerate(test_cases):
             with self.subTest(f"Test case {i + 1}"):
+                mock_docker_compose.reset_mock()
                 env_vars = test_case["env_vars"].copy()
                 compose_files = test_case["compose_files"]
                 target_fps_list = test_case["target_fps_list"]
@@ -438,10 +446,18 @@ class Testing(unittest.TestCase):
                     env_vars, target_fps_list
                 )
 
-                # Verify that docker_compose_containers is called with
-                # "down" at the end
-                mock_docker_compose.assert_called_with(
-                    "down", compose_files=compose_files, env_vars=env_vars
+                expected_down_call_count = test_case[
+                    "expected_down_call_count"
+                ]
+                actual_down_calls = [
+                    call for call in mock_docker_compose.call_args_list
+                    if call[0][0] == 'down'
+                ]
+                self.assertEqual(
+                    len(actual_down_calls),
+                    expected_down_call_count,
+                    f"Expected {expected_down_call_count} 'down' calls, "
+                    f"but found {len(actual_down_calls)}"
                 )
 
 
