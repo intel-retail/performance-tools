@@ -19,10 +19,3 @@ python-integration:
 # for more up-to-date coverage, run python unit test first
 python-coverage: python-test
 	coverage report -m
-
-# this one is just used for easier deployment of changes on benchmark-scripts
-# to loss-prevention LOCALLY without reaching out to github
-# assuming loss-prevention/ repo is already git cloned before and is
-# in the same parallel directory structure as performance-tools/ repo
-copy-to-loss-prevention:
-	cp -r ./ ../../loss-prevention/performance-tools/benchmark-scripts/
