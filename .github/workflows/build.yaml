@@ -15,7 +15,7 @@ jobs:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
-            uses: actions/checkout@v3
+            uses: actions/checkout@v4
           - name: Make platform Docker images
             run: |
               cd docker && make build-platform
@@ -23,7 +23,7 @@ jobs:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
-            uses: actions/checkout@v3
+            uses: actions/checkout@v4
           - name: Make xpum Docker images
             run: |
               cd docker && make build-xpum
@@ -31,7 +31,7 @@ jobs:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
-            uses: actions/checkout@v3
+            uses: actions/checkout@v4
           - name: Build igt Docker images
             run: |
               cd docker && make build-igt
