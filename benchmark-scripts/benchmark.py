@@ -69,6 +69,14 @@ def parse_args(print=False):
                         default=os.path.join(
                             os.curdir, '..', '..'),
                         help='full path to the retail-use-cases repo root')
+    parser.add_argument('--docker_log', default=None, 
+                        help='docker container name to get logs of and save to file')
+    parser.add_argument('--parser_script', 
+                        default=os.path.join(os.path.curdir, 'parse_csv_to_json.py'), 
+                        help='full path to the parsing script')
+    parser.add_argument('--parser_args', default='-k device -k igt', 
+                        help='arguments to pass to the parser script, ' + 
+                        'pass args with spaces in quotes: "args with spaces"')
     if print:
         parser.print_help()
         return
@@ -121,27 +129,6 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
         print("Exception bringing %s the compose files: %s" %
               (command, traceback.format_exc()))
 
-
-def convert_csv_results_to_json(results_dir, log_name):
-    '''
-    convert the csv output to json format for readability
-
-    Args:
-        results_dir: directory containing the benchmark results
-        log_name: first portion of the log filename to search for
-    '''
-    for entry in os.scandir(results_dir):
-        if entry.name.startswith(log_name) and entry.is_file():
-            print(entry.path)
-            csv_file = open(entry.path)
-            json_file = json.dumps([dict(r) for r in csv.DictReader(csv_file)])
-            device_name = entry.name.split('.')
-            json_result_path = os.path.join(
-                results_dir, device_name[0]+".json")
-            with open(json_result_path, "w") as outfile:
-                outfile.write(json_file)
-            outfile.close()
-            csv_file.close()
 
 
 def main():
@@ -225,14 +212,32 @@ def main():
         docker_compose_containers("up", compose_files=compose_files,
                                   compose_post_args="-d",
                                   env_vars=env_vars)
-        print("Waiting for init duration to complete...")
+        print("Waiting for %ds init duration to complete" % my_args.init_duration)
         time.sleep(my_args.init_duration)
 
         # use duration to sleep
         print(
-            "Waiting for %d seconds for workload to finish"
+            "Waiting for %ds for workload to finish"
             % my_args.duration)
         time.sleep(my_args.duration)
+        
+        # grab the container logs if necessary
+        if my_args.docker_log:
+            try:
+                docker_log = ("docker logs %s" % my_args.docker_log)
+                docker_log_args = shlex.split(docker_log)
+                log_file = os.path.join(my_args.results_dir, "%s.log" % my_args.docker_log)    
+                print("writing docker log to %s" % log_file)
+                with open(log_file, 'wb') as f:
+                    subprocess.run(docker_log_args,
+                                   stdout=f,
+                                   stderr=subprocess.STDOUT,
+                                   check=True, env=env_vars)  # nosec B404, B603
+            
+            except subprocess.CalledProcessError:
+                print("Exception getting the docker log %s: %s" %
+                    (my_args.docker_log, traceback.format_exc()))        
+        
         # stop all containers and camera-simulator
         docker_compose_containers("down", compose_files=compose_files,
                                   env_vars=env_vars)
@@ -240,10 +245,18 @@ def main():
     # collect metrics using copy-platform-metrics
     print("workloads finished...")
     # TODO: implement results handling based on what pipeline is run
-    # convert xpum results to json
-    convert_csv_results_to_json(results_dir, 'device')
-    # convert igt results to json
-    convert_csv_results_to_json(results_dir, 'igt')
+    try:
+        parser_string = ("python %s -d %s %s" % (my_args.parser_script, results_dir, my_args.parser_args))
+        print("======DEBUG======: %s" % parser_string)
+        parser_args = shlex.split(parser_string)
+
+        subprocess.run(parser_args,
+                       stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE,
+                       check=True, env=env_vars)  # nosec B404, B603
+    except subprocess.CalledProcessError:
+        print("Exception starting the parser %s: %s" %
+              (my_args.parser_script, traceback.format_exc()))
 
 if __name__ == '__main__':
     main()
