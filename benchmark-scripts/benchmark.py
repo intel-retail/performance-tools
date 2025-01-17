@@ -1,5 +1,5 @@
 '''
-* Copyright (C) 2024 Intel Corporation.
+* Copyright (C) 2025 Intel Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
 '''
@@ -73,7 +73,7 @@ def parse_args(print=False):
                         help='docker container name to get logs of and save to file')
     parser.add_argument('--parser_script', 
                         default=os.path.join(os.path.curdir, 'parse_csv_to_json.py'), 
-                        help='full path to the parsing script')
+                        help='full path to the parsing script to obtain FPS')
     parser.add_argument('--parser_args', default='-k device -k igt', 
                         help='arguments to pass to the parser script, ' + 
                         'pass args with spaces in quotes: "args with spaces"')
@@ -251,12 +251,10 @@ def main():
         parser_args = shlex.split(parser_string)
 
         subprocess.run(parser_args,
-                       stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE,
                        check=True, env=env_vars)  # nosec B404, B603
     except subprocess.CalledProcessError:
-        print("Exception starting the parser %s: %s" %
-              (my_args.parser_script, traceback.format_exc()))
+        print("Exception calling %s\n parser %s: %s" %
+              (parser_string, my_args.parser_script, traceback.format_exc()))
 
 if __name__ == '__main__':
     main()

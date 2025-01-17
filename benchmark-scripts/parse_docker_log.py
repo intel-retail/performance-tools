@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import os
+import pprint
 
 def parse_args():
 
@@ -32,7 +33,7 @@ def parse_fps_from_log(results_dir, log_name):
         log_name: first portion of the log filename to search for
     '''
     for entry in os.scandir(results_dir):
-        if entry.name.startswith(log_name) and entry.is_file():
+        if entry.name.startswith(log_name) and entry.is_file() and not entry.name.endswith("json"):
             print(entry.path)
             fps_info = dict()
             count = 0
@@ -56,7 +57,7 @@ def parse_fps_from_log(results_dir, log_name):
                 total_fps += fps_info[sum]
                 fps_info.pop(sum)
             fps_info["avg_fps"] = total_fps/(count * len(sum_list))
-            # TODO: how do we want to save the FPS information?
+            pprint.pp(fps_info)
             outfile = os.path.join(os.path.split(entry.path)[0], "%s.json" % entry.name.split(".")[0])
             with open(outfile, "w") as output:
                 json.dump(fps_info, output)
