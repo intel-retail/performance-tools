@@ -33,6 +33,7 @@ jobs:
         - name: Install pep8
           run: |
               sudo apt install pep8
+              shell: /usr/bin/bash -e (0)
         - name: Install hadolint
           env:
             HADOLINT_VERSION: v1.16.3

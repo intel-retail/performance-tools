@@ -247,7 +247,7 @@ def main():
     # TODO: implement results handling based on what pipeline is run
     try:
         parser_string = ("python %s -d %s %s" % (my_args.parser_script, results_dir, my_args.parser_args))
-        print("======DEBUG======: %s" % parser_string)
+        # print("======DEBUG======: %s" % parser_string)
         parser_args = shlex.split(parser_string)
 
         subprocess.run(parser_args,
