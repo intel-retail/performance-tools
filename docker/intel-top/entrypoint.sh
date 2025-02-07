@@ -19,7 +19,8 @@ IFS='@'
 for device in $devices
 do
     # shellcheck disable=SC2086 # Intended work splitting
-    dev=$(echo $device | awk '{print $1}')
+    # the real device card number should be from card= instead of the device index string itself
+    dev=$(echo $device | awk '{print $NF}' | sed -E 's/.*?card=//')
     echo "$dev"
     # shellcheck disable=SC2086 # Intended work splitting
     deviceId=$(echo $device | awk '{print $2}' | sed -E 's/.*?device=//' | cut -f1 -d",")

@@ -1,5 +1,5 @@
 '''
-* Copyright (C) 2024 Intel Corporation.
+* Copyright (C) 2025 Intel Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
 '''
@@ -31,8 +31,20 @@ def parse_args(print=False):
         description='runs benchmarking using docker compose')
     parser.add_argument('--pipelines', type=int, default=1,
                         help='number of pipelines')
-    parser.add_argument('--target_fps', type=float, default=None,
-                        help='stream density target FPS')
+    # allowed multiple inputs for target_fps: e.g.: --target_fps 14.95 8.5
+    parser.add_argument('--target_fps', type=float, nargs='*', default=None,
+                        help='stream density target FPS; ' +
+                        'can take multiple values for multiple different ' +
+                        'pipelines with 1-to-1 mapping with pipeline ' +
+                        'container name via --container_names')
+    # when multiple target_fps is specified, the 1-to-1 mapping between
+    # target_fps and container_names are used; examples are given below
+    # --target_fps 14.95 8.5 14.95 \
+    # --container_names container1 container2 container3
+    parser.add_argument('--container_names', type=str, nargs='*',
+                        default=None, help='stream density target ' +
+                        'container names; used together with --target_fps ' +
+                        'to have 1-to-1 mapping with the pipeline')
     parser.add_argument('--density_increment', type=int, default=None,
                         help='pipeline increment number for ' +
                              'stream density. If not specified, then ' +
@@ -57,6 +69,14 @@ def parse_args(print=False):
                         default=os.path.join(
                             os.curdir, '..', '..'),
                         help='full path to the retail-use-cases repo root')
+    parser.add_argument('--docker_log', default=None, 
+                        help='docker container name to get logs of and save to file')
+    parser.add_argument('--parser_script', 
+                        default=os.path.join(os.path.curdir, 'parse_csv_to_json.py'), 
+                        help='full path to the parsing script to obtain FPS')
+    parser.add_argument('--parser_args', default='-k device -k igt', 
+                        help='arguments to pass to the parser script, ' + 
+                        'pass args with spaces in quotes: "args with spaces"')
     if print:
         parser.print_help()
         return
@@ -110,33 +130,26 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
               (command, traceback.format_exc()))
 
 
-def convert_csv_results_to_json(results_dir, log_name):
-    '''
-    convert the csv output to json format for readability
-
-    Args:
-        results_dir: directory containing the benchmark results
-        log_name: first portion of the log filename to search for
-    '''
-    for entry in os.scandir(results_dir):
-        if entry.name.startswith(log_name) and entry.is_file():
-            print(entry.path)
-            csv_file = open(entry.path)
-            json_file = json.dumps([dict(r) for r in csv.DictReader(csv_file)])
-            device_name = entry.name.split('.')
-            json_result_path = os.path.join(
-                results_dir, device_name[0]+".json")
-            with open(json_result_path, "w") as outfile:
-                outfile.write(json_file)
-            outfile.close()
-            csv_file.close()
-
 
 def main():
     '''
     runs benchmarking using docker compose for the specified pipeline
     '''
     my_args = parse_args()
+
+    target_fps_list = my_args.target_fps if my_args.target_fps else []
+    container_names_list = (
+        my_args.container_names
+        if my_args.container_names else []
+    )
+
+    if (len(target_fps_list) > 1
+            and len(target_fps_list) != len(container_names_list)):
+        raise ValueError(
+            "For stream density, the number of target FPS "
+            "values must match the number of "
+            "container names provided."
+        )
 
     results_dir = os.path.abspath(my_args.results_dir)
     if not os.path.exists(results_dir):
@@ -159,19 +172,39 @@ def main():
     env_vars["DEVICE"] = my_args.target_device
     retail_use_case_root = os.path.abspath(my_args.retail_use_case_root)
     env_vars["RETAIL_USE_CASE_ROOT"] = retail_use_case_root
-    if my_args.target_fps:
-        # stream density mode:
+    if my_args.density_increment:
+        env_vars["PIPELINE_INC"] = str(my_args.density_increment)
+    if len(target_fps_list) > 1 and container_names_list:
+        # stream density for multiple target FPS values and containers
+        print('starting stream density for multiple running pipelines...')
+        results = stream_density.run_stream_density(env_vars, compose_files,
+                                                    target_fps_list,
+                                                    container_names_list)
+        for result in results:
+            target_fps, container_name, num_pipelines, met_fps = result
+            print(
+                f"Completed stream density for target FPS: {target_fps} in "
+                f"container: {container_name}. "
+                f"Max pipelines: {num_pipelines}, "
+                f"Met target FPS? {met_fps}")
+    elif len(target_fps_list) == 1:
+        # single target_fps stream density mode:
         print('starting stream density...')
-        env_vars["TARGET_FPS"] = str(my_args.target_fps)
+        env_vars["TARGET_FPS"] = str(target_fps_list[0])
         if my_args.density_increment:
             env_vars["PIPELINE_INC"] = str(my_args.density_increment)
         env_vars["INIT_DURATION"] = str(my_args.init_duration)
-        max_num_pipelines, met_fps = stream_density.run_stream_density(
-            env_vars, compose_files)
+        # use a default name since there is no
+        # --container_names provided in this case
+        container_name = (container_names_list[0]
+                          if container_names_list else "default_container")
+        results = stream_density.run_stream_density(
+            env_vars, compose_files, [target_fps_list[0]], [container_name])
+        target_fps, container_name, num_pipelines, met_fps = results[0]
         print(
-            f"Max number of pipelines in stream density found for "
-            f"target FPS {env_vars["TARGET_FPS"]} is "
-            f"{max_num_pipelines}. met target fps? {met_fps}")
+            f"Max number of pipelines in stream density found for target "
+            f"FPS = {target_fps} is {num_pipelines}. "
+            f"Met target FPS? {met_fps}")
     else:
         # regular --pipelines mode:
         if my_args.pipelines > 0:
@@ -179,14 +212,32 @@ def main():
         docker_compose_containers("up", compose_files=compose_files,
                                   compose_post_args="-d",
                                   env_vars=env_vars)
-        print("Waiting for init duration to complete...")
+        print("Waiting for %ds init duration to complete" % my_args.init_duration)
         time.sleep(my_args.init_duration)
 
         # use duration to sleep
         print(
-            "Waiting for %d seconds for workload to finish"
+            "Waiting for %ds for workload to finish"
             % my_args.duration)
         time.sleep(my_args.duration)
+        
+        # grab the container logs if necessary
+        if my_args.docker_log:
+            try:
+                docker_log = ("docker logs %s" % my_args.docker_log)
+                docker_log_args = shlex.split(docker_log)
+                log_file = os.path.join(my_args.results_dir, "%s.log" % my_args.docker_log)    
+                print("writing docker log to %s" % log_file)
+                with open(log_file, 'wb') as f:
+                    subprocess.run(docker_log_args,
+                                   stdout=f,
+                                   stderr=subprocess.STDOUT,
+                                   check=True, env=env_vars)  # nosec B404, B603
+            
+            except subprocess.CalledProcessError:
+                print("Exception getting the docker log %s: %s" %
+                    (my_args.docker_log, traceback.format_exc()))        
+        
         # stop all containers and camera-simulator
         docker_compose_containers("down", compose_files=compose_files,
                                   env_vars=env_vars)
@@ -194,10 +245,16 @@ def main():
     # collect metrics using copy-platform-metrics
     print("workloads finished...")
     # TODO: implement results handling based on what pipeline is run
-    # convert xpum results to json
-    convert_csv_results_to_json(results_dir, 'device')
-    # convert igt results to json
-    convert_csv_results_to_json(results_dir, 'igt')
+    try:
+        parser_string = ("python %s -d %s %s" % (my_args.parser_script, results_dir, my_args.parser_args))
+        # print("======DEBUG======: %s" % parser_string)
+        parser_args = shlex.split(parser_string)
+
+        subprocess.run(parser_args,
+                       check=True, env=env_vars)  # nosec B404, B603
+    except subprocess.CalledProcessError:
+        print("Exception calling %s\n parser %s: %s" %
+              (parser_string, my_args.parser_script, traceback.format_exc()))
 
 if __name__ == '__main__':
     main()
