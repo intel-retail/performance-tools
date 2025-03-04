@@ -4,7 +4,7 @@
 
 ## Documentation
 
-- [Open source code for setup, install, and execution of software, with complete developer documentation](https://intel-retail.github.io/performance-tools/index)
+- [Open source code for setup, install, and execution of software, with complete developer documentation](https://intel-retail.github.io/documentation/performance-tools/benchmark.html)
 - [Developer focused website to enable developers to engage and build our partner community](https://www.intel.com/content/www/us/en/developer/articles/reference-implementation/automated-self-checkout.html)
 
 ## Disclaimer
