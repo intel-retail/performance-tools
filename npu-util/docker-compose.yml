@@ -1,0 +1,18 @@
+#
+# Copyright (C) 2025 Intel Corporation.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+
+services:
+  npu-util:
+    image: python:3.13-slim
+    command: ["python3", "-u", "/tmp/npu_logger.py"]
+    environment:
+      - NPU_LOG=/tmp/results/npu_log.csv
+    network_mode: "host"
+    volumes:
+      - /sys/devices:/sys/devices
+      - ./results:/tmp/results
+      - ./npu_logger.py:/tmp/npu_logger.py
