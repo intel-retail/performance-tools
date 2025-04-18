@@ -22,7 +22,7 @@ def read_npu_runtime(path):
     
 def main():
     print(f"Logging NPU usage to {NPU_LOG} (Ctrl+C to stop)...")
-    with open(NPU_LOG, "w") as f:
+    with open(NPU_LOG, "w", buffering=1) as f:
         f.write("timestamp,percent_usage\n")
 
         prev_runtime = read_npu_runtime(NPU_PATH)

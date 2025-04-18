@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2024 Intel Corporation.
+# Copyright (C) 2025 Intel Corporation.
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -20,6 +20,16 @@ services:
     privileged: true
     volumes:
       - $log_dir:/tmp/results
+  npu-util:
+    image: python:3.13-slim
+    command: ["python3", "-u", "/tmp/npu_logger.py"]
+    environment:
+      - NPU_LOG=/tmp/results/npu_log.csv
+    network_mode: "host"
+    volumes:
+      - /sys/devices:/sys/devices
+      - $log_dir:/tmp/results
+      - ${RETAIL_USE_CASE_ROOT:-..}/performance-tools/docker/npu-util/npu_logger.py:/tmp/npu_logger.py
   # xpum:
   #   image: benchmark:xpum
   #   container_name: xpum
