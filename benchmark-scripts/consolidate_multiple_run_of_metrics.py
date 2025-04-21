@@ -22,6 +22,7 @@ import csv
 
 # constants
 AVG_CPU_USAGE_CONSTANT = "CPU Utilization %"
+AVG_NPU_USAGE_CONSTANT = "NPU Utilization %"
 AVG_GPU_USAGE_CONSTANT = "GPU Utilization %"
 AVG_GPU_MEM_USAGE_CONSTANT = "Memory Utilization %"
 AVG_GPU_COMPUTE_USAGE_CONSTANT = "Compute Utilization %"
@@ -71,7 +72,19 @@ class CPUUsageExtractor(KPIExtractor):
 
     def return_blank(self):
         return {AVG_CPU_USAGE_CONSTANT: "NA"}
-        
+
+class NPUUsageExtractor(KPIExtractor):
+    #overriding abstract method
+    def extract_data(self, log_file_path):
+        print("parsing NPU csv")
+        npu_df = pd.read_csv(log_file_path)
+        if len(npu_df['percent_usage']) > 0:
+            return {AVG_NPU_USAGE_CONSTANT: mean(npu_df['percent_usage'])}
+        else:
+            return {AVG_NPU_USAGE_CONSTANT: "NA"}
+
+    def return_blank(self):
+        return {AVG_NPU_USAGE_CONSTANT: "NA"}
 
 class GPUUsageExtractor(KPIExtractor):
     _USAGE_PATTERN = "Render/3D/0"
@@ -453,7 +466,8 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "camera":FPSExtractor,
                        "pipeline":PIPELINEFPSExtractor,
                        r"(?:^r).*\.jsonl$": PIPELINLastModifiedExtractor,
-                       "cpu_usage.log":CPUUsageExtractor, 
+                       "cpu_usage.log":CPUUsageExtractor,
+                       "npu_usage.csv":NPUUsageExtractor,
                        "memory_usage.log":MemUsageExtractor, 
                        "memory_bandwidth.csv":MemBandwidthExtractor,
                        "disk_bandwidth.log":DiskBandwidthExtractor,

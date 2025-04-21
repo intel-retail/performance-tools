@@ -10,7 +10,7 @@ import time
 
 # use lspci | grep -i npu to get the right npu path for the system
 NPU_PATH = os.getenv("NPU_PATH", "/sys/devices/pci0000:00/0000:00:0b.0/power/runtime_active_time")
-NPU_LOG = os.getenv("NPU_LOG", "npu_log.csv")
+NPU_LOG = os.getenv("NPU_LOG", "npu_usage.csv")
 
 def read_npu_runtime(path):
     try:

@@ -24,7 +24,7 @@ services:
     image: python:3.13-slim
     command: ["python3", "-u", "/tmp/npu_logger.py"]
     environment:
-      - NPU_LOG=/tmp/results/npu_log.csv
+      - NPU_LOG=/tmp/results/npu_usage.csv
     network_mode: "host"
     volumes:
       - /sys/devices:/sys/devices
