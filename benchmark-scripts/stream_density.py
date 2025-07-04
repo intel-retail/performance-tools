@@ -9,7 +9,7 @@ import time
 import benchmark
 import glob
 import sys
-
+import re
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -121,7 +121,62 @@ def get_latest_pipeline_logs(num_pipelines, pipeline_log_files):
         file for file, mtime in sorted_timestamp[:num_pipelines]]
     return latest_files
 
-
+def calculate_pipeline_latency(num_pipelines, results_dir, container_name):
+    total_pipeline_latency = 0.0
+    total_pipeline_latency_per_stream = 0.0
+    matching_files = glob.glob(os.path.join(
+        results_dir, f'gst-launch*_{container_name}.log'))
+    print(f"DEBUG: num. of gst launch matching_files = {len(matching_files)}")
+    latest_latency_logs = get_latest_pipeline_logs(
+        num_pipelines, matching_files)
+    
+    pipeline_count = 0
+    for latency_file in latest_latency_logs:
+        pipeline_latency = 0.0
+        try:
+            with open(latency_file) as f:
+                last_latency_line = None
+                chunk_size = 8192  # Read in 8KB chunks
+                buffer = ""
+                
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    
+                    buffer += chunk
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]  # Keep incomplete line in buffer
+                    
+                    # Process complete lines
+                    for line in lines[:-1]:
+                        if "latency_tracer_pipeline" in line:
+                            last_latency_line = line
+                
+                # Process any remaining content in buffer
+                if buffer and "latency_tracer_pipeline" in buffer:
+                    last_latency_line = buffer
+                
+                if last_latency_line:
+                    match = re.search(r'avg=\(double\)([0-9]*\.?[0-9]+)', last_latency_line)
+                    if match:
+                        pipeline_latency = float(match.group(1))
+            
+            if pipeline_latency > 0:
+                total_pipeline_latency += pipeline_latency
+                pipeline_count += 1
+                print(f"DEBUG: Added latency {pipeline_latency} from {latency_file}")
+                
+        except (IOError, ValueError) as e:
+            print(f"WARN: Error processing {latency_file}: {e}")
+            continue
+    
+    if pipeline_count > 0:
+        total_pipeline_latency_per_stream = total_pipeline_latency / pipeline_count
+    
+    print(f"DEBUG: Total latency: {total_pipeline_latency}, Per stream: {total_pipeline_latency_per_stream}")
+    return total_pipeline_latency, total_pipeline_latency_per_stream
+    
 def calculate_total_fps(num_pipelines, results_dir, container_name):
     '''
     calculates averaged fps from the current running num_pipelines
@@ -252,7 +307,15 @@ def run_pipeline_iterations(
         print('Total FPS:', total_fps)
         print(f"Total averaged FPS per stream: {total_fps_per_stream} "
               f"for {num_pipelines} pipeline(s)")
-
+        
+        total_pipeline_latency, total_pipeline_latency_per_stream = calculate_pipeline_latency(
+            num_pipelines, results_dir, container_name)
+        print(f"Total Pipeline Latency: {total_pipeline_latency} "
+        f"for {num_pipelines} pipeline(s)")
+        print(f"Total Pipeline Latency per stream: "
+        f"{total_pipeline_latency_per_stream} "
+        f"for {num_pipelines} pipeline(s)")
+        
         if not in_decrement:
             if total_fps_per_stream >= target_fps:
                 # if the increments hint from $PIPELINE_INC is not empty
