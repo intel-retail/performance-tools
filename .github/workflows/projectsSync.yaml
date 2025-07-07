@@ -13,7 +13,7 @@ jobs:
     name: Add issue to project
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/add-to-project@ac1b7ef80a3b3060aa71c4a0c6ae4f9de6f5f82e
+      - uses: actions/add-to-project@v0.3.0
         with:
           project-url: https://github.com/orgs/intel-retail/projects/1
-          github-token: ${{ secrets.PROJECTS_PAT }}
+          github-token: ${{ secrets.GEN_PAT_TOKEN }}
