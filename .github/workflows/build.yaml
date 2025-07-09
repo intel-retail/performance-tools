@@ -11,27 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  build_platform:
+  build_benchmark:
       runs-on: ubuntu-latest
       steps:
           - name: Checkout code
             uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          - name: Make platform Docker images
+          - name: Make benchmark Docker images
             run: |
-              cd docker && make build-platform
-  build_XPUM:
-      runs-on: ubuntu-latest
-      steps:
-          - name: Checkout code
-            uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          - name: Make xpum Docker images
-            run: |
-              cd docker && make build-xpum
-  build_IGT:
-      runs-on: ubuntu-latest
-      steps:
-          - name: Checkout code
-            uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          - name: Build igt Docker images
-            run: |
-              cd docker && make build-igt
+              cd docker && make build-benchmark

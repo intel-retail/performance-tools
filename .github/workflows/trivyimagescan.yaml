@@ -32,73 +32,11 @@ jobs:
         - name: Build an image from Dockerfile
           run: |
             echo "running make build platform benchmark"
-            cd docker && make build-platform
+            cd docker && make build-benchmark
         - name: Run Trivy vulnerability scanner
           uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
           with:
-            image-ref: 'benchmark:platform'
-            format: 'template'
-            template: '@/contrib/sarif.tpl'
-            output: 'trivy-results.sarif'
-            severity: 'CRITICAL,HIGH'
-
-        - name: Upload Trivy scan results to GitHub Security tab
-          uses: github/codeql-action/upload-sarif@1b549b9259bda1cb5ddde3b41741a82a2d15a841
-          with:
-            sarif_file: 'trivy-results.sarif'
-
-    trivy_image_scan_xpum:
-      permissions:
-        contents: read # for actions/checkout to fetch code
-        security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
-        actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
-      name: trivy_image_scan
-      runs-on: "ubuntu-latest"
-      steps:
-        - name: Checkout code
-          uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          with:
-            ref: main
-
-        - name: Build an image from Dockerfile
-          run: |
-            echo "running make build xpum benchmark"
-            cd docker && make build-xpum
-        - name: Run Trivy vulnerability scanner
-          uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
-          with:
-            image-ref: 'benchmark:xpum'
-            format: 'template'
-            template: '@/contrib/sarif.tpl'
-            output: 'trivy-results.sarif'
-            severity: 'CRITICAL,HIGH'
-
-        - name: Upload Trivy scan results to GitHub Security tab
-          uses: github/codeql-action/upload-sarif@1b549b9259bda1cb5ddde3b41741a82a2d15a841
-          with:
-            sarif_file: 'trivy-results.sarif'
-    
-    trivy_image_scan_igt:
-      permissions:
-        contents: read # for actions/checkout to fetch code
-        security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
-        actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
-      name: trivy_image_scan
-      runs-on: "ubuntu-latest"
-      steps:
-        - name: Checkout code
-          uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          with:
-            ref: main
-
-        - name: Build an image from Dockerfile
-          run: |
-            echo "running make build igt benchmark"
-            cd docker && make build-igt
-        - name: Run Trivy vulnerability scanner
-          uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
-          with:
-            image-ref: 'benchmark:igt'
+            image-ref: 'benchmark:latest'
             format: 'template'
             template: '@/contrib/sarif.tpl'
             output: 'trivy-results.sarif'
