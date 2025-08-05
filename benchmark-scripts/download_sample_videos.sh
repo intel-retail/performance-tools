@@ -9,9 +9,9 @@
 WIDTH="${1:-1920}"
 HEIGHT="${2:-1080}"
 
-./format_avc_mp4.sh coca-cola-4465029.mp4 https://www.pexels.com/download/video/4465029 "$1" "$2" "$3"
+./format_avc_mp4.sh coca-cola-4465029.mp4 https://www.pexels.com/download/video/6891009 "$1" "$2" "$3"
 
-./format_avc_mp4.sh coca-cola-4465029.mp4 https://www.pexels.com/download/video/4465029 "$WIDTH" "$HEIGHT" "25"
+./format_avc_mp4.sh coca-cola-4465029.mp4 https://www.pexels.com/download/video/6891009 "$WIDTH" "$HEIGHT" "25"
 
 ./format_avc_mp4.sh supermarket_1.mp4 https://www.pexels.com/download/video/3249935 "$WIDTH" "$HEIGHT" "15"
 
