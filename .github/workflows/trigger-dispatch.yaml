@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        repos: [intel-retail/automated-self-checkout, intel-retail/loss-prevention]
+        repos: [intel-retail/automated-self-checkout, intel-retail/loss-prevention, intel-retail/order-accuracy]
     steps:
       - name: Send module update event to repo ${{ matrix.repos }}
         run: |
