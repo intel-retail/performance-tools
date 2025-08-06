@@ -8,8 +8,11 @@ on:
 jobs:
   trigger-module-update-event:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repos: [intel-retail/automated-self-checkout, intel-retail/loss-prevention, intel-retail/order-accuracy]
     steps:
-      - name: Send module update event to automated self checkout repo
+      - name: Send module update event to repo ${{ matrix.repos }}
         run: |
           echo "Sending repository dispatch event..."
           
@@ -17,7 +20,7 @@ jobs:
             -H "Accept: application/vnd.github.nebula-preview+json" \
             -H "Authorization: token ${{ secrets.EVENT_DISPATCH_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            -X POST https://api.github.com/repos/intel-retail/automated-self-checkout/dispatches \
+            -X POST https://api.github.com/repos/${{ matrix.repos }}/dispatches \
             -d '{"event_type":"dispatch-event","client_payload":{"unit":false,"integration":true}}' 2>&1)
           
           # Extract HTTP status code and response body
