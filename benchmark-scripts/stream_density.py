@@ -22,61 +22,6 @@ RESULTS_DIR_KEY = "RESULTS_DIR"
 DEFAULT_TARGET_FPS = 14.95
 MAX_GUESS_INCREMENTS = 5
 
-
-def test_memory_pressure_detection():
-    """
-    Test function to debug memory pressure detection.
-    """
-    print("=== Testing Memory Pressure Detection ===")
-    
-    # Test vmstat output
-    try:
-        vmstat_output = subprocess.run(['vmstat', '1', '2'], 
-                                     capture_output=True, text=True, timeout=5)
-        print(f"vmstat return code: {vmstat_output.returncode}")
-        print(f"vmstat stdout:\n{vmstat_output.stdout}")
-        print(f"vmstat stderr:\n{vmstat_output.stderr}")
-        
-        if vmstat_output.returncode == 0:
-            lines = vmstat_output.stdout.strip().split('\n')
-            print(f"Number of lines: {len(lines)}")
-            for i, line in enumerate(lines):
-                print(f"Line {i}: {line}")
-            
-            if len(lines) >= 2:
-                last_line = lines[-1].split()
-                print(f"Last line split: {last_line}")
-                print(f"Length of last line: {len(last_line)}")
-                
-                if len(last_line) >= 8:
-                    try:
-                        swap_in = int(last_line[6])
-                        swap_out = int(last_line[7])
-                        print(f"Parsed swap_in: {swap_in}, swap_out: {swap_out}")
-                    except (ValueError, IndexError) as e:
-                        print(f"Error parsing: {e}")
-    except Exception as e:
-        print(f"Error running vmstat: {e}")
-    
-    # Test PSI
-    psi_memory_path = "/proc/pressure/memory"
-    if os.path.exists(psi_memory_path):
-        try:
-            with open(psi_memory_path, 'r') as f:
-                content = f.read()
-                print(f"PSI content:\n{content}")
-        except Exception as e:
-            print(f"Error reading PSI: {e}")
-    else:
-        print("PSI not available")
-
-# Add this at the end of your file
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        test_memory_pressure_detection()
-
-
 class ArgumentError(Exception):
     pass
 
