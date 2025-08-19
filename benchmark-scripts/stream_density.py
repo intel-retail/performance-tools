@@ -22,6 +22,7 @@ RESULTS_DIR_KEY = "RESULTS_DIR"
 DEFAULT_TARGET_FPS = 14.95
 MAX_GUESS_INCREMENTS = 5
 
+
 class ArgumentError(Exception):
     pass
 
@@ -78,6 +79,13 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072):
             f"need {needed_mb}MB + {safety_buffer_mb}MB buffer"
         )
         return False
+    
+    if monitor_memory_pressure():
+        print(
+            f"Memory pressure detected. Not safe to add {increment} more pipelines."
+        )
+        return False
+    
     print(
         f"Memory check passed: {available_mb}MB available for {increment} new pipelines"
     )
@@ -409,18 +417,7 @@ def run_pipeline_iterations(
         
         if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb):
             print(
-                f"Aborting: Not enough memory to add {pipelines_to_add} more pipelines. "
-                f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
-            )
-            num_pipelines = num_pipelines - increments
-            if num_pipelines < 1:
-                num_pipelines = 1
-            return num_pipelines, False
-        
-        # --- Memory pressure check before scaling up ---
-        if pipelines_to_add > 0 and monitor_memory_pressure():
-            print(
-                f"Aborting: Memory pressure detected. Not safe to add {pipelines_to_add} more pipelines. "
+                f"Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
                 f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
             )
             num_pipelines = num_pipelines - increments
@@ -435,21 +432,6 @@ def run_pipeline_iterations(
             compose_post_args="-d", env_vars=env_vars)
         print("waiting for pipelines to settle...")
         time.sleep(INIT_DURATION)
-
-        # --- Monitor memory pressure during execution ---
-        if monitor_memory_pressure():
-            print(
-                f"Memory pressure detected during execution with {num_pipelines} pipelines. "
-                f"Reducing pipeline count."
-            )
-            # Stop current pipelines and reduce count
-            benchmark.docker_compose_containers(
-                "down", compose_files=compose_files, env_vars=env_vars)
-            time.sleep(5)
-            num_pipelines = num_pipelines - increments
-            if num_pipelines < 1:
-                num_pipelines = 1
-            return num_pipelines, False
         
         # note: before reading the pipeline log files
         # we want to give pipelines some time as the log files
