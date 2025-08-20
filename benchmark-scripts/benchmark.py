@@ -207,6 +207,7 @@ def main():
             f"Met target FPS? {met_fps}")
     else:
         # regular --pipelines mode:
+        stream_density.clean_up_pipeline_logs(results_dir)
         if my_args.pipelines > 0:
             env_vars["PIPELINE_COUNT"] = str(my_args.pipelines)
         docker_compose_containers("up", compose_files=compose_files,
