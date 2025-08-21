@@ -52,7 +52,10 @@ def clean_up_pipeline_logs(results_dir):
     Args:
         results_dir: directory holding the benchmark results
     '''
-    matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log'))
+    print('Cleaning logs')
+    matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log')) \
+        + glob.glob(os.path.join(results_dir, 'gst*_*.log')) \
+        + glob.glob(os.path.join(results_dir, 'rs*_*.jsonl'))
     if len(matching_files) > 0:
         for log_file in matching_files:
             os.remove(log_file)
