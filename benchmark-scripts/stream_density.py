@@ -5,11 +5,13 @@
 '''
 
 import os
+import subprocess
 import time
 import benchmark
 import glob
 import sys
 import re
+import psutil
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -23,6 +25,133 @@ MAX_GUESS_INCREMENTS = 5
 
 class ArgumentError(Exception):
     pass
+
+def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name):
+    """
+    Measures the memory usage (in MB) of a single pipeline instance.
+    Returns the memory usage in MB.
+    """
+    # Clean up any previous logs and containers
+    clean_up_pipeline_logs(results_dir)
+    benchmark.docker_compose_containers(
+        "down", compose_files=compose_files, env_vars=env_vars)
+    time.sleep(3)
+
+    # Measure available memory before starting the pipeline
+    before_mem = psutil.virtual_memory().available
+
+    # Start a single pipeline
+    env_vars["PIPELINE_COUNT"] = "1"
+    benchmark.docker_compose_containers(
+        "up", compose_files=compose_files, compose_post_args="-d", env_vars=env_vars)
+    print("Waiting for pipeline to stabilize...")
+    time.sleep(10)  # Let it stabilize
+
+    # Measure available memory after starting the pipeline
+    after_mem = psutil.virtual_memory().available
+
+    # Stop the pipeline
+    benchmark.docker_compose_containers(
+        "down", compose_files=compose_files, env_vars=env_vars)
+    time.sleep(3)
+
+    # Calculate usage in MB
+    usage_bytes = before_mem - after_mem
+    usage_mb = usage_bytes // (1024 * 1024)
+    print(f"Measured memory usage for one pipeline: {usage_mb} MB")
+    return usage_mb
+
+def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072):
+    """
+    Checks if the system has enough available memory to add 'increment' more pipelines.
+    Args:
+        increment: Number of new pipelines to add.
+        per_pipeline_mb: Memory required per pipeline (in MB).
+        safety_buffer_mb: Safety buffer in MB (default 3072 MB).
+    Returns:
+        True if enough memory is available, False otherwise.
+    """
+    available_mb = psutil.virtual_memory().available // (1024 * 1024)
+    needed_mb = increment * per_pipeline_mb
+    if available_mb < (needed_mb + safety_buffer_mb):
+        print(
+            f"Insufficient memory: {available_mb}MB available, "
+            f"need {needed_mb}MB + {safety_buffer_mb}MB buffer"
+        )
+        return False
+    
+    if monitor_memory_pressure():
+        print(
+            f"Memory pressure detected. Not safe to add {increment} more pipelines."
+        )
+        return False
+    
+    print(
+        f"Memory check passed: {available_mb}MB available for {increment} new pipelines"
+    )
+    return True
+
+def monitor_memory_pressure():
+    """
+    Monitors the system for memory pressure signals during execution.
+    
+    Checks for:
+    1. High swap activity (thrashing indicates pressure)
+    2. Memory pressure stall information (kernel 4.20+ with PSI enabled)
+    
+    Returns:
+        True if memory pressure detected, False otherwise.
+    """
+    try:
+        # Check swap activity (thrashing indicates pressure)
+        vmstat_output = subprocess.run(['vmstat', '1', '2'], 
+                                     capture_output=True, text=True, timeout=5)
+        if vmstat_output.returncode == 0:
+            lines = vmstat_output.stdout.strip().split('\n')
+            if len(lines) >= 2:
+                # Get the last line (most recent data)
+                last_line = lines[-1].split()
+                if len(last_line) >= 8:
+                    try:
+                        swap_in = int(last_line[6])   # si: swap pages read from disk
+                        swap_out = int(last_line[7])  # so: swap pages written to disk
+                        
+                        if swap_in > 1000 or swap_out > 1000:
+                            print(f"High swap activity detected: in={swap_in} out={swap_out}")
+                            return True
+                    except (ValueError, IndexError):
+                        print("WARN: Could not parse vmstat output for swap activity")
+        
+        # Check if Memory Pressure Stall Information is available (kernel 4.20+)
+        psi_memory_path = "/proc/pressure/memory"
+        if os.path.exists(psi_memory_path):
+            try:
+                with open(psi_memory_path, 'r') as f:
+                    content = f.read()
+                    
+                # Look for the "some" line which shows percentage of time processes are stalled
+                for line in content.split('\n'):
+                    if line.startswith('some'):
+                        # Parse: some avg10=2.04 avg60=1.23 avg300=0.85 total=12345678
+                        parts = line.split()
+                        for part in parts:
+                            if part.startswith('avg10='):
+                                stall_avg10 = float(part.split('=')[1])
+                                if stall_avg10 > 10.0:
+                                    print(f"Memory pressure detected: {stall_avg10}% stall time")
+                                    return True
+                                break
+            except (IOError, ValueError) as e:
+                print(f"WARN: Could not read memory pressure info: {e}")
+        
+        return False
+        
+    except subprocess.TimeoutExpired:
+        print("WARN: vmstat command timed out")
+        return False
+    except Exception as e:
+        print(f"WARN: Error monitoring memory pressure: {e}")
+        return False
 
 
 def is_env_non_empty(env_vars, key):
@@ -250,7 +379,7 @@ def validate_and_setup_env(env_vars, target_fps_list):
         env_vars[INIT_DURATION_KEY] = "120"
 
 
-def run_pipeline_iterations(
+def run_pipeline_iterations( 
         env_vars, compose_files, results_dir,
         container_name, target_fps):
     '''
@@ -272,6 +401,12 @@ def run_pipeline_iterations(
     increments = 1
     meet_target_fps = False
 
+    # Measure memory usage of a single pipeline
+    per_pipeline_memory_mb = measure_pipeline_memory(
+        env_vars.copy(), compose_files, results_dir, container_name
+    )
+    print(f"TEST: per_pipeline_memory_mb = {per_pipeline_memory_mb} MB")
+
     # clean up any residual pipeline log files before starts:
     clean_up_pipeline_logs(results_dir)
     print(
@@ -280,6 +415,19 @@ def run_pipeline_iterations(
         f"and INIT_DURATION set for {INIT_DURATION} seconds")
 
     while not meet_target_fps:
+        # --- Memory check before scaling up ---
+        pipelines_to_add = increments if increments > 0 else 0
+        
+        if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb):
+            print(
+                f"Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
+                f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
+            )
+            num_pipelines = num_pipelines - increments
+            if num_pipelines < 1:
+                num_pipelines = 1
+            return num_pipelines, False
+
         env_vars["PIPELINE_COUNT"] = str(num_pipelines)
         print(f"Starting num. of pipelines: {num_pipelines}")
         benchmark.docker_compose_containers(
@@ -287,6 +435,7 @@ def run_pipeline_iterations(
             compose_post_args="-d", env_vars=env_vars)
         print("waiting for pipelines to settle...")
         time.sleep(INIT_DURATION)
+        
         # note: before reading the pipeline log files
         # we want to give pipelines some time as the log files
         # producing could be lagging behind...
