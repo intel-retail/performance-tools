@@ -27,10 +27,16 @@ class ArgumentError(Exception):
     pass
 
 def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name):
+    
+    if env_vars.get("OOM_PROTECTION", "1")== "0":
+        print("OOM protection is disabled. Skipping memory measurement.")
+        return 0
+
     """
     Measures the memory usage (in MB) of a single pipeline instance.
     Returns the memory usage in MB.
     """
+
     # Clean up any previous logs and containers
     clean_up_pipeline_logs(results_dir)
     benchmark.docker_compose_containers(
@@ -61,7 +67,12 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
     print(f"Measured memory usage for one pipeline: {usage_mb} MB")
     return usage_mb
 
-def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072):
+def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, env_vars=None):
+    
+    if env_vars and env_vars.get("OOM_PROTECTION", "1") == "0":
+        print("OOM protection is disabled. Skipping memory check.")
+        return True
+
     """
     Checks if the system has enough available memory to add 'increment' more pipelines.
     Args:
@@ -71,6 +82,7 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072):
     Returns:
         True if enough memory is available, False otherwise.
     """
+
     available_mb = psutil.virtual_memory().available // (1024 * 1024)
     needed_mb = increment * per_pipeline_mb
     if available_mb < (needed_mb + safety_buffer_mb):
@@ -91,7 +103,12 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072):
     )
     return True
 
-def monitor_memory_pressure():
+def monitor_memory_pressure(env_vars=None):
+
+    if env_vars and env_vars.get("OOM_PROTECTION", "1") == "0":
+        print("OOM protection is disabled. Skipping memory pressure monitoring.")
+        return False
+
     """
     Monitors the system for memory pressure signals during execution.
     
@@ -102,6 +119,7 @@ def monitor_memory_pressure():
     Returns:
         True if memory pressure detected, False otherwise.
     """
+
     try:
         # Check swap activity (thrashing indicates pressure)
         vmstat_output = subprocess.run(['vmstat', '1', '2'], 
@@ -418,7 +436,7 @@ def run_pipeline_iterations(
         # --- Memory check before scaling up ---
         pipelines_to_add = increments if increments > 0 else 0
         
-        if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb):
+        if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb, env_vars=env_vars):
             print(
                 f"Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
                 f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
