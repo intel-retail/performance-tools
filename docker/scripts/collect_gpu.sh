@@ -3,7 +3,7 @@
 # Get all lines containing pci: and both device= and card=
 mapfile -t pci_devices < <(
   for card in /dev/dri/card*; do
-    pci_id=$(udevadm info --query=all --name=$card 2>/dev/null | grep PCI_SLOT_NAME | cut -d= -f2)
+    pci_id=$(udevadm info --query=all --name=$card 2>/dev/null | grep -w DEVPATH | cut -d= -f2 | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]')
     pci_info=$(lspci -s $pci_id -nn | head -n1)
     if echo "$pci_info" | grep -iq "VGA compatible controller"; then
       vendor_device=$(echo "$pci_info" | grep -oP '\[\K[0-9a-f]{4}:[0-9a-f]{4}(?=\])')
@@ -32,8 +32,8 @@ for device_line in "${pci_devices[@]}"; do
     pci_info="${device_line#pci:}"
 
     # Extract device ID and card number
-    device_id="${device_line#*,device=}"
-    card_num="${device_line#*,card=}"
+    device_id=$(echo "$device_line" | grep -oP 'device=\K[^,]+')
+    card_num=$(echo "$device_line" | grep -oP '(?<=card=)[^,]+')
 
     driver="${device_line#*,driver=}"
 

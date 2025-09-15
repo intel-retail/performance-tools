@@ -184,7 +184,8 @@ def clean_up_pipeline_logs(results_dir):
     print('Cleaning logs')
     matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log')) \
         + glob.glob(os.path.join(results_dir, 'gst*_*.log')) \
-        + glob.glob(os.path.join(results_dir, 'rs*_*.jsonl'))
+        + glob.glob(os.path.join(results_dir, 'rs*_*.jsonl')) \
+        + glob.glob(os.path.join(results_dir, 'qmassa*-*.json'))
     if len(matching_files) > 0:
         for log_file in matching_files:
             os.remove(log_file)
