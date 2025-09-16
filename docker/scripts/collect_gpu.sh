@@ -40,7 +40,7 @@ for device_line in "${pci_devices[@]}"; do
     if [[ -n "$device_id" && -n "$card_num" ]]; then
         echo "Valid device found: $pci_info | Device ID: $device_id | Card Number: $card_num"
 
-        output_file="/tmp/results/qmassa${card_num}-${device_id}-tool-generated.json"
+        output_file="/tmp/results/qmassa${card_num}-${device_id}-${driver}-tool-generated.json"
         touch $output_file
         chown 1000:1000 $output_file
 

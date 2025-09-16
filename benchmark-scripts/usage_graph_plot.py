@@ -70,7 +70,7 @@ def plot_gpu_metrics(ax, filepath):
         'RCS %': 'Render/3D[RCS]',
         'VCS %': 'Video[VCS]',
         'VECS %': 'VideoEnhance[VECS]',
-        'Power W pkg': 'Power (W)',
+        'Power Usage (W)': 'Power (W)',
         'BCS %': 'Blitter Copy Engine %'
     }
 

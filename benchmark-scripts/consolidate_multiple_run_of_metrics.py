@@ -145,7 +145,7 @@ class QMASSAGPUUsageExtractor(KPIExtractor):
             'VCS %': 'Video[VCS] Utilization %',
             'VECS %': 'VideoEnhance[VECS] Utilization %',            
             'BCS %': 'Blitter Copy Engine %',
-            'Power W pkg': 'GPU Power (W)'
+            'Power Usage (W)': 'GPU Power (W)'
        }
 
         device_prefix = f"GPU_{device[0]}"
@@ -570,7 +570,7 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "power_usage.log":PowerUsageExtractor,
                        "pcm.csv":PCMExtractor,
                        r"(?:^xpum).*\.json$": XPUMUsageExtractor,
-                       r"^qmassa.*tool-generated.*\.json$": QMASSAGPUUsageExtractor, }
+                       r"^qmassa.*parsed.*\.json$": QMASSAGPUUsageExtractor, }
 
 def add_parser():
     parser = argparse.ArgumentParser(description='Consolidate data')
