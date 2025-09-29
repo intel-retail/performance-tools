@@ -22,8 +22,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     docker.io \
     pciutils \
     intel-gpu-tools \
-    supervisor && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    rustc cargo \
+    pkg-config libudev-dev udev \
+    supervisor    
+
+RUN cargo install qmassa
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
 COPY requirements.txt .
