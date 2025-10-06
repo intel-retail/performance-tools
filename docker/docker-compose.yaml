@@ -13,6 +13,7 @@ services:
     image: benchmark:latest
     container_name: metrics-collector
     privileged: true
+    pid: host
     network_mode: "host"
     environment:
       - HTTP_PROXY=${HTTP_PROXY}
@@ -21,3 +22,11 @@ services:
       - ${log_dir}:/tmp/results
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /sys/devices:/sys/devices
+      - /dev/dri:/dev/dri:rw
+      - /sys/class/drm:/sys/class/drm:ro
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+    devices:
+      - "/sys:/sys"
+      - "/dev:/dev"
+      - "/run:/run"
+      - "/proc:/proc"

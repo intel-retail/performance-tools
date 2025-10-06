@@ -72,9 +72,9 @@ def parse_args(print=False):
     parser.add_argument('--docker_log', default=None, 
                         help='docker container name to get logs of and save to file')
     parser.add_argument('--parser_script', 
-                        default=os.path.join(os.path.curdir, 'parse_csv_to_json.py'), 
+                        default=os.path.join(os.path.curdir, 'parse_qmassa_metrics_to_json.py'), 
                         help='full path to the parsing script to obtain FPS')
-    parser.add_argument('--parser_args', default='-k device -k igt', 
+    parser.add_argument('--parser_args', default='-k device -k qmassa', 
                         help='arguments to pass to the parser script, ' + 
                         'pass args with spaces in quotes: "args with spaces"')
     if print:

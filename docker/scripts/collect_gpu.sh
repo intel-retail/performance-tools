@@ -1,7 +1,20 @@
 #!/bin/bash
 
 # Get all lines containing pci: and both device= and card=
-mapfile -t pci_devices < <(intel_gpu_top -L | grep -E 'pci:.*device=.*card=')
+mapfile -t pci_devices < <(
+  for card in /dev/dri/card*; do
+    pci_id=$(udevadm info --query=all --name=$card 2>/dev/null | grep -w DEVPATH | cut -d= -f2 | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]')
+    pci_info=$(lspci -s $pci_id -nn | head -n1)
+    if echo "$pci_info" | grep -iq "VGA compatible controller"; then
+      vendor_device=$(echo "$pci_info" | grep -oP '\[\K[0-9a-f]{4}:[0-9a-f]{4}(?=\])')
+      vendor=${vendor_device%%:*}
+      device=${vendor_device##*:}
+      driver=$(lspci -k -s $pci_id | grep "Kernel driver in use:" | awk '{print $5}')
+      card_num=${card##*card}
+      echo "pci:$pci_id,vendor=$vendor,device=$device,card=$card_num,driver=$driver"
+    fi
+  done
+)
 
 if [ ${#pci_devices[@]} -eq 0 ]; then
     echo "No valid PCI GPU devices with both device ID and card number found."
@@ -9,25 +22,30 @@ if [ ${#pci_devices[@]} -eq 0 ]; then
 fi
 
 for device_line in "${pci_devices[@]}"; do
-    # Extract the card name (e.g., card1)
-    card=$(echo "$device_line" | awk '{print $1}')
 
+    driver=$(echo $device_line | grep -oP 'driver=\K\S+')
+    if [[ "$driver" != "i915" && "$driver" != "xe" && "$driver" != "amdgpu" ]]; then
+      echo "Skipping device with driver $driver. Only i915, xe, and amdgpu are supported."
+      exit 1
+    fi
     # Extract the full pci string (starting from "pci:")
-    pci_info=$(echo "$device_line" | grep -o 'pci:[^ ]*')
+    pci_info="${device_line#pci:}"
 
     # Extract device ID and card number
-    device_id=$(echo "$pci_info" | sed -n 's/.*device=\([0-9A-Fa-f]*\).*/\1/p')
-    card_num=$(echo "$pci_info" | sed -n 's/.*card=\([0-9]*\).*/\1/p')
+    device_id=$(echo "$device_line" | grep -oP 'device=\K[^,]+')
+    card_num=$(echo "$device_line" | grep -oP '(?<=card=)[^,]+')
+
+    driver="${device_line#*,driver=}"
 
     if [[ -n "$device_id" && -n "$card_num" ]]; then
-        echo "Valid device found: $card | Device ID: $device_id | Card Number: $card_num"
+        echo "Valid device found: $pci_info | Device ID: $device_id | Card Number: $card_num"
 
-        output_file="/tmp/results/igt${card_num}-${device_id}.csv"
-        touch "$output_file"
-        chown 1000:1000 "$output_file"
+        output_file="/tmp/results/qmassa${card_num}-${device_id}-${driver}-tool-generated.json"
+        touch $output_file
+        chown 1000:1000 $output_file
 
         echo "Starting igt capture to $output_file"
-        intel_gpu_top -d pci:card=$card_num -c -o "$output_file" &
+        $HOME/.cargo/bin/qmassa -d $pci_info -g -x -t "$output_file" &
     else
         echo "Skipping $card: Incomplete pci info"
     fi

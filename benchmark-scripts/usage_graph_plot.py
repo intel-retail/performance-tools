@@ -70,8 +70,8 @@ def plot_gpu_metrics(ax, filepath):
         'RCS %': 'Render/3D[RCS]',
         'VCS %': 'Video[VCS]',
         'VECS %': 'VideoEnhance[VECS]',
-        'Power W pkg': 'Power (W)',
-        'RC6 %': 'Idle (RC6 %)'
+        'Power Usage (W)': 'Power (W)',
+        'BCS %': 'Blitter Copy Engine %'
     }
 
     metric_series = {metric: [] for metric in desc_map}
@@ -129,10 +129,10 @@ def main():
     root = os.path.abspath(args.dir)
     cpu_log = os.path.join(root, 'cpu_usage.log')
     npu_csv = os.path.join(root, 'npu_usage.csv')
-    gpu_files = sorted(glob.glob(os.path.join(root, 'igt*.json')))
+    gpu_files = sorted(glob.glob(os.path.join(root, 'qmassa*parsed.json')))
 
     if not gpu_files:
-        print("❌ No GPU files found (igt*.json)")
+        print("❌ No GPU files found (qmassa*parsed.json)")
         return
 
     total_plots = 2 + len(gpu_files)  # CPU + NPU + each GPU
