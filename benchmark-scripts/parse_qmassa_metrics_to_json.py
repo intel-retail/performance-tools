@@ -11,7 +11,7 @@ def parse_args():
     parser.add_argument('--directory', '-d', 
                         default=os.path.join(os.curdir, 'results'),
                         help='full path to the directory with the results')
-    parser.add_argument('--keyword', '-k', default=['device','qmassa'], action='append',
+    parser.add_argument('--keyword', '-k', default=['qmassa'], action='append',
                         help='keyword that results file(s) start with, ' +
                         'can be used multiple times')
     return parser.parse_args()
