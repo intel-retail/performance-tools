@@ -34,6 +34,8 @@ def plot_cpu_usage(ax, filepath):
             ax.set_title('CPU Usage Over Time')
             ax.set_xlabel('Time (seconds)')
             ax.set_ylabel('Usage (%)')
+            ax.set_ylim(bottom=0)
+            ax.margins(x=0)
             ax.grid(True)
             ax.legend()
     else:
@@ -59,6 +61,8 @@ def plot_npu_usage(ax, filepath):
             ax.set_title('NPU Usage Over Time')
             ax.set_xlabel('Time (seconds)')
             ax.set_ylabel('Usage (%)')
+            ax.set_ylim(bottom=0)
+            ax.margins(x=0)
             ax.grid(True)
             ax.legend()
     else:
@@ -120,6 +124,8 @@ def plot_gpu_metrics(ax, filepath):
         ax.set_title(f'GPU Usage Over Time (device={device_part})')
         ax.set_xlabel('Time (seconds)')
         ax.set_ylabel('Usage (%)')
+        ax.set_ylim(bottom=0)
+        ax.margins(x=0)
         ax.grid(True)
         ax.legend()
     else:
