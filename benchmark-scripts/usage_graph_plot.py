@@ -112,7 +112,11 @@ def plot_gpu_metrics(ax, filepath):
 
         # Get device ID from filename like "igt0-7D55.json" → "7D55"
         basename = os.path.basename(filepath)
-        device_part = basename.split('-')[-1].split('.')[0] if '-' in basename else "unknown"
+        parts = basename.split('-')
+        if len(parts) >= 3:
+            device_part = parts[1]  # Second part is the device ID
+        else:
+            device_part = "unknown"
         ax.set_title(f'GPU Usage Over Time (device={device_part})')
         ax.set_xlabel('Time (seconds)')
         ax.set_ylabel('Usage (%)')
