@@ -53,12 +53,13 @@ def parse_args(print=False):
                         default=os.path.join(os.curdir, 'results'),
                         help='full path to the desired directory for logs ' +
                              'and results')
-    parser.add_argument('--duration', type=int, default=30,
+    parser.add_argument('--duration', type=int, default=60,
                         help='time in seconds, not needed when ' +
                              '--target_fps is specified')
     parser.add_argument('--init_duration', type=int, default=20,
                         help='initial time in seconds before ' +
                              'starting metric data collection')
+    parser.add_argument("--multi_stream_mode", type=int, default=0, help="0=single-stream (default), 1=multi-stream")                         
     # TODO: change target_device to an env variable in docker compose
     parser.add_argument('--target_device', default='CPU',
                         help='desired running platform [cpu|core|xeon|dgpu.x]')

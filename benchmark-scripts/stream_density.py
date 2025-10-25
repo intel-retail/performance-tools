@@ -343,6 +343,7 @@ def calculate_total_fps(num_pipelines, results_dir, container_name):
     '''
     total_fps = 0
     total_fps_per_stream = 0
+    stream_fps_dict = {} 
     matching_files = glob.glob(os.path.join(
         results_dir, f'pipeline*_{container_name}*.log'))
     print(f"DEBUG: num. of matching_files = {len(matching_files)}")
@@ -362,10 +363,12 @@ def calculate_total_fps(num_pipelines, results_dir, container_name):
         stream_fps_avg = stream_fps_sum / stream_fps_count
         total_fps += stream_fps_avg
         total_fps_per_stream = total_fps / num_pipelines
+        # Store in dict (basename only for clarity)
+        stream_fps_dict[os.path.basename(pipeline_file)] = round(total_fps_per_stream, 2)
         print(
             f"INFO: Averaged FPS for pipeline file "
             f"{pipeline_file}: {stream_fps_avg}")
-    return total_fps, total_fps_per_stream
+    return total_fps, total_fps_per_stream, stream_fps_dict
 
 
 def validate_and_setup_env(env_vars, target_fps_list):
@@ -472,8 +475,19 @@ def run_pipeline_iterations(
             return num_pipelines, False
         # once we have all non-empty pipeline log files
         # we then can calculate the average fps
-        total_fps, total_fps_per_stream = calculate_total_fps(
-            num_pipelines, results_dir, container_name)
+        print(f"INFO: ########## MULTI_STREAM_MODE ENABLED==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
+        # --- Calculate FPS and latency metrics ---
+        if int(env_vars.get("MULTI_STREAM_MODE", 0)) == 0:
+            # Single-stream mode: use LP variant
+            total_fps, total_fps_per_stream, stream_fps_dict = calculate_total_fps(
+                num_pipelines, results_dir, container_name)
+            print("INFO: Single-stream mode enabled (using calculate_total_fps)")
+        else:
+            # Multi-stream mode: standard calculation
+            total_fps, total_fps_per_stream, stream_fps_dict = calculate_multi_stream_fps(
+                num_pipelines, results_dir, container_name)
+            print("INFO: Multi-stream mode enabled (using calculate_multi_stream_fps)")
+
         print('container name:', container_name)
         print('Total FPS:', total_fps)
         print(f"Total averaged FPS per stream: {total_fps_per_stream} "
@@ -487,43 +501,44 @@ def run_pipeline_iterations(
         f"{total_pipeline_latency_per_stream} "
         f"for {num_pipelines} pipeline(s)")
         
+        # --- Decide scaling logic ---
         if not in_decrement:
-            if total_fps_per_stream >= target_fps:
-                # if the increments hint from $PIPELINE_INC is not empty
-                # we will use it as the increments
-                # otherwise, we will try to adjust increments dynamically
-                # based on the rate of {total_fps_per_stream}
-                # and target_fps
+            # Check if all streams meet or exceed target FPS
+            all_streams_meet_target = all(fps >= target_fps for fps in stream_fps_dict.values())
+            print(f"✅ all_streams_meet_target {all_streams_meet_target}")
+            if all_streams_meet_target:
                 if is_env_non_empty(env_vars, PIPELINE_INCR_KEY):
                     increments = int(env_vars[PIPELINE_INCR_KEY])
                 else:
-                    increments = int(
-                        total_fps_per_stream / target_fps)
+                    increments = int(total_fps_per_stream / target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
-                    print(
-                        f"incrementing pipeline no. by {increments}")
+                print(f"✅ All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
             else:
-                # below target_fps, start decrementing
+                # Some streams below target
+                below_streams = {k: v for k, v in stream_fps_dict.items() if v < target_fps}
                 increments = -1
                 in_decrement = True
                 print(
-                    f"Below target fps {target_fps}, "
-                    f"starting to decrement pipelines by 1...")
+                    f"⚠️ Below target FPS ({target_fps}) in streams: {below_streams}. "
+                    f"Starting to decrement pipelines by 1..."
+                )
         else:
-            # in decrementing case:
-            if total_fps_per_stream >= target_fps:
+            # --- In decrement phase ---
+            all_streams_meet_target = all(fps >= target_fps for fps in stream_fps_dict.values())
+
+            if all_streams_meet_target:
                 print(
-                    f"found maximum number of pipelines to reach "
+                    f"✅ Found maximum number of pipelines to reach "
                     f"target FPS {target_fps}")
                 meet_target_fps = True
                 print(
-                    f"Max stream density achieved for target FPS "
+                    f"🎯 Max stream density achieved for target FPS "
                     f"{target_fps} is {num_pipelines}")
                 increments = 0
             elif num_pipelines <= 1:
                 print(
-                    f"already reached num pipeline 1, and "
+                    f"already reached num. pipeline 1, and "
                     f"the fps per stream is {total_fps_per_stream} "
                     f"but target FPS is {target_fps}")
                 meet_target_fps = False
@@ -532,14 +547,14 @@ def run_pipeline_iterations(
                 print(
                     f"decrementing number of pipelines "
                     f"{num_pipelines} by 1")
-        # end of if not in_decrement:
+
+        # --- Update pipeline count ---
         num_pipelines += increments
         if num_pipelines <= 0:
-            # we will keep the min. num_pipelines as 1
             num_pipelines = 1
-            print(
-                f"already reached min. pipeline number, stopping...")
+            print(f"already reached min. pipeline number, stopping...")
             break
+            
     # end of while
     print(
         f"pipeline iterations done for "
@@ -626,3 +641,152 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
         sys.stderr = orig_stderr
 
     return results
+
+def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
+    """
+    Calculates averaged FPS per stream for all matching log files named pipeline_stream<idx>*.log.
+    Each stream index is handled independently.
+    Returns:
+        total_fps: sum of per-stream averaged FPS
+        total_fps_per_stream: average FPS across all streams
+        stream_fps_dict: filename -> averaged FPS
+    """
+
+    effective_num_streams = get_pipeline_stream_count()
+
+    # --- Initialize accumulators ---
+    total_fps = 0.0
+    stream_fps_dict = {}
+
+    # --- Loop over all streams ---
+    for idx in range(effective_num_streams):
+        pattern_with_cn = os.path.join(results_dir, f'pipeline_stream{idx}*_{container_name}*.log')
+        pattern_without_cn = os.path.join(results_dir, f'pipeline_stream{idx}*.log')
+
+        matching = glob.glob(pattern_with_cn)
+        if not matching:
+            # fallback to any matching without container_name
+            matching = [p for p in glob.glob(pattern_without_cn)
+                        if f'_{container_name}_' not in os.path.basename(p)] or glob.glob(pattern_without_cn)
+
+        print(f"DEBUG(LP): idx={idx}, match_count={len(matching)}, pattern={pattern_without_cn}")
+        
+        latest_pipeline_logs = get_latest_pipeline_stream_logs(num_pipelines, matching)
+        print(f"DEBUG(LP): count of latest_pipeline_logs={len(latest_pipeline_logs)}")
+        
+        if not latest_pipeline_logs:
+            print(f"WARN(LP): No log file for stream index {idx}")
+            stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
+            continue
+
+        # --- Process all matching log files for this stream ---
+        stream_avg_sum = 0.0
+        valid_file_count = 0
+
+        for pipeline_file in latest_pipeline_logs:
+            print(f"DEBUG(LP): Processing file: {pipeline_file}")
+            try:
+                with open(pipeline_file, 'r') as f:
+                    tail_lines = f.readlines()[-20:]
+                fps_lines = [l.strip() for l in tail_lines if l.strip() and 'na' not in l.lower()]
+                numeric_fps = []
+                for v in fps_lines:
+                    try:
+                        numeric_fps.append(float(v))
+                    except ValueError:
+                        print(f"DEBUG(LP): Skipping non-numeric line '{v}' in {pipeline_file}")
+
+                if not numeric_fps:
+                    print(f"WARN(LP): No numeric FPS entries for {pipeline_file}")
+                    continue
+
+                stream_fps_avg = sum(numeric_fps) / len(numeric_fps)
+                stream_avg_sum += stream_fps_avg
+                valid_file_count += 1
+
+                print(f"INFO(LP): Averaged FPS for {pipeline_file}: {stream_fps_avg}")
+
+            except (IOError, OSError) as e:
+                print(f"WARN(LP): Read error on {pipeline_file}: {e}")
+
+        # --- Compute average across all files for this stream index ---
+        if valid_file_count > 0:
+            final_stream_avg = stream_avg_sum / valid_file_count
+            stream_fps_dict[f'pipeline_stream{idx}'] = final_stream_avg
+            total_fps += final_stream_avg
+            print(f"INFO(LP): Stream {idx} final averaged FPS (across {valid_file_count} files): {final_stream_avg}")
+        else:
+            stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
+            print(f"WARN(LP): No valid FPS data for stream index {idx}")
+
+    # --- Compute total and per-stream averages ---
+    total_fps_per_stream = total_fps / effective_num_streams if effective_num_streams > 0 else 0.0
+    print(f"DEBUG(LP): Total FPS={total_fps}, Per stream={total_fps_per_stream}")
+
+    return total_fps, total_fps_per_stream, stream_fps_dict
+
+
+def get_pipeline_stream_count(base_dir=None):
+    """
+    Detects the number of video streams defined in the pipeline.sh script
+    by counting occurrences of 'filesrc' elements.
+
+    Args:
+        base_dir (str, optional): Base directory to locate the pipeline script.
+                                  Defaults to the directory of the current file.
+
+    Returns:
+        int: Number of detected streams (0 if not found or error).
+    """
+    try:
+        # Default base_dir to the current script location if not provided
+        if base_dir is None:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Construct pipeline.sh path (adjust relative path as needed)
+        pipeline_script_path = os.path.join(base_dir, '..', '..', 'src', 'pipelines', 'pipeline.sh')
+        pipeline_script_path = os.path.normpath(pipeline_script_path)
+
+        if not os.path.isfile(pipeline_script_path):
+            print(f"WARN(LP): Pipeline script not found at {pipeline_script_path}")
+            return 0
+
+        # Read and search for 'filesrc' occurrences
+        with open(pipeline_script_path, 'r') as f:
+            content = f.read()
+
+        matches = re.findall(r'\bfilesrc\b', content)
+        if matches:
+            detected_streams = len(matches)
+            print(f"DEBUG(LP): Detected {detected_streams} stream(s) from {pipeline_script_path}")
+            return detected_streams
+        else:
+            print(f"DEBUG(LP): No 'filesrc' tokens found in {pipeline_script_path}")
+            return 0
+
+    except Exception as e:
+        print(f"WARN(LP): Failed to parse pipeline script: {e}")
+        return 0
+
+def get_latest_pipeline_stream_logs(num_pipelines, pipeline_log_files):
+    '''
+    obtains a list of the latest pipeline log files based on
+    the timestamps of the files and only returns num_pipelines
+    files if number of pipeline log files is more than num_pipelines
+    Args:
+        num_pipelines: number of currently running pipelines
+        pipeline_log_files: all matching pipeline log files
+    Return:
+        latest_files: number of num_pipelines files based on
+        the timestamps of files if number of pipeline log files
+        is more than num_pipelines; otherwise whatever the number
+        of the matching files will be returned
+    '''
+    timestamp_files = [
+        (file, os.path.getmtime(file)) for file in pipeline_log_files]
+    # sort timestamp_file by time in descending order
+    sorted_timestamp = sorted(
+        timestamp_files, key=lambda x: x[1], reverse=False)
+    latest_files = [
+        file for file, mtime in sorted_timestamp[:num_pipelines]]
+    return latest_files
