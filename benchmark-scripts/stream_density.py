@@ -475,7 +475,7 @@ def run_pipeline_iterations(
             return num_pipelines, False
         # once we have all non-empty pipeline log files
         # we then can calculate the average fps
-        print(f"INFO: ########## MULTI_STREAM_MODE ENABLED==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
+        print(f"INFO: ########## MULTI_STREAM_MODE VALUE ==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
         # --- Calculate FPS and latency metrics ---
         if int(env_vars.get("MULTI_STREAM_MODE", 0)) == 0:
             # Single-stream mode: use LP variant
@@ -712,7 +712,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         # --- Compute average across all files for this stream index ---
         if valid_file_count > 0:
             final_stream_avg = stream_avg_sum / valid_file_count
-            stream_fps_dict[f'pipeline_stream{idx}'] = final_stream_avg
+            stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
             total_fps += final_stream_avg
             print(f"INFO(LP): Stream {idx} final averaged FPS (across {valid_file_count} files): {final_stream_avg}")
         else:
