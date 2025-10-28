@@ -505,7 +505,6 @@ def run_pipeline_iterations(
         if not in_decrement:
             # Check if all streams meet or exceed target FPS
             all_streams_meet_target = all(fps >= target_fps for fps in stream_fps_dict.values())
-            print(f"✅ all_streams_meet_target {all_streams_meet_target}")
             if all_streams_meet_target:
                 if is_env_non_empty(env_vars, PIPELINE_INCR_KEY):
                     increments = int(env_vars[PIPELINE_INCR_KEY])
@@ -513,7 +512,7 @@ def run_pipeline_iterations(
                     increments = int(total_fps_per_stream / target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
-                print(f"✅ All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
+                print(f"All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
             else:
                 # Some streams below target
                 below_streams = {k: v for k, v in stream_fps_dict.items() if v < target_fps}
@@ -529,11 +528,11 @@ def run_pipeline_iterations(
 
             if all_streams_meet_target:
                 print(
-                    f"✅ Found maximum number of pipelines to reach "
+                    f"Found maximum number of pipelines to reach "
                     f"target FPS {target_fps}")
                 meet_target_fps = True
                 print(
-                    f"🎯 Max stream density achieved for target FPS "
+                    f"Max stream density achieved for target FPS "
                     f"{target_fps} is {num_pipelines}")
                 increments = 0
             elif num_pipelines <= 1:
@@ -657,7 +656,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
-
+    time.sleep(10)  # Ensure logs are fully written
     # --- Loop over all streams ---
     for idx in range(effective_num_streams):
         pattern_with_cn = os.path.join(results_dir, f'pipeline_stream{idx}*_{container_name}*.log')

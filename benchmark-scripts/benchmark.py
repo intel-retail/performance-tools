@@ -59,7 +59,6 @@ def parse_args(print=False):
     parser.add_argument('--init_duration', type=int, default=20,
                         help='initial time in seconds before ' +
                              'starting metric data collection')
-    parser.add_argument("--multi_stream_mode", type=int, default=0, help="0=single-stream (default), 1=multi-stream")                         
     # TODO: change target_device to an env variable in docker compose
     parser.add_argument('--target_device', default='CPU',
                         help='desired running platform [cpu|core|xeon|dgpu.x]')
