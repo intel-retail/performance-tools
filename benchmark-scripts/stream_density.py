@@ -709,21 +709,18 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
 
             except (IOError, OSError) as e:
                 print(f"WARN: Read error on {pipeline_file}: {e}")
-
-        print(f"INFO: valid_file_count == {valid_file_count} , stream_avg_sum  == {stream_avg_sum} for stream index {idx}")
+        
         # --- Compute average across all files for this stream index ---
         if valid_file_count > 0:
             final_stream_avg = stream_avg_sum / valid_file_count
             stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
             total_fps += final_stream_avg
-            print(f"INFO: Stream {idx} final averaged FPS (across {valid_file_count} files): {final_stream_avg}")
         else:
             stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
             print(f"WARN: No valid FPS data for stream index {idx}")
 
     # --- Compute total and per-stream averages ---
     total_fps_per_stream = total_fps / stream_count if stream_count > 0 else 0.0
-    print(f"DEBUG: Total FPS={total_fps}, Per stream={total_fps_per_stream}")
 
     return total_fps, total_fps_per_stream, stream_fps_dict
 
