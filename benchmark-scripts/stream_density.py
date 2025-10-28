@@ -651,14 +651,14 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         stream_fps_dict: filename -> averaged FPS
     """
 
-    effective_num_streams = get_pipeline_stream_count()
+    stream_count = get_pipeline_stream_count()
 
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
     time.sleep(10)  # Ensure logs are fully written
     # --- Loop over all streams ---
-    for idx in range(effective_num_streams):
+    for idx in range(stream_count):
         pattern_with_cn = os.path.join(results_dir, f'pipeline_stream{idx}*_{container_name}*.log')
         pattern_without_cn = os.path.join(results_dir, f'pipeline_stream{idx}*.log')
 
@@ -719,7 +719,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
             print(f"WARN(LP): No valid FPS data for stream index {idx}")
 
     # --- Compute total and per-stream averages ---
-    total_fps_per_stream = total_fps / effective_num_streams if effective_num_streams > 0 else 0.0
+    total_fps_per_stream = total_fps / stream_count if stream_count > 0 else 0.0
     print(f"DEBUG(LP): Total FPS={total_fps}, Per stream={total_fps_per_stream}")
 
     return total_fps, total_fps_per_stream, stream_fps_dict
