@@ -475,21 +475,21 @@ def run_pipeline_iterations(
             return num_pipelines, False
         # once we have all non-empty pipeline log files
         # we then can calculate the average fps
-        print(f"INFO: ########## MULTI_STREAM_MODE VALUE ==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
+        print(f"INFO: ########## MULTI_STREAM_MODE VALUE==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
         # --- Calculate FPS and latency metrics ---
         if int(env_vars.get("MULTI_STREAM_MODE", 0)) == 0:
-            # Single-stream mode: use LP variant
+            # Multi-stream mode: use LP variant
             total_fps, total_fps_per_stream, stream_fps_dict = calculate_total_fps(
                 num_pipelines, results_dir, container_name)
-            print("INFO: Single-stream mode enabled (using calculate_total_fps)")
         else:
-            # Multi-stream mode: standard calculation
+            # Single-stream mode: standard calculation
             total_fps, total_fps_per_stream, stream_fps_dict = calculate_multi_stream_fps(
                 num_pipelines, results_dir, container_name)
-            print("INFO: Multi-stream mode enabled (using calculate_multi_stream_fps)")
 
+       
         print('container name:', container_name)
         print('Total FPS:', total_fps)
+        print('stream_fps_dict:', stream_fps_dict)
         print(f"Total averaged FPS per stream: {total_fps_per_stream} "
               f"for {num_pipelines} pipeline(s)")
         
@@ -500,7 +500,7 @@ def run_pipeline_iterations(
         print(f"Total Pipeline Latency per stream: "
         f"{total_pipeline_latency_per_stream} "
         f"for {num_pipelines} pipeline(s)")
-        
+
         # --- Decide scaling logic ---
         if not in_decrement:
             # Check if all streams meet or exceed target FPS
@@ -512,7 +512,7 @@ def run_pipeline_iterations(
                     increments = int(total_fps_per_stream / target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
-                print(f"All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
+                print(f"✅ All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
             else:
                 # Some streams below target
                 below_streams = {k: v for k, v in stream_fps_dict.items() if v < target_fps}
@@ -528,11 +528,11 @@ def run_pipeline_iterations(
 
             if all_streams_meet_target:
                 print(
-                    f"Found maximum number of pipelines to reach "
+                    f"✅ Found maximum number of pipelines to reach "
                     f"target FPS {target_fps}")
                 meet_target_fps = True
                 print(
-                    f"Max stream density achieved for target FPS "
+                    f"🎯 Max stream density achieved for target FPS "
                     f"{target_fps} is {num_pipelines}")
                 increments = 0
             elif num_pipelines <= 1:
@@ -553,7 +553,9 @@ def run_pipeline_iterations(
             num_pipelines = 1
             print(f"already reached min. pipeline number, stopping...")
             break
-            
+
+        
+        
     # end of while
     print(
         f"pipeline iterations done for "
@@ -641,6 +643,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
 
     return results
 
+
 def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     """
     Calculates averaged FPS per stream for all matching log files named pipeline_stream<idx>*.log.
@@ -657,24 +660,23 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     total_fps = 0.0
     stream_fps_dict = {}
     time.sleep(10)  # Ensure logs are fully written
+    
     # --- Loop over all streams ---
     for idx in range(stream_count):
-        pattern_with_cn = os.path.join(results_dir, f'pipeline_stream{idx}*_{container_name}*.log')
-        pattern_without_cn = os.path.join(results_dir, f'pipeline_stream{idx}*.log')
-
-        matching = glob.glob(pattern_with_cn)
+        pattern = os.path.join(results_dir, f'pipeline_stream{idx}_*_{container_name}.log')
+        matching = glob.glob(pattern)
+    
         if not matching:
-            # fallback to any matching without container_name
-            matching = [p for p in glob.glob(pattern_without_cn)
-                        if f'_{container_name}_' not in os.path.basename(p)] or glob.glob(pattern_without_cn)
+            print(f"[WARN] No log file found for stream {idx} (container: {container_name}). Skipping...")
+            continue
 
-        print(f"DEBUG(LP): idx={idx}, match_count={len(matching)}, pattern={pattern_without_cn}")
+        print(f"DEBUG: idx={idx}, match_count={len(matching)}, pattern={pattern}")
         
         latest_pipeline_logs = get_latest_pipeline_stream_logs(num_pipelines, matching)
-        print(f"DEBUG(LP): count of latest_pipeline_logs={len(latest_pipeline_logs)}")
+        print(f"DEBUG: count of latest_pipeline_logs={len(latest_pipeline_logs)}")
         
         if not latest_pipeline_logs:
-            print(f"WARN(LP): No log file for stream index {idx}")
+            print(f"WARN: No log file for stream index {idx}")
             stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
             continue
 
@@ -683,7 +685,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         valid_file_count = 0
 
         for pipeline_file in latest_pipeline_logs:
-            print(f"DEBUG(LP): Processing file: {pipeline_file}")
+            print(f"DEBUG: Processing file: {pipeline_file}")
             try:
                 with open(pipeline_file, 'r') as f:
                     tail_lines = f.readlines()[-20:]
@@ -693,34 +695,35 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
                     try:
                         numeric_fps.append(float(v))
                     except ValueError:
-                        print(f"DEBUG(LP): Skipping non-numeric line '{v}' in {pipeline_file}")
+                        print(f"DEBUG: Skipping non-numeric line '{v}' in {pipeline_file}")
 
                 if not numeric_fps:
-                    print(f"WARN(LP): No numeric FPS entries for {pipeline_file}")
+                    print(f"WARN: No numeric FPS entries for {pipeline_file}")
                     continue
-
+                file_name = os.path.basename(pipeline_file)
                 stream_fps_avg = sum(numeric_fps) / len(numeric_fps)
                 stream_avg_sum += stream_fps_avg
                 valid_file_count += 1
 
-                print(f"INFO(LP): Averaged FPS for {pipeline_file}: {stream_fps_avg}")
+                print(f"INFO: Averaged FPS for {pipeline_file}: {stream_fps_avg}")
 
             except (IOError, OSError) as e:
-                print(f"WARN(LP): Read error on {pipeline_file}: {e}")
+                print(f"WARN: Read error on {pipeline_file}: {e}")
 
+        print(f"INFO: valid_file_count == {valid_file_count} , stream_avg_sum  == {stream_avg_sum} for stream index {idx}")
         # --- Compute average across all files for this stream index ---
         if valid_file_count > 0:
             final_stream_avg = stream_avg_sum / valid_file_count
             stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
             total_fps += final_stream_avg
-            print(f"INFO(LP): Stream {idx} final averaged FPS (across {valid_file_count} files): {final_stream_avg}")
+            print(f"INFO: Stream {idx} final averaged FPS (across {valid_file_count} files): {final_stream_avg}")
         else:
             stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
-            print(f"WARN(LP): No valid FPS data for stream index {idx}")
+            print(f"WARN: No valid FPS data for stream index {idx}")
 
     # --- Compute total and per-stream averages ---
     total_fps_per_stream = total_fps / stream_count if stream_count > 0 else 0.0
-    print(f"DEBUG(LP): Total FPS={total_fps}, Per stream={total_fps_per_stream}")
+    print(f"DEBUG: Total FPS={total_fps}, Per stream={total_fps_per_stream}")
 
     return total_fps, total_fps_per_stream, stream_fps_dict
 
@@ -747,7 +750,7 @@ def get_pipeline_stream_count(base_dir=None):
         pipeline_script_path = os.path.normpath(pipeline_script_path)
 
         if not os.path.isfile(pipeline_script_path):
-            print(f"WARN(LP): Pipeline script not found at {pipeline_script_path}")
+            print(f"WARN: Pipeline script not found at {pipeline_script_path}")
             return 0
 
         # Read and search for 'filesrc' occurrences
@@ -757,14 +760,14 @@ def get_pipeline_stream_count(base_dir=None):
         matches = re.findall(r'\bfilesrc\b', content)
         if matches:
             detected_streams = len(matches)
-            print(f"DEBUG(LP): Detected {detected_streams} stream(s) from {pipeline_script_path}")
+            print(f"DEBUG: Detected {detected_streams} stream(s) from {pipeline_script_path}")
             return detected_streams
         else:
-            print(f"DEBUG(LP): No 'filesrc' tokens found in {pipeline_script_path}")
+            print(f"DEBUG: No 'filesrc' tokens found in {pipeline_script_path}")
             return 0
 
     except Exception as e:
-        print(f"WARN(LP): Failed to parse pipeline script: {e}")
+        print(f"WARN: Failed to parse pipeline script: {e}")
         return 0
 
 def get_latest_pipeline_stream_logs(num_pipelines, pipeline_log_files):
