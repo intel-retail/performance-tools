@@ -673,7 +673,6 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         print(f"DEBUG: idx={idx}, match_count={len(matching)}, pattern={pattern}")
         
         latest_pipeline_logs = get_latest_pipeline_stream_logs(num_pipelines, matching)
-        print(f"DEBUG: count of latest_pipeline_logs={len(latest_pipeline_logs)}")
         
         if not latest_pipeline_logs:
             print(f"WARN: No log file for stream index {idx}")
@@ -682,13 +681,12 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
 
         # --- Process all matching log files for this stream ---
         stream_avg_sum = 0.0
-        valid_file_count = 0
 
         for pipeline_file in latest_pipeline_logs:
             print(f"DEBUG: Processing file: {pipeline_file}")
             try:
                 with open(pipeline_file, 'r') as f:
-                    tail_lines = f.readlines()[-20:]
+                    tail_lines = f.readlines()[-40:]
                 fps_lines = [l.strip() for l in tail_lines if l.strip() and 'na' not in l.lower()]
                 numeric_fps = []
                 for v in fps_lines:
@@ -703,7 +701,6 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
                 file_name = os.path.basename(pipeline_file)
                 stream_fps_avg = sum(numeric_fps) / len(numeric_fps)
                 stream_avg_sum += stream_fps_avg
-                valid_file_count += 1
 
                 print(f"INFO: Averaged FPS for {pipeline_file}: {stream_fps_avg}")
 
@@ -711,8 +708,8 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
                 print(f"WARN: Read error on {pipeline_file}: {e}")
         
         # --- Compute average across all files for this stream index ---
-        if valid_file_count > 0:
-            final_stream_avg = stream_avg_sum / valid_file_count
+        if num_pipelines > 0:
+            final_stream_avg = stream_avg_sum / num_pipelines
             stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
             total_fps += final_stream_avg
         else:
