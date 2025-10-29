@@ -3,7 +3,7 @@
 # Get all lines containing pci: and both device= and card=
 mapfile -t pci_devices < <(
   for card in /dev/dri/card*; do
-    pci_id=$(udevadm info --query=all --name=$card 2>/dev/null | grep -w DEVPATH | cut -d= -f2 | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]')
+    pci_id=$(udevadm info --query=all --name=$card 2>/dev/null | grep -w DEVPATH | cut -d= -f2 | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]'  | tail -1 )
     pci_info=$(lspci -s $pci_id -nn | head -n1)
     if echo "$pci_info" | grep -iq "VGA compatible controller"; then
       vendor_device=$(echo "$pci_info" | grep -oP '\[\K[0-9a-f]{4}:[0-9a-f]{4}(?=\])')
@@ -45,7 +45,7 @@ for device_line in "${pci_devices[@]}"; do
         chown 1000:1000 $output_file
 
         echo "Starting igt capture to $output_file"
-        $HOME/.cargo/bin/qmassa -d $pci_info -g -x -t "$output_file" &
+        $HOME/.cargo/bin/qmassa -d $pci_info -g -x -t "$output_file" 2>> /tmp/results/qmassa_error.log
     else
         echo "Skipping $card: Incomplete pci info"
     fi

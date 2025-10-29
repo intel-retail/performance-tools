@@ -7,7 +7,7 @@
 import argparse
 import os
 import shlex
-import subprocess  # nosec B404
+import subprocess
 import time
 import traceback
 import csv
@@ -45,6 +45,9 @@ def parse_args(print=False):
                         default=None, help='stream density target ' +
                         'container names; used together with --target_fps ' +
                         'to have 1-to-1 mapping with the pipeline')
+    parser.add_argument('--benchmark_type', default='default', 
+                        choices=['default', 'reg'],
+                        help='benchmark type: default uses docker-compose.yaml, reg uses docker-compose-reg.yaml')
     parser.add_argument('--density_increment', type=int, default=None,
                         help='pipeline increment number for ' +
                              'stream density. If not specified, then ' +
@@ -163,9 +166,17 @@ def main():
     for file in my_args.compose_file:
         compose_files.append(os.path.abspath(file))
 
-    # add the benchmark docker compose file
-    compose_files.append(os.path.abspath(os.path.join(
-        os.curdir, '..', 'docker', 'docker-compose.yaml')))
+    # Determine which benchmark compose file to use
+    if my_args.benchmark_type == 'reg':
+        benchmark_compose = os.path.abspath(os.path.join(
+            os.curdir, '..', 'docker', 'docker-compose-reg.yaml'))
+    else:
+        benchmark_compose = os.path.abspath(os.path.join(
+            os.curdir, '..', 'docker', 'docker-compose.yaml'))
+    
+    # Replace the hardcoded compose file addition
+    compose_files.append(benchmark_compose)
+
     env_vars = os.environ.copy()
     env_vars["log_dir"] = results_dir
     env_vars["RESULTS_DIR"] = results_dir
