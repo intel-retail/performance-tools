@@ -686,7 +686,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
             print(f"DEBUG: Processing file: {pipeline_file}")
             try:
                 with open(pipeline_file, 'r') as f:
-                    tail_lines = f.readlines()[-40:]
+                    tail_lines = f.readlines()[-20:]
                 fps_lines = [l.strip() for l in tail_lines if l.strip() and 'na' not in l.lower()]
                 numeric_fps = []
                 for v in fps_lines:
