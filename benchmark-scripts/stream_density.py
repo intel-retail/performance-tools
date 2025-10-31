@@ -363,11 +363,11 @@ def calculate_total_fps(num_pipelines, results_dir, container_name):
         stream_fps_avg = stream_fps_sum / stream_fps_count
         total_fps += stream_fps_avg
         total_fps_per_stream = total_fps / num_pipelines
-        # Store in dict (basename only for clarity)
-        stream_fps_dict[os.path.basename(pipeline_file)] = round(total_fps_per_stream, 2)
         print(
             f"INFO: Averaged FPS for pipeline file "
             f"{pipeline_file}: {stream_fps_avg}")
+            
+    stream_fps_dict["pipeline_stream"] = round(total_fps_per_stream, 2)         
     return total_fps, total_fps_per_stream, stream_fps_dict
 
 
@@ -659,7 +659,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
-    time.sleep(10)  # Ensure logs are fully written
+    time.sleep(100)  # Ensure logs are fully written
     
     # --- Loop over all streams ---
     for idx in range(stream_count):

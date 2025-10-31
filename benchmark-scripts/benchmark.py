@@ -56,9 +56,22 @@ def parse_args(print=False):
                         default=os.path.join(os.curdir, 'results'),
                         help='full path to the desired directory for logs ' +
                              'and results')
-    parser.add_argument('--duration', type=int, default=60,
-                        help='time in seconds, not needed when ' +
-                             '--target_fps is specified')
+     # BEGIN fix: safely read MULTI_STREAM_MODE from environment
+    multi_stream_raw = os.getenv("MULTI_STREAM_MODE", "0")
+    try:
+        multi_stream_mode = int(multi_stream_raw)
+    except ValueError:
+        multi_stream_mode = 0
+    # END fix
+    if multi_stream_mode == 0:
+        parser.add_argument('--duration', type=int, default=30,
+                            help='time in seconds, not needed when ' +
+                                 '--target_fps is specified')
+    else:
+        parser.add_argument('--duration', type=int, default=150,
+                            help='time in seconds, not needed when ' +
+                                 '--target_fps is specified')  
+
     parser.add_argument('--init_duration', type=int, default=20,
                         help='initial time in seconds before ' +
                              'starting metric data collection')
