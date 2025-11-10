@@ -26,7 +26,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     pkg-config libudev-dev udev \
     supervisor    
 
-RUN cargo install qmassa
+RUN cargo install qmassa --version 1.0.1 --locked
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
