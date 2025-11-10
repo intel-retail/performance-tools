@@ -6,6 +6,7 @@ def log_vlm_metrics(vlm_result):
     results_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results"))
     os.makedirs(results_dir, exist_ok=True)  # <--- Ensure directory exists
     filepath = os.path.join(results_dir, filename)
+    print("The file path is: ", filepath)
     with open(filepath, "a") as f:
         # if hasattr(vlm_result, 'perf_metrics'):
         #     # Log format: key=value pairs separated by spaces
