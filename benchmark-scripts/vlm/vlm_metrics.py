@@ -1,6 +1,6 @@
 import datetime
 import os
-import os
+import sys
 def log_vlm_metrics(vlm_result):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = "vlm_performance_metrics.txt"
