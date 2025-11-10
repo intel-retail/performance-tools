@@ -25,8 +25,7 @@ def log_vlm_metrics(vlm_result):
         #         f'Grammar_Compile_Std={vlm_result.perf_metrics.get_grammar_compile_time().std}',
         #         f'Grammar_Compile_Mean={vlm_result.perf_metrics.get_grammar_compile_time().mean}'
         #     ]
-            f.write(" ".join("Timestamp="20251105_101317" Load_Time=1777.0 Generated_Tokens=50 Input_Tokens=103 TTFT_Mean=1792.8023681640625 TPOT_Mean=109.8032455444336 Throughput_Mean=9.107198715209961 Generate_Duration_Mean=7175.43212890625 Tokenization_Duration_Mean=3.36899995803833 Detokenization_Duration_Mean=0.44200000166893005 Grammar_Compile_Max=-1.0 Grammar_Compile_Min=-1.0 Grammar_Compile_Std=-1.0 Grammar_Compile_Mean=-1.0
-") + "\n")
+            f.write(" ".join("Timestamp="20251105_101317" Load_Time=1777.0 Generated_Tokens=50 Input_Tokens=103 TTFT_Mean=1792.8023681640625 TPOT_Mean=109.8032455444336 Throughput_Mean=9.107198715209961 Generate_Duration_Mean=7175.43212890625 Tokenization_Duration_Mean=3.36899995803833 Detokenization_Duration_Mean=0.44200000166893005 Grammar_Compile_Max=-1.0 Grammar_Compile_Min=-1.0 Grammar_Compile_Std=-1.0 Grammar_Compile_Mean=-1.0" + "\n")
             f.close()
 
 def get_vlm_call_average_duration():
