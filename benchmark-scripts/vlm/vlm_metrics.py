@@ -4,7 +4,7 @@ import sys
 def log_vlm_metrics(vlm_result):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = "vlm_performance_metrics.txt"
-    results_dir = os.getenv("RESULTS_DIR")
+    results_dir = os.getenv("CONTAINER_RESULTS_PATH")
     os.makedirs(results_dir, exist_ok=True)  # <--- Ensure directory exists
     filepath = os.path.join(results_dir, filename)
     print("The file path is: ", filepath)
