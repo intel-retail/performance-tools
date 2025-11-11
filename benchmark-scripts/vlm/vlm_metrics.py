@@ -1,9 +1,11 @@
 import datetime
 import os
 import sys
+import socket
 def log_vlm_metrics(vlm_result):
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = "vlm_performance_metrics.txt"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")    
+    container_id = socket.gethostname()
+    filename = "vlm_performance_metrics_" + container_id + ".txt"
     results_dir = os.getenv("CONTAINER_RESULTS_PATH")
     os.makedirs(results_dir, exist_ok=True)  # <--- Ensure directory exists
     filepath = os.path.join(results_dir, filename)
