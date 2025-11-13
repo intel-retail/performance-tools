@@ -25,25 +25,25 @@ def log_vlm_metrics(vlm_result):
     filepath = os.path.join(results_dir, filename)
     print("The file path is: ", filepath)
     with open(filepath, "a") as f:
-        # if hasattr(vlm_result, 'perf_metrics'):
-        #     # Log format: key=value pairs separated by spaces
-        #     metrics = [
-        #         f'Timestamp="{timestamp}"',
-        #         f'Load_Time={vlm_result.perf_metrics.get_load_time()}',
-        #         f'Generated_Tokens={vlm_result.perf_metrics.get_num_generated_tokens()}',
-        #         f'Input_Tokens={vlm_result.perf_metrics.get_num_input_tokens()}',
-        #         f'TTFT_Mean={vlm_result.perf_metrics.get_ttft().mean}',
-        #         f'TPOT_Mean={vlm_result.perf_metrics.get_tpot().mean}',
-        #         f'Throughput_Mean={vlm_result.perf_metrics.get_throughput().mean}',
-        #         f'Generate_Duration_Mean={vlm_result.perf_metrics.get_generate_duration().mean}',
-        #         f'Tokenization_Duration_Mean={vlm_result.perf_metrics.get_tokenization_duration().mean}',
-        #         f'Detokenization_Duration_Mean={vlm_result.perf_metrics.get_detokenization_duration().mean}',
-        #         f'Grammar_Compile_Max={vlm_result.perf_metrics.get_grammar_compile_time().max}',
-        #         f'Grammar_Compile_Min={vlm_result.perf_metrics.get_grammar_compile_time().min}',
-        #         f'Grammar_Compile_Std={vlm_result.perf_metrics.get_grammar_compile_time().std}',
-        #         f'Grammar_Compile_Mean={vlm_result.perf_metrics.get_grammar_compile_time().mean}'
-        #     ]
-            f.write("Timestamp=20251105_101317 Load_Time=1777.0 Generated_Tokens=50 Input_Tokens=103 TTFT_Mean=1792.8023681640625 TPOT_Mean=109.8032455444336 Throughput_Mean=9.107198715209961 Generate_Duration_Mean=7175.43212890625 Tokenization_Duration_Mean=3.36899995803833 Detokenization_Duration_Mean=0.44200000166893005 Grammar_Compile_Max=-1.0 Grammar_Compile_Min=-1.0 Grammar_Compile_Std=-1.0 Grammar_Compile_Mean=-1.0" + "\n")
+         if hasattr(vlm_result, 'perf_metrics'):
+             # Log format: key=value pairs separated by spaces
+             metrics = [
+                 f'Timestamp="{timestamp}"',
+                 f'Load_Time={vlm_result.perf_metrics.get_load_time()}',
+                 f'Generated_Tokens={vlm_result.perf_metrics.get_num_generated_tokens()}',
+                 f'Input_Tokens={vlm_result.perf_metrics.get_num_input_tokens()}',
+                 f'TTFT_Mean={vlm_result.perf_metrics.get_ttft().mean}',
+                 f'TPOT_Mean={vlm_result.perf_metrics.get_tpot().mean}',
+                 f'Throughput_Mean={vlm_result.perf_metrics.get_throughput().mean}',
+                 f'Generate_Duration_Mean={vlm_result.perf_metrics.get_generate_duration().mean}',
+                 f'Tokenization_Duration_Mean={vlm_result.perf_metrics.get_tokenization_duration().mean}',
+                 f'Detokenization_Duration_Mean={vlm_result.perf_metrics.get_detokenization_duration().mean}',
+                 f'Grammar_Compile_Max={vlm_result.perf_metrics.get_grammar_compile_time().max}',
+                 f'Grammar_Compile_Min={vlm_result.perf_metrics.get_grammar_compile_time().min}',
+                 f'Grammar_Compile_Std={vlm_result.perf_metrics.get_grammar_compile_time().std}',
+                 f'Grammar_Compile_Mean={vlm_result.perf_metrics.get_grammar_compile_time().mean}'
+             ]
+            f.write(" ".join(metrics) + "\n")
             f.close()
 
 def get_vlm_call_average_duration():
