@@ -6,7 +6,7 @@
 
 services:
   benchmark:
-    image: iotgdevcloud/benchmark:latest
+    image: intel/retail-benchmark:latest
     container_name: metrics-collector
     privileged: true
     pid: host
