@@ -9,7 +9,7 @@ def get_unique_file_name():
     global _unique_file_name
     if _unique_file_name is None:
         # First call: create a new unique name
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
         unique_id = uuid.uuid4().hex[:6]
         _unique_file_name = f"vlm_performance_metrics_{timestamp}_{unique_id}.txt"
     else:
