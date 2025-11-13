@@ -87,6 +87,35 @@ class NPUUsageExtractor(KPIExtractor):
     def return_blank(self):
         return {AVG_NPU_USAGE_CONSTANT: "NA"}
 
+class VLMPerformanceMetricsExtractor(KPIExtractor):
+    #overriding abstract method
+    def extract_data(self, log_file_path):
+       
+        print("parsing VLM latency")
+        latency = {}
+        total_duration = 0.0
+        count = 0
+        with open(log_file_path, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                for part in parts:
+                    if part.startswith("Generate_Duration_Mean="):
+                        duration_str = part.split("=")[1]
+                        try:
+                            duration = float(duration_str)
+                            total_duration += duration
+                            count += 1
+                        except ValueError:
+                            continue
+        
+        latency['VLM_TOTAL_CALLS'] = count
+        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count
+    
+        return latency
+    
+    def return_blank(self):
+        return {"VLM_TOTAL_CALLS": "NA", 'VLM_AVERAGE_CALL_DURATION': "NA"}
+
 class GPUUsageExtractor(KPIExtractor):
     #overriding abstract method
     def extract_data(self, log_file_path):
