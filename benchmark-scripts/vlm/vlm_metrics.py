@@ -1,11 +1,25 @@
 import datetime
 import os
 import sys
-import socket
+import uuid
+
+_unique_file_name = None
+
+def get_unique_file_name():
+    global _unique_file_name
+    if _unique_file_name is None:
+        # First call: create a new unique name
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = uuid.uuid4().hex[:6]
+        _unique_file_name = f"vlm_performance_metrics_{timestamp}_{unique_id}.txt"
+    else:
+        # Subsequent calls reuse it
+        print(f"Reusing existing file: {_unique_file_name}")
+    return _unique_file_name
+    
 def log_vlm_metrics(vlm_result):
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")    
-    container_id = socket.gethostname()
-    filename = "vlm_performance_metrics_" + container_id + ".txt"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") 
+    filename = get_unique_file_name()
     results_dir = os.getenv("CONTAINER_RESULTS_PATH")
     os.makedirs(results_dir, exist_ok=True)  # <--- Ensure directory exists
     filepath = os.path.join(results_dir, filename)
