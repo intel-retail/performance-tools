@@ -25,9 +25,9 @@ def log_vlm_metrics(vlm_result):
     filepath = os.path.join(results_dir, filename)
     print("The file path is: ", filepath)
     with open(filepath, "a") as f:
-         if hasattr(vlm_result, 'perf_metrics'):
-             # Log format: key=value pairs separated by spaces
-             metrics = [
+        if hasattr(vlm_result, 'perf_metrics'):
+            # Log format: key=value pairs separated by spaces
+            metrics = [
                  f'Timestamp="{timestamp}"',
                  f'Load_Time={vlm_result.perf_metrics.get_load_time()}',
                  f'Generated_Tokens={vlm_result.perf_metrics.get_num_generated_tokens()}',
@@ -42,9 +42,10 @@ def log_vlm_metrics(vlm_result):
                  f'Grammar_Compile_Min={vlm_result.perf_metrics.get_grammar_compile_time().min}',
                  f'Grammar_Compile_Std={vlm_result.perf_metrics.get_grammar_compile_time().std}',
                  f'Grammar_Compile_Mean={vlm_result.perf_metrics.get_grammar_compile_time().mean}'
-             ]
+            ]
             f.write(" ".join(metrics) + "\n")
             f.close()
+        
 
 def get_vlm_call_average_duration():
     filename = "vlm_performance_metrics.txt"
