@@ -6,7 +6,7 @@
 
 services:
   benchmark:
-    image: intel/retail-benchmark:latest
+    image: intel/retail-benchmark:${TAG:-rc1}
     container_name: metrics-collector
     privileged: true
     pid: host
