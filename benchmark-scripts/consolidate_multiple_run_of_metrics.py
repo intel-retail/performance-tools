@@ -486,7 +486,7 @@ class PipelineLatencyExtractor(KPIExtractor):
         with open(log_file_path) as f:
             for line in f:
               if "latency_tracer_pipeline" in line:
-                match = re.search(r'avg=\(double\)([0-9]*\.?[0-9]+)', line)
+                match = re.search(r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
                 if match:
                     average_latency_value=match.group(1)
         if len(average_latency_value) > 0:
