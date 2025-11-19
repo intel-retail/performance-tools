@@ -68,7 +68,21 @@ fi
 
 if [ ! -f "../sample-media/$1" ] && [ ! -f "../sample-media/$result" ]
 then	
-	wget -O "../sample-media/$1" "$2"
+	echo "Downloading video file...####################################"
+	DOWNLOAD_URL="$2"
+	# Robust curl: follow redirects, fail on HTTP errors, show errors, set UA.
+	if ! curl -L --fail --show-error --connect-timeout 15 -A "Mozilla/5.0" -o "../sample-media/$1.part" "$DOWNLOAD_URL"; then
+		echo "ERROR: Download failed."
+		rm -f "../sample-media/$1.part"
+		exit 1
+	fi
+	mv "../sample-media/$1.part" "../sample-media/$1"
+	# Verify non-empty file.
+	if [ ! -s "../sample-media/$1" ]; then
+		echo "ERROR: Download resulted in empty file."
+		rm -f "../sample-media/$1"
+		exit 1
+	fi
 fi
 
 if [ ! -f "../sample-media/$1" ]
