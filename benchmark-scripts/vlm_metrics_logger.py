@@ -28,6 +28,16 @@ class VLMMetricsLogger:
         """Setup the logger with file rotation"""
         # Create logs directory if it doesn't exist
         os.makedirs(self.log_dir, exist_ok=True)
+
+        # Delete existing VLM metrics files if they exist
+        if self.log_dir:
+            for filename in os.listdir(self.log_dir):
+                if filename.startswith('vlm_application_metrics') or filename.startswith('vlm_performance_metrics'):
+                    file_path = os.path.join(self.log_dir, filename)
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass  # Ignore errors if file can't be deleted
         
         # Create main logger
         self.logger = logging.getLogger('vlm_metrics_logger')
