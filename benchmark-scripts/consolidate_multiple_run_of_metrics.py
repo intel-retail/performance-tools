@@ -164,7 +164,7 @@ class VLMPerformanceMetricsExtractor(KPIExtractor):
                             continue
         
         latency['VLM_TOTAL_CALLS'] = count
-        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count
+        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
     
         return latency
     

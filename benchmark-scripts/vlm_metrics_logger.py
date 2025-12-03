@@ -171,7 +171,6 @@ class VLMMetricsLogger:
     def log_performance_metrics(self, vlm_metrics_result_object):
         
         timestamp_ms = int(time.time() * 1000)
-        vlm_metrics_result_object
         log_data = {
             'application': 'vlm-performance',
             'timestamp_ms': timestamp_ms,
