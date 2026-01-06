@@ -4,7 +4,7 @@ import time
 import uuid
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-
+from dotenv import load_dotenv, dotenv_values
 
 class VLMMetricsLogger:
     
@@ -23,6 +23,7 @@ class VLMMetricsLogger:
         self.logger = None
         self.performance_logger = None
         self._setup_logger(max_bytes, backup_count)
+        load_dotenv("../../.env")
     
     def _setup_logger(self, max_bytes, backup_count):
         """Setup the logger with file rotation"""
@@ -90,17 +91,12 @@ class VLMMetricsLogger:
             # Add handler to performance logger (no console output for performance)
             self.performance_logger.addHandler(performance_file_handler)
     
-    def log_start_time(self, application_name):
-        """
-        Log application start time
+    def log_start_time(self, usecase_name):
         
-        Args:
-            application_name (str): Name of the application
-        """
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
-            'application': application_name,
+            'application': os.getenv(usecase_name),
             'event': 'start',
             'timestamp_ms': timestamp_ms
         }
@@ -112,17 +108,12 @@ class VLMMetricsLogger:
         self.logger.info(message)
         return timestamp_ms
     
-    def log_end_time(self, application_name):
-        """
-        Log application end time
+    def log_end_time(self, usecase_name):
         
-        Args:
-            application_name (str): Name of the application
-        """
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
-            'application': application_name,
+            'application': os.getenv(usecase_name),
             'event': 'end',
             'timestamp_ms': timestamp_ms
         }
@@ -134,19 +125,11 @@ class VLMMetricsLogger:
         self.logger.info(message)
         return timestamp_ms
     
-    def log_custom_event(self, event_type, application_name, **kwargs):
-        """
-        Log custom event with additional parameters
-        
-        Args:
-            event_type (str): Type of event (e.g., 'error', 'warning', 'info')
-            application_name (str): Name of the application
-            **kwargs: Additional key-value pairs to log
-        """
+    def log_custom_event(self, event_type, usecase_name, **kwargs):
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
-            'application': application_name,
+            'application': os.getenv(usecase_name),
             'event': event_type,
             'timestamp_ms': timestamp_ms
         }
@@ -168,11 +151,11 @@ class VLMMetricsLogger:
         
         return timestamp_ms
     
-    def log_performance_metrics(self, vlm_metrics_result_object):
+    def log_performance_metrics(self, usecase_name, vlm_metrics_result_object):
         
         timestamp_ms = int(time.time() * 1000)
         log_data = {
-            'application': 'vlm-performance',
+            'application':  os.getenv(usecase_name),
             'timestamp_ms': timestamp_ms,
             'Load_Time' : vlm_metrics_result_object.perf_metrics.get_load_time(),
             'Generated_Tokens':vlm_metrics_result_object.perf_metrics.get_num_generated_tokens(),
@@ -220,6 +203,6 @@ def log_custom_event(event_type, application_name, **kwargs):
     """Convenience function for logging custom events"""
     return get_logger().log_custom_event(event_type, application_name, **kwargs)
 
-def log_performance_metric(metrics):
+def log_performance_metric(application_name,metrics):
     """Convenience function for logging performance metrics"""
-    return get_logger().log_performance_metrics(metrics)
+    return get_logger().log_performance_metrics(application_name,metrics)
