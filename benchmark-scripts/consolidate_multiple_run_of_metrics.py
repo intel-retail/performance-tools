@@ -655,8 +655,8 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "pcm.csv":PCMExtractor,
                        r"(?:^xpum).*\.json$": XPUMUsageExtractor,
                        r"^qmassa.*parsed.*\.json$": QMASSAGPUUsageExtractor,
-                       r"^vlm_application_metrics.*\.txt$": VLMAppMetricsExtractor,}
-                       r"^vlm_performance_metrics.*\.txt$": VLMPerformanceMetricsExtractor,}
+                       r"^vlm_application_metrics.*\.txt$": VLMAppMetricsExtractor,
+                       r"^vlm_performance_metrics.*\.txt$": VLMPerformanceMetricsExtractor}
 
 def add_parser():
     parser = argparse.ArgumentParser(description='Consolidate data')
