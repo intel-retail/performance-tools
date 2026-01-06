@@ -22,10 +22,8 @@ class VLMMetricsLogger:
         
         self.logger = None
         self.performance_logger = None
-        self._setup_logger(max_bytes, backup_count)
-        cwd = os.getcwd()
-        print("Current working directory:", cwd)
-        load_dotenv("../../.env")
+        self._setup_logger(max_bytes, backup_count)      
+        load_dotenv()
     
     def _setup_logger(self, max_bytes, backup_count):
         """Setup the logger with file rotation"""
