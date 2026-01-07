@@ -4,7 +4,6 @@ import time
 import uuid
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-from dotenv import load_dotenv, dotenv_values
 
 class VLMMetricsLogger:
     
@@ -22,8 +21,7 @@ class VLMMetricsLogger:
         
         self.logger = None
         self.performance_logger = None
-        self._setup_logger(max_bytes, backup_count)      
-        #load_dotenv()
+        self._setup_logger(max_bytes, backup_count)
     
     def _setup_logger(self, max_bytes, backup_count):
         """Setup the logger with file rotation"""
