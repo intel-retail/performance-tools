@@ -96,7 +96,7 @@ class VLMAppMetricsExtractor:
             for line in file:
                 line = line.strip()
                 if 'application=' in line and 'timestamp_ms=' in line:
-                    pattern = r'(\w+)=([^\s]+)'
+                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
                     matches = re.findall(pattern, line)
                     data = dict(matches)
                     if data:
@@ -131,11 +131,13 @@ class VLMAppMetricsExtractor:
         # Generate statistics
         statistics = {}
         for app_name, duration_list in durations.items():
+            count = 0
             if duration_list:
-                statistics[f"{app_name} Total Duration (ms)"] = sum(duration_list)
+                count = len(duration_list)
+                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = (sum(duration_list)/count)
 
             else:
-                statistics[f"{app_name} Total Duration (ms)"] = 0
+                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = 0
         
         return statistics
 
