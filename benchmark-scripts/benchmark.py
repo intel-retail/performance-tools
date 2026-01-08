@@ -196,6 +196,7 @@ def main():
     env_vars["DEVICE"] = my_args.target_device
     retail_use_case_root = os.path.abspath(my_args.retail_use_case_root)
     env_vars["RETAIL_USE_CASE_ROOT"] = retail_use_case_root
+    env_vars["VLM_WORKLOAD_ENABLED"] = str(os.getenv("LP_VLM_WORKLOAD_ENABLED"))
     if my_args.density_increment:
         env_vars["PIPELINE_INC"] = str(my_args.density_increment)
     if len(target_fps_list) > 1 and container_names_list:
