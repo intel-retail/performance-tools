@@ -87,6 +87,92 @@ class NPUUsageExtractor(KPIExtractor):
     def return_blank(self):
         return {AVG_NPU_USAGE_CONSTANT: "NA"}
 
+
+class VLMAppMetricsExtractor:
+    def extract_data(self, log_file_path):
+        print("parsing application performance metrics")
+        timing_data = defaultdict(list)
+        with open(log_file_path, 'r') as file:
+            for line in file:
+                line = line.strip()
+                if 'application=' in line and 'timestamp_ms=' in line:
+                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+                    matches = re.findall(pattern, line)
+                    data = dict(matches)
+                    if data:
+                        app_name = data.get('application')
+                        event = data.get('event')
+                        timestamp_ms = data.get('timestamp_ms')
+                
+                        if app_name and event in ['start', 'end'] and timestamp_ms:
+                            timing_data[app_name].append({
+                                'event': event,
+                                'timestamp_ms': int(timestamp_ms)
+                            })
+        
+        # Calculate durations for each application
+        app_durations = defaultdict(list)
+        apps_to_analyze = timing_data.keys()
+        
+        for app_name in apps_to_analyze:
+            events = sorted(timing_data[app_name], key=lambda x: x['timestamp_ms'])
+            start_time = None
+            
+            for event in events:
+                if event['event'] == 'start':
+                    start_time = event['timestamp_ms']
+                elif event['event'] == 'end' and start_time is not None:
+                    duration = event['timestamp_ms'] - start_time
+                    app_durations[app_name].append(duration)
+                    start_time = None
+
+        durations = dict(app_durations)
+
+        # Generate statistics
+        statistics = {}
+        for app_name, duration_list in durations.items():
+            count = 0
+            if duration_list:
+                count = len(duration_list)
+                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = (sum(duration_list)/count)
+
+            else:
+                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = 0
+        
+        return statistics
+
+    def return_blank(self):
+        return {"Application Performance Metrics": "NA"}
+
+class VLMPerformanceMetricsExtractor(KPIExtractor):
+    #overriding abstract method
+    def extract_data(self, log_file_path):
+       
+        print("parsing VLM latency")
+        latency = {}
+        total_duration = 0.0
+        count = 0
+        with open(log_file_path, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                for part in parts:
+                    if part.startswith("Generate_Duration_Mean="):
+                        duration_str = part.split("=")[1]
+                        try:
+                            duration = float(duration_str)
+                            total_duration += duration
+                            count += 1
+                        except ValueError:
+                            continue
+        
+        latency['VLM_TOTAL_CALLS'] = count
+        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
+    
+        return latency
+    
+    def return_blank(self):
+        return {"VLM_TOTAL_CALLS": "NA", 'VLM_AVERAGE_CALL_DURATION': "NA"}
+
 class GPUUsageExtractor(KPIExtractor):
     #overriding abstract method
     def extract_data(self, log_file_path):
@@ -570,7 +656,9 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "power_usage.log":PowerUsageExtractor,
                        "pcm.csv":PCMExtractor,
                        r"(?:^xpum).*\.json$": XPUMUsageExtractor,
-                       r"^qmassa.*parsed.*\.json$": QMASSAGPUUsageExtractor, }
+                       r"^qmassa.*parsed.*\.json$": QMASSAGPUUsageExtractor,
+                       r"^vlm_application_metrics.*\.txt$": VLMAppMetricsExtractor,
+                       r"^vlm_performance_metrics.*\.txt$": VLMPerformanceMetricsExtractor}
 
 def add_parser():
     parser = argparse.ArgumentParser(description='Consolidate data')
