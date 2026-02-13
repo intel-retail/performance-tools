@@ -8,7 +8,7 @@ import pathlib
 import datetime
 import argparse
 from abc import ABC, abstractmethod
-from statistics import mean
+from statistics import mean, stdev, median
 import os
 import re
 import fnmatch
@@ -38,6 +38,66 @@ LAST_MODIFIED_LOG = "Last log update"
 TEXT_COUNT_CONSTANT = "Total Text count"
 BARCODE_COUNT_CONSTANT = "Total Barcode count"
 PIPELINE_LATENCY_CONSTANT = "Latency"
+
+def get_vlm_application_latency(log_file_path):
+    """
+    Extract timing data from VLM application metrics log files.
+    
+    Args:
+        log_file_path (str): Path to the log file
+        
+    Returns:
+        dict: Statistics for each application-id combination
+    """
+    timing_data = defaultdict(list)
+    with open(log_file_path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if 'application=' in line and 'timestamp_ms=' in line:
+                pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+                matches = re.findall(pattern, line)
+                data = dict(matches)
+                if data:
+                    app_name = data.get('application')
+                    id_value = data.get('id')
+                    event = data.get('event')
+                    timestamp_ms = data.get('timestamp_ms')
+            
+                    if app_name and id_value and event in ['start', 'end'] and timestamp_ms:
+                        timing_data[f"{app_name}_{id_value}"].append({
+                            'event': event,
+                            'timestamp_ms': int(timestamp_ms)
+                        })
+    
+    # Calculate durations for each application
+    app_durations = defaultdict(list)
+    apps_to_analyze = timing_data.keys()
+    
+    for app_id_combo in apps_to_analyze:
+        events = sorted(timing_data[app_id_combo], key=lambda x: x['timestamp_ms'])
+        start_time = None
+        
+        for event in events:
+            if event['event'] == 'start':
+                start_time = event['timestamp_ms']
+            elif event['event'] == 'end' and start_time is not None:
+                duration = event['timestamp_ms'] - start_time
+                app_durations[app_id_combo].append(duration)
+                start_time = None
+
+    durations = dict(app_durations)
+
+    # Generate statistics
+    statistics = {}
+    for app_id_combo, duration_list in durations.items():
+        count = 0
+        if duration_list:
+            count = len(duration_list)
+            statistics[f"Based on {count} total calls, the average {app_id_combo} in (ms)"] = (sum(duration_list)/count)
+        else:
+            statistics[f"Based on {count} total calls, the average {app_id_combo} in (ms)"] = 0
+    
+    return statistics
 
 class KPIExtractor(ABC):
     @abstractmethod
@@ -88,87 +148,72 @@ class NPUUsageExtractor(KPIExtractor):
         return {AVG_NPU_USAGE_CONSTANT: "NA"}
 
 
-class VLMAppMetricsExtractor:
+class VLMAppMetricsExtractor(KPIExtractor):
     def extract_data(self, log_file_path):
         print("parsing application performance metrics")
-        timing_data = defaultdict(list)
-        with open(log_file_path, 'r') as file:
-            for line in file:
-                line = line.strip()
-                if 'application=' in line and 'timestamp_ms=' in line:
-                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
-                    matches = re.findall(pattern, line)
-                    data = dict(matches)
-                    if data:
-                        app_name = data.get('application')
-                        event = data.get('event')
-                        timestamp_ms = data.get('timestamp_ms')
-                
-                        if app_name and event in ['start', 'end'] and timestamp_ms:
-                            timing_data[app_name].append({
-                                'event': event,
-                                'timestamp_ms': int(timestamp_ms)
-                            })
-        
-        # Calculate durations for each application
-        app_durations = defaultdict(list)
-        apps_to_analyze = timing_data.keys()
-        
-        for app_name in apps_to_analyze:
-            events = sorted(timing_data[app_name], key=lambda x: x['timestamp_ms'])
-            start_time = None
-            
-            for event in events:
-                if event['event'] == 'start':
-                    start_time = event['timestamp_ms']
-                elif event['event'] == 'end' and start_time is not None:
-                    duration = event['timestamp_ms'] - start_time
-                    app_durations[app_name].append(duration)
-                    start_time = None
-
-        durations = dict(app_durations)
-
-        # Generate statistics
-        statistics = {}
-        for app_name, duration_list in durations.items():
-            count = 0
-            if duration_list:
-                count = len(duration_list)
-                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = (sum(duration_list)/count)
-
-            else:
-                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = 0
-        
-        return statistics
+        return get_vlm_application_latency(log_file_path)
 
     def return_blank(self):
         return {"Application Performance Metrics": "NA"}
 
 class VLMPerformanceMetricsExtractor(KPIExtractor):
     #overriding abstract method
-    def extract_data(self, log_file_path):
-       
+    def extract_data(self, log_file_path):       
         print("parsing VLM latency")
-        latency = {}
-        total_duration = 0.0
-        count = 0
+        app_id_performance_data = defaultdict(list)
+        
         with open(log_file_path, "r") as f:
             for line in f:
-                parts = line.strip().split()
-                for part in parts:
-                    if part.startswith("Generate_Duration_Mean="):
-                        duration_str = part.split("=")[1]
-                        try:
-                            duration = float(duration_str)
-                            total_duration += duration
-                            count += 1
-                        except ValueError:
-                            continue
+                line = line.strip()
+                if 'Generate_Duration_Mean=' in line and 'application=' in line and 'id=' in line:
+                    # Parse the line to extract key-value pairs
+                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+                    matches = re.findall(pattern, line)
+                    data = dict(matches)
+                    
+                    if data:
+                        app_name = data.get('application')
+                        id_value = data.get('id')
+                        duration_str = data.get('Generate_Duration_Mean')
+                        
+                        if app_name and id_value and duration_str:
+                            try:
+                                duration = float(duration_str)
+                                app_id_combo = f"{app_name}_{id_value}"
+                                app_id_performance_data[app_id_combo].append(duration)
+                            except ValueError:
+                                continue
         
-        latency['VLM_TOTAL_CALLS'] = count
-        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
+        # Calculate statistics for each application-id combination
+        performance_stats = {}
+        for app_id_combo, durations in app_id_performance_data.items():
+            if durations:
+                call_count = len(durations)
+                avg_duration = sum(durations) / call_count
+                performance_stats[f"VLM_TOTAL_CALLS_{app_id_combo}"] = call_count
+                performance_stats[f"VLM_AVERAGE_CALL_DURATION_{app_id_combo}"] = avg_duration
+        
+        # If no application-id based data found, fall back to the original approach
+        if not performance_stats:
+            total_duration = 0.0
+            count = 0
+            with open(log_file_path, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    for part in parts:
+                        if part.startswith("Generate_Duration_Mean="):
+                            duration_str = part.split("=")[1]
+                            try:
+                                duration = float(duration_str)
+                                total_duration += duration
+                                count += 1
+                            except ValueError:
+                                continue
+            
+            performance_stats['VLM_TOTAL_CALLS'] = count
+            performance_stats['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
     
-        return latency
+        return performance_stats
     
     def return_blank(self):
         return {"VLM_TOTAL_CALLS": "NA", 'VLM_AVERAGE_CALL_DURATION': "NA"}
@@ -564,23 +609,68 @@ class PipelineLatencyExtractor(KPIExtractor):
     def extract_data(self, log_file_path):
         
         print("parsing latency")
-        average_latency_value = ""
+        # Data structure to store latency data organized by source_name and sink_name
+        latency_data_structure = {}  # {(source_name, sink_name): {frame_number: frame_latency_value}}
         latency = {}
         lat = re.findall(r'\d+', os.path.basename(log_file_path))
         lat_filename = lat[0] if len(lat) > 0 else "UNKNOWN"
-        latency_key = "Pipeline_{} {}".format(lat_filename, PIPELINE_LATENCY_CONSTANT)
+        
         with open(log_file_path) as f:
             for line in f:
-              if "latency_tracer_pipeline" in line:
-                match = re.search(r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
-                if match:
-                    average_latency_value=match.group(1)
-        if len(average_latency_value) > 0:
-            latency[latency_key] = average_latency_value
-        else:
-            latency[latency_key] = "NA"
+                if "latency_tracer_pipeline" in line:
+                    match = re.search(r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
+                    source_name_match = re.search(r'source_name=\(string\)([^,\s]+)', line)
+                    sink_name_match = re.search(r'sink_name=\(string\)([^,\s]+)', line)
+                    frame_number_match = re.search(r'frame_num=\(uint\)(\d+)', line)
+                    
+                    if match and source_name_match and sink_name_match and frame_number_match:
+                        source_name = source_name_match.group(1)
+                        sink_name = sink_name_match.group(1)
+                        frame_number = int(frame_number_match.group(1))
+                        frame_latency_value = float(match.group(1))
+                        
+                        # Create key from source_name and sink_name
+                        source_sink_key = (source_name, sink_name)
+                        
+                        # Initialize dictionary for this source-sink pair if not exists
+                        if source_sink_key not in latency_data_structure:
+                            latency_data_structure[source_sink_key] = {}
+                        
+                        # Store frame latency value with frame number as key
+                        latency_data_structure[source_sink_key][frame_number] = frame_latency_value
 
-        return latency
+        # Process collected data and calculate statistics
+        latency_results = {}
+        channel_medians = {}
+        channel_averages = {}
+        channel_stddevs = {}
+        
+        if latency_data_structure:
+            for (source_name, sink_name), frame_data in latency_data_structure.items():
+                if frame_data:  # Check if we have frame data
+                    latency_values = list(frame_data.values())
+                    median_latency = median(latency_values)
+                    average_latency = mean(latency_values)
+                    stddev_latency = stdev(latency_values) if len(latency_values) > 1 else 0.0
+                    
+                    channel_key = f"{source_name}_{sink_name}"
+                    channel_medians[channel_key] = round(median_latency, 3)
+                    channel_averages[channel_key] = round(average_latency, 3)
+                    channel_stddevs[channel_key] = round(stddev_latency, 3)
+                    
+                    print(f"Pipeline_{lat_filename} {source_name}_{sink_name}: median = {median_latency:.3f} ms, average = {average_latency:.3f} ms, stddev = {stddev_latency:.3f} ms, frames = {len(frame_data)}")
+
+        # Store results
+        if channel_medians:
+            latency_results[f"For Pipeline_{lat_filename} run per frame Latency (ms) for Channel(source_sink)"] = channel_medians
+            
+        if channel_averages:
+            latency_results[f"For Pipeline_{lat_filename} run per frame Average Latency (ms) for Channel(source_sink)"] = channel_averages
+            
+        if channel_stddevs:
+            latency_results[f"For Pipeline_{lat_filename} run per frame Stddev Latency (ms) for Channel(source_sink)"] = channel_stddevs
+
+        return latency_results
 
     def return_blank(self):
         return {"LATENCY": "NA"}
@@ -676,6 +766,8 @@ if __name__ == '__main__':
     n = 0
     df = pd.DataFrame()
     full_kpi_dict = {}
+    all_channel_medians = []  # Collect all channel medians from all files
+    
     for kpiExtractor in KPIExtractor_OPTION:
         fileFound = False
         for dirpath, dirname, filename in os.walk(root_directory):
@@ -686,10 +778,28 @@ if __name__ == '__main__':
                     kpi_dict = extractor.extract_data(
                         os.path.join(root_directory, file))
                     if kpi_dict:
+                        # Collect max median from each file for aggregate statistics
+                        for key, value in kpi_dict.items():
+                            if "run per frame Latency (ms) for Channel(source_sink)" in key and isinstance(value, dict):
+                                # Add only the max median from this file to all_channel_medians
+                                if value:  # Check if dictionary is not empty
+                                    max_median_for_file = max(value.values())
+                                    all_channel_medians.append(max_median_for_file)
                         full_kpi_dict.update(kpi_dict)
-
+    
+    # Calculate aggregate statistics of all channel medians
+    if all_channel_medians:
+        overall_median = median(all_channel_medians)
+        
+        full_kpi_dict["Overall Latency (ms)"] = round(overall_median, 3)
+       
     # Write out summary csv file from dictionary
     with open(output, 'w') as csv_file:
         writer = csv.writer(csv_file)
         for key, value in full_kpi_dict.items():
-            writer.writerow([key, value])
+            if isinstance(value, dict):
+                # Format dictionary values without curly braces
+                formatted_value = ', '.join([f'{k}: {v}' for k, v in value.items()])
+                writer.writerow([key, formatted_value])
+            else:
+                writer.writerow([key, value])
