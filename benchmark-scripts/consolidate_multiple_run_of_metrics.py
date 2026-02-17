@@ -39,6 +39,66 @@ TEXT_COUNT_CONSTANT = "Total Text count"
 BARCODE_COUNT_CONSTANT = "Total Barcode count"
 PIPELINE_LATENCY_CONSTANT = "Latency"
 
+def get_vlm_application_latency(log_file_path):
+    """
+    Extract timing data from VLM application metrics log files.
+    
+    Args:
+        log_file_path (str): Path to the log file
+        
+    Returns:
+        dict: Statistics for each application-id combination
+    """
+    timing_data = defaultdict(list)
+    with open(log_file_path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if 'application=' in line and 'timestamp_ms=' in line:
+                pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+                matches = re.findall(pattern, line)
+                data = dict(matches)
+                if data:
+                    app_name = data.get('application')
+                    id_value = data.get('id')
+                    event = data.get('event')
+                    timestamp_ms = data.get('timestamp_ms')
+            
+                    if app_name and id_value and event in ['start', 'end'] and timestamp_ms:
+                        timing_data[f"{app_name}_{id_value}"].append({
+                            'event': event,
+                            'timestamp_ms': int(timestamp_ms)
+                        })
+    
+    # Calculate durations for each application
+    app_durations = defaultdict(list)
+    apps_to_analyze = timing_data.keys()
+    
+    for app_id_combo in apps_to_analyze:
+        events = sorted(timing_data[app_id_combo], key=lambda x: x['timestamp_ms'])
+        start_time = None
+        
+        for event in events:
+            if event['event'] == 'start':
+                start_time = event['timestamp_ms']
+            elif event['event'] == 'end' and start_time is not None:
+                duration = event['timestamp_ms'] - start_time
+                app_durations[app_id_combo].append(duration)
+                start_time = None
+
+    durations = dict(app_durations)
+
+    # Generate statistics
+    statistics = {}
+    for app_id_combo, duration_list in durations.items():
+        count = 0
+        if duration_list:
+            count = len(duration_list)
+            statistics[f"Based on {count} total calls, the average {app_id_combo} in (ms)"] = (sum(duration_list)/count)
+        else:
+            statistics[f"Based on {count} total calls, the average {app_id_combo} in (ms)"] = 0
+    
+    return statistics
+
 class KPIExtractor(ABC):
     @abstractmethod
     def extract_data(self, log_file_path):
@@ -88,87 +148,72 @@ class NPUUsageExtractor(KPIExtractor):
         return {AVG_NPU_USAGE_CONSTANT: "NA"}
 
 
-class VLMAppMetricsExtractor:
+class VLMAppMetricsExtractor(KPIExtractor):
     def extract_data(self, log_file_path):
         print("parsing application performance metrics")
-        timing_data = defaultdict(list)
-        with open(log_file_path, 'r') as file:
-            for line in file:
-                line = line.strip()
-                if 'application=' in line and 'timestamp_ms=' in line:
-                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
-                    matches = re.findall(pattern, line)
-                    data = dict(matches)
-                    if data:
-                        app_name = data.get('application')
-                        event = data.get('event')
-                        timestamp_ms = data.get('timestamp_ms')
-                
-                        if app_name and event in ['start', 'end'] and timestamp_ms:
-                            timing_data[app_name].append({
-                                'event': event,
-                                'timestamp_ms': int(timestamp_ms)
-                            })
-        
-        # Calculate durations for each application
-        app_durations = defaultdict(list)
-        apps_to_analyze = timing_data.keys()
-        
-        for app_name in apps_to_analyze:
-            events = sorted(timing_data[app_name], key=lambda x: x['timestamp_ms'])
-            start_time = None
-            
-            for event in events:
-                if event['event'] == 'start':
-                    start_time = event['timestamp_ms']
-                elif event['event'] == 'end' and start_time is not None:
-                    duration = event['timestamp_ms'] - start_time
-                    app_durations[app_name].append(duration)
-                    start_time = None
-
-        durations = dict(app_durations)
-
-        # Generate statistics
-        statistics = {}
-        for app_name, duration_list in durations.items():
-            count = 0
-            if duration_list:
-                count = len(duration_list)
-                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = (sum(duration_list)/count)
-
-            else:
-                statistics[f"Based on {count} total calls, the average {app_name} in (ms)"] = 0
-        
-        return statistics
+        return get_vlm_application_latency(log_file_path)
 
     def return_blank(self):
         return {"Application Performance Metrics": "NA"}
 
 class VLMPerformanceMetricsExtractor(KPIExtractor):
     #overriding abstract method
-    def extract_data(self, log_file_path):
-       
+    def extract_data(self, log_file_path):       
         print("parsing VLM latency")
-        latency = {}
-        total_duration = 0.0
-        count = 0
+        app_id_performance_data = defaultdict(list)
+        
         with open(log_file_path, "r") as f:
             for line in f:
-                parts = line.strip().split()
-                for part in parts:
-                    if part.startswith("Generate_Duration_Mean="):
-                        duration_str = part.split("=")[1]
-                        try:
-                            duration = float(duration_str)
-                            total_duration += duration
-                            count += 1
-                        except ValueError:
-                            continue
+                line = line.strip()
+                if 'Generate_Duration_Mean=' in line and 'application=' in line and 'id=' in line:
+                    # Parse the line to extract key-value pairs
+                    pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+                    matches = re.findall(pattern, line)
+                    data = dict(matches)
+                    
+                    if data:
+                        app_name = data.get('application')
+                        id_value = data.get('id')
+                        duration_str = data.get('Generate_Duration_Mean')
+                        
+                        if app_name and id_value and duration_str:
+                            try:
+                                duration = float(duration_str)
+                                app_id_combo = f"{app_name}_{id_value}"
+                                app_id_performance_data[app_id_combo].append(duration)
+                            except ValueError:
+                                continue
         
-        latency['VLM_TOTAL_CALLS'] = count
-        latency['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
+        # Calculate statistics for each application-id combination
+        performance_stats = {}
+        for app_id_combo, durations in app_id_performance_data.items():
+            if durations:
+                call_count = len(durations)
+                avg_duration = sum(durations) / call_count
+                performance_stats[f"VLM_TOTAL_CALLS_{app_id_combo}"] = call_count
+                performance_stats[f"VLM_AVERAGE_CALL_DURATION_{app_id_combo}"] = avg_duration
+        
+        # If no application-id based data found, fall back to the original approach
+        if not performance_stats:
+            total_duration = 0.0
+            count = 0
+            with open(log_file_path, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    for part in parts:
+                        if part.startswith("Generate_Duration_Mean="):
+                            duration_str = part.split("=")[1]
+                            try:
+                                duration = float(duration_str)
+                                total_duration += duration
+                                count += 1
+                            except ValueError:
+                                continue
+            
+            performance_stats['VLM_TOTAL_CALLS'] = count
+            performance_stats['VLM_AVERAGE_CALL_DURATION'] = total_duration / count if count > 0 else 0
     
-        return latency
+        return performance_stats
     
     def return_blank(self):
         return {"VLM_TOTAL_CALLS": "NA", 'VLM_AVERAGE_CALL_DURATION': "NA"}
