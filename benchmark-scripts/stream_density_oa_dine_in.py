@@ -60,6 +60,37 @@ except ImportError:
 
 
 # =============================================================================
+# Environment Variable Helpers
+# =============================================================================
+
+def get_env_int(name: str, default: int) -> int:
+    """Get integer from environment variable with default."""
+    value = os.environ.get(name)
+    if value is not None:
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning(f"Invalid {name}={value}, using default {default}")
+    return default
+
+
+def get_env_float(name: str, default: float) -> float:
+    """Get float from environment variable with default."""
+    value = os.environ.get(name)
+    if value is not None:
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning(f"Invalid {name}={value}, using default {default}")
+    return default
+
+
+def get_env_str(name: str, default: str) -> str:
+    """Get string from environment variable with default."""
+    return os.environ.get(name, default)
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
 
@@ -820,10 +851,29 @@ def main():
         print("Error: aiohttp is required. Install with: pip install aiohttp")
         sys.exit(1)
     
+    # Get defaults from environment variables
+    env_target_latency = get_env_float("TARGET_LATENCY_MS", 15000)
+    env_latency_metric = get_env_str("LATENCY_METRIC", "avg")
+    env_density_increment = get_env_int("DENSITY_INCREMENT", 1)
+    env_init_duration = get_env_int("INIT_DURATION", 60)
+    env_min_requests = get_env_int("MIN_REQUESTS", 3)
+    env_request_timeout = get_env_int("REQUEST_TIMEOUT", 300)
+    env_api_endpoint = get_env_str("API_ENDPOINT", "http://localhost:8083")
+    env_results_dir = get_env_str("RESULTS_DIR", "./results")
+    
     parser = argparse.ArgumentParser(
         description="Dine-In Order Accuracy Stream Density Test - Image-Based Latency Scaling\n\n"
                     "Increases concurrent image validations until target latency is exceeded.\n"
                     "Density = Number of concurrent images being processed through VLM.\n\n"
+                    "Environment Variables (CLI args override):\n"
+                    "  TARGET_LATENCY_MS   - Target latency in ms (default: 15000)\n"
+                    "  LATENCY_METRIC      - 'avg', 'p95', or 'max' (default: avg)\n"
+                    "  DENSITY_INCREMENT   - Images per iteration (default: 1)\n"
+                    "  INIT_DURATION       - Init wait seconds (default: 60)\n"
+                    "  MIN_REQUESTS        - Min requests per iteration (default: 3)\n"
+                    "  REQUEST_TIMEOUT     - Request timeout seconds (default: 300)\n"
+                    "  API_ENDPOINT        - Dine-in API URL (default: http://localhost:8083)\n"
+                    "  RESULTS_DIR         - Results output directory (default: ./results)\n\n"
                     "Example:\n"
                     "  python stream_density_oa_dine_in.py \\\n"
                     "      --compose_file /path/to/dine-in/docker-compose.yml \\\n"
@@ -840,45 +890,45 @@ def main():
     parser.add_argument(
         "--target_latency_ms",
         type=float,
-        default=15000,
-        help="Target latency threshold in milliseconds (default: 15000 = 15s)"
+        default=env_target_latency,
+        help=f"Target latency threshold in ms (default: {env_target_latency}, env: TARGET_LATENCY_MS)"
     )
     parser.add_argument(
         "--latency_metric",
         type=str,
         choices=["avg", "p95", "max"],
-        default="avg",
-        help="Which latency metric to use: avg, p95, or max (default: avg)"
+        default=env_latency_metric,
+        help=f"Which latency metric to use (default: {env_latency_metric}, env: LATENCY_METRIC)"
     )
     parser.add_argument(
         "--density_increment",
         type=int,
-        default=1,
-        help="Number of concurrent images to add each iteration (default: 1)"
+        default=env_density_increment,
+        help=f"Concurrent images to add per iteration (default: {env_density_increment}, env: DENSITY_INCREMENT)"
     )
     parser.add_argument(
         "--init_duration",
         type=int,
-        default=60,
-        help="Service initialization duration in seconds (default: 60)"
+        default=env_init_duration,
+        help=f"Service init duration in seconds (default: {env_init_duration}, env: INIT_DURATION)"
     )
     parser.add_argument(
         "--min_requests",
         type=int,
-        default=3,
-        help="Minimum successful requests per iteration (default: 3)"
+        default=env_min_requests,
+        help=f"Min successful requests per iteration (default: {env_min_requests}, env: MIN_REQUESTS)"
     )
     parser.add_argument(
         "--request_timeout",
         type=int,
-        default=300,
-        help="Individual request timeout in seconds (default: 300)"
+        default=env_request_timeout,
+        help=f"Request timeout in seconds (default: {env_request_timeout}, env: REQUEST_TIMEOUT)"
     )
     parser.add_argument(
         "--api_endpoint",
         type=str,
-        default="http://localhost:8083",
-        help="Dine-in API endpoint (default: http://localhost:8083)"
+        default=env_api_endpoint,
+        help=f"Dine-in API endpoint (default: {env_api_endpoint}, env: API_ENDPOINT)"
     )
     parser.add_argument(
         "--images_dir",
@@ -895,11 +945,23 @@ def main():
     parser.add_argument(
         "--results_dir",
         type=str,
-        default="./results",
-        help="Directory for results output (default: ./results)"
+        default=env_results_dir,
+        help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
     
     args = parser.parse_args()
+    
+    # Log configuration source
+    print("Configuration:")
+    print(f"  TARGET_LATENCY_MS: {args.target_latency_ms}")
+    print(f"  LATENCY_METRIC: {args.latency_metric}")
+    print(f"  DENSITY_INCREMENT: {args.density_increment}")
+    print(f"  INIT_DURATION: {args.init_duration}")
+    print(f"  MIN_REQUESTS: {args.min_requests}")
+    print(f"  REQUEST_TIMEOUT: {args.request_timeout}")
+    print(f"  API_ENDPOINT: {args.api_endpoint}")
+    print(f"  RESULTS_DIR: {args.results_dir}")
+    print()
     
     # Validate compose file exists
     compose_file = os.path.abspath(args.compose_file)

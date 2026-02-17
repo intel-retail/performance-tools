@@ -53,21 +53,52 @@ class DensityResult:
     best_iteration: Optional[IterationResult] = None
 
 
+def get_env_int(name: str, default: int) -> int:
+    """Get integer from environment variable with default."""
+    value = os.environ.get(name)
+    if value is not None:
+        try:
+            return int(value)
+        except ValueError:
+            print(f"WARNING: Invalid {name}={value}, using default {default}")
+    return default
+
+
+def get_env_float(name: str, default: float) -> float:
+    """Get float from environment variable with default."""
+    value = os.environ.get(name)
+    if value is not None:
+        try:
+            return float(value)
+        except ValueError:
+            print(f"WARNING: Invalid {name}={value}, using default {default}")
+    return default
+
+
 class LatencyBasedStreamDensity:
     """
     Stream density tester using latency-based scaling.
     
     Iteratively increases worker count until VLM latency exceeds target.
     Polls for completed transactions instead of waiting fixed duration.
+    
+    Environment Variables (CLI args override these):
+        TARGET_LATENCY_MS: Target latency threshold in ms (default: 15000)
+        LATENCY_METRIC: Which metric to use: 'avg' or 'p95' (default: avg)
+        WORKER_INCREMENT: Workers to add per iteration (default: 1)
+        INIT_DURATION: Init wait time in seconds (default: 120)
+        MIN_TRANSACTIONS: Min transactions before measuring (default: 3)
+        MAX_ITERATIONS: Maximum scaling iterations (default: 50)
+        MAX_WAIT_SEC: Max wait time per iteration (default: 600)
     """
     
-    # Configuration constants
+    # Configuration constants (can be overridden by env vars)
     DEFAULT_TARGET_LATENCY_MS = 15000  # 15 seconds
-    MAX_ITERATIONS = 50
+    MAX_ITERATIONS = get_env_int("MAX_ITERATIONS", 50)
     MEMORY_SAFETY_BUFFER_MB = 2048
     MIN_TRANSACTIONS = 3  # Minimum transactions to measure latency
     POLL_INTERVAL_SEC = 10  # How often to check for transactions
-    MAX_WAIT_SEC = 600  # Maximum wait time per iteration (10 min)
+    MAX_WAIT_SEC = get_env_int("MAX_WAIT_SEC", 600)  # Maximum wait time per iteration
     
     def __init__(
         self,
@@ -469,10 +500,26 @@ def main():
     """Main entry point."""
     import argparse
     
+    # Get defaults from environment variables
+    env_target_latency = get_env_float("TARGET_LATENCY_MS", 15000)
+    env_latency_metric = os.environ.get("LATENCY_METRIC", "avg")
+    env_worker_increment = get_env_int("WORKER_INCREMENT", 1)
+    env_init_duration = get_env_int("INIT_DURATION", 120)
+    env_min_transactions = get_env_int("MIN_TRANSACTIONS", 3)
+    env_results_dir = os.environ.get("RESULTS_DIR", "./results")
+    
     parser = argparse.ArgumentParser(
         description="Order Accuracy Stream Density Test - Latency Based\n\n"
                     "Increases workers until target latency is exceeded.\n"
-                    "No fixed duration - polls for transactions.",
+                    "No fixed duration - polls for transactions.\n\n"
+                    "Environment Variables (CLI args override):\n"
+                    "  TARGET_LATENCY_MS   - Target latency in ms (default: 15000)\n"
+                    "  LATENCY_METRIC      - 'avg' or 'p95' (default: avg)\n"
+                    "  WORKER_INCREMENT    - Workers per iteration (default: 1)\n"
+                    "  INIT_DURATION       - Init wait seconds (default: 120)\n"
+                    "  MIN_TRANSACTIONS    - Min transactions (default: 3)\n"
+                    "  MAX_ITERATIONS      - Max iterations (default: 50)\n"
+                    "  MAX_WAIT_SEC        - Max wait per iteration (default: 600)",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
@@ -485,42 +532,52 @@ def main():
     parser.add_argument(
         "--target_latency_ms",
         type=float,
-        default=15000,
-        help="Target latency threshold in milliseconds (default: 15000 = 15s)"
+        default=env_target_latency,
+        help=f"Target latency threshold in milliseconds (default: {env_target_latency}, env: TARGET_LATENCY_MS)"
     )
     parser.add_argument(
         "--latency_metric",
         type=str,
         choices=["avg", "p95"],
-        default="avg",
-        help="Which latency metric to use: avg or p95 (default: avg)"
+        default=env_latency_metric,
+        help=f"Which latency metric to use: avg or p95 (default: {env_latency_metric}, env: LATENCY_METRIC)"
     )
     parser.add_argument(
         "--worker_increment",
         type=int,
-        default=1,
-        help="Number of workers to add each iteration (default: 1)"
+        default=env_worker_increment,
+        help=f"Number of workers to add each iteration (default: {env_worker_increment}, env: WORKER_INCREMENT)"
     )
     parser.add_argument(
         "--init_duration",
         type=int,
-        default=120,
-        help="Initialization duration in seconds (default: 120)"
+        default=env_init_duration,
+        help=f"Initialization duration in seconds (default: {env_init_duration}, env: INIT_DURATION)"
     )
     parser.add_argument(
         "--min_transactions",
         type=int,
-        default=3,
-        help="Minimum transactions per iteration before measuring latency (default: 3)"
+        default=env_min_transactions,
+        help=f"Minimum transactions per iteration before measuring latency (default: {env_min_transactions}, env: MIN_TRANSACTIONS)"
     )
     parser.add_argument(
         "--results_dir",
         type=str,
-        default="./results",
-        help="Directory for results output"
+        default=env_results_dir,
+        help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
     
     args = parser.parse_args()
+    
+    # Log configuration source
+    print("Configuration:")
+    print(f"  TARGET_LATENCY_MS: {args.target_latency_ms}")
+    print(f"  LATENCY_METRIC: {args.latency_metric}")
+    print(f"  WORKER_INCREMENT: {args.worker_increment}")
+    print(f"  INIT_DURATION: {args.init_duration}")
+    print(f"  MIN_TRANSACTIONS: {args.min_transactions}")
+    print(f"  RESULTS_DIR: {args.results_dir}")
+    print()
     
     # Resolve compose files
     compose_files = [os.path.abspath(f) for f in args.compose_file]
