@@ -89,12 +89,13 @@ class VLMMetricsLogger:
             # Add handler to performance logger (no console output for performance)
             self.performance_logger.addHandler(performance_file_handler)
     
-    def log_start_time(self, usecase_name):
+    def log_start_time(self, usecase_name=None, unique_id='retail-default'):
         
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
             'application': os.getenv(usecase_name),
+            'id': unique_id,
             'event': 'start',
             'timestamp_ms': timestamp_ms
         }
@@ -106,12 +107,13 @@ class VLMMetricsLogger:
         self.logger.info(message)
         return timestamp_ms
     
-    def log_end_time(self, usecase_name):
+    def log_end_time(self, usecase_name, unique_id='retail-default'):
         
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
             'application': os.getenv(usecase_name),
+            'id': unique_id,
             'event': 'end',
             'timestamp_ms': timestamp_ms
         }
@@ -123,11 +125,12 @@ class VLMMetricsLogger:
         self.logger.info(message)
         return timestamp_ms
     
-    def log_custom_event(self, event_type, usecase_name, **kwargs):
+    def log_custom_event(self, event_type, usecase_name, unique_id='retail-default', **kwargs):
         timestamp_ms = int(time.time() * 1000)
         
         log_data = {
             'application': os.getenv(usecase_name),
+            'id': unique_id,
             'event': event_type,
             'timestamp_ms': timestamp_ms
         }
@@ -149,11 +152,12 @@ class VLMMetricsLogger:
         
         return timestamp_ms
     
-    def log_performance_metrics(self, usecase_name, vlm_metrics_result_object):
+    def log_performance_metrics(self, usecase_name, vlm_metrics_result_object, unique_id='retail-default'):
         
         timestamp_ms = int(time.time() * 1000)
         log_data = {
             'application':  os.getenv(usecase_name),
+            'id': unique_id,
             'timestamp_ms': timestamp_ms,
             'Load_Time' : vlm_metrics_result_object.perf_metrics.get_load_time(),
             'Generated_Tokens':vlm_metrics_result_object.perf_metrics.get_num_generated_tokens(),
@@ -189,18 +193,18 @@ def get_logger():
         _vlm_metrics_logger = VLMMetricsLogger()
     return _vlm_metrics_logger
 
-def log_start_time(application_name):
+def log_start_time(application_name, unique_id='retail-default'):
     """Convenience function for logging start time"""
-    return get_logger().log_start_time(application_name)
+    return get_logger().log_start_time(application_name, unique_id=unique_id)
 
-def log_end_time(application_name):
+def log_end_time(application_name, unique_id='retail-default'):
     """Convenience function for logging end time"""
-    return get_logger().log_end_time(application_name)
+    return get_logger().log_end_time(application_name, unique_id=unique_id)
 
-def log_custom_event(event_type, application_name, **kwargs):
+def log_custom_event(event_type, application_name, unique_id='retail-default', **kwargs):
     """Convenience function for logging custom events"""
     return get_logger().log_custom_event(event_type, application_name, **kwargs)
 
-def log_performance_metric(application_name,metrics):
+def log_performance_metric(application_name,metrics, unique_id='retail-default'):
     """Convenience function for logging performance metrics"""
-    return get_logger().log_performance_metrics(application_name,metrics)
+    return get_logger().log_performance_metrics(application_name,metrics, unique_id=unique_id)
