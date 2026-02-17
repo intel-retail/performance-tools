@@ -1,0 +1,932 @@
+#!/usr/bin/env python3
+# Copyright © 2025 Intel Corporation. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Dine-In Order Accuracy Stream Density - Image-Based Latency Scaling
+
+Implements stream density testing for Dine-In application using LATENCY as the 
+scaling metric. Increases concurrent image validations until target latency is exceeded.
+
+Flow:
+  1. Start dine-in services
+  2. Send N concurrent image validation requests (density = N images)
+  3. Collect VLM latency from API responses and vlm_metrics_logger
+  4. If latency <= target: increase density by +1 image, repeat
+  5. If latency > target: STOP, report max density = previous iteration
+
+Stream Density Definition:
+  In dine-in context, "stream density" refers to the number of concurrent
+  image validation requests the system can handle while maintaining target latency.
+  Each +1 density = +1 concurrent image being processed through VLM.
+
+Usage:
+  python stream_density_oa_dine_in.py \\
+      --compose_file /path/to/dine-in/docker-compose.yml \\
+      --target_latency_ms 15000 \\
+      --results_dir ./results
+"""
+
+import os
+import sys
+import time
+import glob
+import re
+import json
+import shlex
+import subprocess
+import asyncio
+import psutil
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Import aiohttp for async HTTP requests
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+    logger.error("aiohttp not installed. Install with: pip install aiohttp")
+
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+@dataclass
+class DineInIterationResult:
+    """Results from a single dine-in density iteration."""
+    density: int  # Number of concurrent images
+    avg_latency_ms: float
+    p95_latency_ms: float
+    min_latency_ms: float
+    max_latency_ms: float
+    avg_tps: float
+    total_requests: int
+    successful_requests: int
+    failed_requests: int
+    passed: bool
+    memory_percent: float
+    cpu_percent: float
+    timestamp: str
+
+
+@dataclass
+class DineInDensityResult:
+    """Final stream density results for dine-in."""
+    mode: str = "dinein_image_density"
+    target_latency_ms: float = 15000.0
+    max_density: int = 0  # Maximum concurrent images maintaining target latency
+    met_target: bool = False
+    iterations: List[DineInIterationResult] = field(default_factory=list)
+    best_iteration: Optional[DineInIterationResult] = None
+    total_images_processed: int = 0
+
+
+# =============================================================================
+# Image Validator - Handles Async HTTP Requests
+# =============================================================================
+
+class DineInImageValidator:
+    """
+    Async image validator for dine-in API.
+    
+    Handles concurrent image validation requests to measure stream density.
+    """
+    
+    def __init__(
+        self,
+        api_endpoint: str,
+        images_dir: str,
+        orders_file: str,
+        timeout: int = 300
+    ):
+        self.api_endpoint = api_endpoint
+        self.validate_endpoint = f"{api_endpoint}/api/validate"
+        self.health_endpoint = f"{api_endpoint}/health"
+        self.images_dir = Path(images_dir)
+        self.orders_file = Path(orders_file)
+        self.timeout = timeout
+        
+        # Load test data
+        self.test_data: List[Tuple[Path, Dict]] = []
+        self._load_test_data()
+        
+    def _load_test_data(self):
+        """Load images and corresponding orders for testing."""
+        if not self.orders_file.exists():
+            logger.error(f"Orders file not found: {self.orders_file}")
+            return
+        
+        with open(self.orders_file, 'r') as f:
+            orders_data = json.load(f)
+        
+        orders_by_id = {
+            order['image_id']: order 
+            for order in orders_data.get('orders', [])
+        }
+        
+        # Find all images and their orders
+        for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
+            for img_path in sorted(self.images_dir.glob(ext)):
+                image_id = img_path.stem
+                if image_id in orders_by_id:
+                    order = orders_by_id[image_id]
+                    # Convert to API format
+                    order_manifest = {
+                        "order_id": order.get('order_id', image_id),
+                        "items": [
+                            {"name": item.get('item'), "quantity": item.get('quantity', 1)}
+                            for item in order.get('items_ordered', [])
+                        ]
+                    }
+                    self.test_data.append((img_path, order_manifest))
+        
+        logger.info(f"Loaded {len(self.test_data)} test image/order pairs")
+    
+    async def health_check(self, session: aiohttp.ClientSession) -> bool:
+        """Check if dine-in API is healthy."""
+        try:
+            async with session.get(self.health_endpoint, timeout=10) as resp:
+                return resp.status == 200
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return False
+    
+    async def validate_image(
+        self,
+        session: aiohttp.ClientSession,
+        image_path: Path,
+        order_manifest: Dict,
+        request_id: str
+    ) -> Dict:
+        """
+        Send a single image validation request.
+        
+        Returns:
+            Dict with latency_ms, success, error, and response data
+        """
+        start_time = time.time()
+        result = {
+            "request_id": request_id,
+            "image_id": image_path.stem,
+            "latency_ms": 0,
+            "success": False,
+            "error": None,
+            "response": None
+        }
+        
+        try:
+            # Prepare multipart form data
+            data = aiohttp.FormData()
+            data.add_field('order', json.dumps(order_manifest))
+            data.add_field(
+                'image',
+                open(image_path, 'rb'),
+                filename=image_path.name,
+                content_type='image/jpeg'
+            )
+            
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with session.post(
+                self.validate_endpoint,
+                data=data,
+                timeout=timeout
+            ) as resp:
+                result["latency_ms"] = (time.time() - start_time) * 1000
+                
+                if resp.status == 200:
+                    result["success"] = True
+                    result["response"] = await resp.json()
+                else:
+                    result["error"] = f"HTTP {resp.status}: {await resp.text()}"
+                    
+        except asyncio.TimeoutError:
+            result["latency_ms"] = self.timeout * 1000
+            result["error"] = f"Timeout after {self.timeout}s"
+        except Exception as e:
+            result["latency_ms"] = (time.time() - start_time) * 1000
+            result["error"] = str(e)
+        
+        return result
+    
+    async def run_concurrent_validations(
+        self,
+        density: int,
+        iteration: int
+    ) -> List[Dict]:
+        """
+        Run N concurrent image validations.
+        
+        Args:
+            density: Number of concurrent requests
+            iteration: Iteration number for request ID generation
+            
+        Returns:
+            List of validation results
+        """
+        if not self.test_data:
+            logger.error("No test data loaded")
+            return []
+        
+        # Select images for this density level (cycle through available images)
+        requests = []
+        for i in range(density):
+            img_path, order = self.test_data[i % len(self.test_data)]
+            request_id = f"iter{iteration}_img{i}_{img_path.stem}"
+            requests.append((img_path, order, request_id))
+        
+        logger.info(f"Starting {density} concurrent validations")
+        
+        # Create connector with proper limits
+        connector = aiohttp.TCPConnector(
+            limit=density + 10,
+            limit_per_host=density + 10,
+            force_close=True
+        )
+        
+        results = []
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Check health first
+            if not await self.health_check(session):
+                logger.error("API health check failed")
+                return []
+            
+            # Launch all requests concurrently
+            tasks = [
+                self.validate_image(session, img_path, order, req_id)
+                for img_path, order, req_id in requests
+            ]
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Filter out exceptions
+            valid_results = []
+            for r in results:
+                if isinstance(r, Exception):
+                    valid_results.append({
+                        "success": False,
+                        "error": str(r),
+                        "latency_ms": 0
+                    })
+                else:
+                    valid_results.append(r)
+            
+            return valid_results
+
+
+# =============================================================================
+# Main Stream Density Tester
+# =============================================================================
+
+class DineInStreamDensity:
+    """
+    Dine-In Stream Density Tester using latency-based scaling.
+    
+    Iteratively increases concurrent image validations until VLM latency 
+    exceeds the target threshold.
+    
+    Key Concepts:
+    - Density = Number of concurrent image validation requests
+    - Each image goes through VLM for item detection
+    - Target is to find max density while maintaining target latency
+    """
+    
+    # Configuration constants
+    DEFAULT_TARGET_LATENCY_MS = 15000  # 15 seconds
+    MAX_ITERATIONS = 50
+    MEMORY_SAFETY_THRESHOLD_PERCENT = 90
+    MIN_REQUESTS_PER_ITERATION = 3
+    
+    def __init__(
+        self,
+        compose_file: str,
+        results_dir: str,
+        api_endpoint: str = "http://localhost:8083",
+        images_dir: Optional[str] = None,
+        orders_file: Optional[str] = None,
+        target_latency_ms: float = DEFAULT_TARGET_LATENCY_MS,
+        latency_metric: str = "avg",  # "avg", "p95", "max"
+        density_increment: int = 1,
+        init_duration: int = 60,
+        min_requests: int = MIN_REQUESTS_PER_ITERATION,
+        request_timeout: int = 300
+    ):
+        self.compose_file = compose_file
+        self.results_dir = Path(results_dir)
+        self.api_endpoint = api_endpoint
+        self.target_latency_ms = target_latency_ms
+        self.latency_metric = latency_metric
+        self.density_increment = density_increment
+        self.init_duration = init_duration
+        self.min_requests = min_requests
+        self.request_timeout = request_timeout
+        
+        # Resolve paths relative to compose file
+        compose_dir = Path(compose_file).parent
+        self.images_dir = Path(images_dir) if images_dir else compose_dir / "images"
+        self.orders_file = Path(orders_file) if orders_file else compose_dir / "configs" / "orders.json"
+        
+        self.env_vars = os.environ.copy()
+        self.iterations: List[DineInIterationResult] = []
+        
+        # Ensure results directory exists
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"DineInStreamDensity initialized:")
+        logger.info(f"  Compose: {self.compose_file}")
+        logger.info(f"  API: {self.api_endpoint}")
+        logger.info(f"  Images: {self.images_dir}")
+        logger.info(f"  Orders: {self.orders_file}")
+        logger.info(f"  Target Latency: {self.target_latency_ms}ms")
+    
+    def run(self) -> DineInDensityResult:
+        """
+        Run latency-based stream density test for dine-in.
+        
+        Keeps increasing concurrent image validations until latency exceeds target.
+        
+        Returns:
+            DineInDensityResult with max density and iteration history
+        """
+        self._print_header()
+        
+        density = 1
+        best_result: Optional[DineInIterationResult] = None
+        total_images = 0
+        
+        for iteration in range(1, self.MAX_ITERATIONS + 1):
+            print(f"\n{'='*70}")
+            print(f"Iteration {iteration}: Testing density={density} concurrent images")
+            print(f"{'='*70}")
+            
+            # Memory safety check
+            if not self._check_memory_safe():
+                print(f"Memory threshold exceeded. Stopping at density={density - self.density_increment}")
+                break
+            
+            # Clean previous metrics
+            self._clean_metrics_files()
+            
+            # Start services if not running (first iteration)
+            if iteration == 1:
+                self._start_services()
+                self._wait_for_ready()
+            
+            # Run benchmark iteration
+            result = self._run_iteration(density, iteration)
+            
+            if result.total_requests < self.min_requests:
+                print(f"WARNING: Only completed {result.total_requests} requests (need {self.min_requests})")
+            
+            self.iterations.append(result)
+            total_images += result.successful_requests
+            
+            # Print results
+            self._print_iteration_results(result)
+            
+            # Check against target
+            current_latency = self._get_latency_metric(result)
+            
+            if current_latency <= self.target_latency_ms and current_latency > 0:
+                print(f"  ✓ PASSED (latency {current_latency/1000:.2f}s <= {self.target_latency_ms/1000:.2f}s)")
+                result.passed = True
+                best_result = result
+                density += self.density_increment
+            elif current_latency == 0:
+                print(f"  ⚠ NO DATA - No successful validations")
+                print(f"  Stopping due to validation failures")
+                break
+            else:
+                print(f"  ✗ FAILED (latency {current_latency/1000:.2f}s > {self.target_latency_ms/1000:.2f}s)")
+                result.passed = False
+                break
+        
+        # Stop services
+        self._stop_services()
+        
+        # Build final result
+        density_result = DineInDensityResult(
+            mode="dinein_image_density",
+            target_latency_ms=self.target_latency_ms,
+            max_density=best_result.density if best_result else 0,
+            met_target=best_result is not None,
+            iterations=self.iterations,
+            best_iteration=best_result,
+            total_images_processed=total_images
+        )
+        
+        # Export results
+        self._export_results(density_result)
+        
+        # Print summary
+        self._print_summary(density_result)
+        
+        return density_result
+    
+    def _run_iteration(self, density: int, iteration: int) -> DineInIterationResult:
+        """
+        Run a single density iteration with N concurrent images.
+        
+        Args:
+            density: Number of concurrent image validations
+            iteration: Iteration number
+            
+        Returns:
+            DineInIterationResult with metrics
+        """
+        # Create validator
+        validator = DineInImageValidator(
+            api_endpoint=self.api_endpoint,
+            images_dir=str(self.images_dir),
+            orders_file=str(self.orders_file),
+            timeout=self.request_timeout
+        )
+        
+        # Run concurrent validations
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            results = loop.run_until_complete(
+                validator.run_concurrent_validations(density, iteration)
+            )
+        finally:
+            loop.close()
+        
+        # Collect latencies from successful requests
+        latencies = [r["latency_ms"] for r in results if r.get("success")]
+        successful = len(latencies)
+        failed = len(results) - successful
+        
+        # Calculate metrics
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0
+        sorted_latencies = sorted(latencies) if latencies else [0]
+        p95_idx = int(len(sorted_latencies) * 0.95) if sorted_latencies else 0
+        p95_latency = sorted_latencies[min(p95_idx, len(sorted_latencies) - 1)]
+        min_latency = min(sorted_latencies) if sorted_latencies else 0
+        max_latency = max(sorted_latencies) if sorted_latencies else 0
+        
+        # Collect VLM metrics from logger files
+        vlm_metrics = self._collect_vlm_logger_metrics()
+        avg_tps = vlm_metrics.get("avg_tps", 0.0)
+        
+        # If VLM metrics have better latency data, use them
+        if vlm_metrics.get("avg_latency_ms", 0) > 0:
+            avg_latency = vlm_metrics["avg_latency_ms"]
+            p95_latency = vlm_metrics.get("p95_latency_ms", p95_latency)
+        
+        # System metrics
+        memory_percent = psutil.virtual_memory().percent
+        cpu_percent = psutil.cpu_percent(interval=0.5)
+        
+        return DineInIterationResult(
+            density=density,
+            avg_latency_ms=avg_latency,
+            p95_latency_ms=p95_latency,
+            min_latency_ms=min_latency,
+            max_latency_ms=max_latency,
+            avg_tps=avg_tps,
+            total_requests=len(results),
+            successful_requests=successful,
+            failed_requests=failed,
+            passed=False,  # Will be set after comparison
+            memory_percent=memory_percent,
+            cpu_percent=cpu_percent,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+    
+    def _collect_vlm_logger_metrics(self) -> Dict:
+        """
+        Collect metrics from vlm_metrics_logger output files.
+        
+        Parses vlm_application_metrics_*.txt files to extract latency and TPS.
+        
+        Returns:
+            Dictionary with VLM latency metrics
+        """
+        metrics = {
+            "total_transactions": 0,
+            "avg_latency_ms": 0.0,
+            "p95_latency_ms": 0.0,
+            "avg_tps": 0.0
+        }
+        
+        # Search in results dir and common locations
+        search_paths = [
+            os.path.join(self.results_dir, "vlm_application_metrics_*.txt"),
+            "/tmp/vlm_application_metrics_*.txt",
+            os.path.join(Path(self.compose_file).parent, "results", "vlm_application_metrics_*.txt")
+        ]
+        
+        log_files = []
+        for pattern in search_paths:
+            log_files.extend(glob.glob(pattern))
+        
+        if not log_files:
+            logger.debug("No vlm_metrics_logger files found")
+            return metrics
+        
+        start_times = {}
+        end_times = {}
+        tps_values = []
+        
+        for log_file in log_files:
+            try:
+                with open(log_file, 'r') as f:
+                    for line in f:
+                        # Parse unique_id, event, and timestamp
+                        id_match = re.search(r'id=([\w_-]+)', line)
+                        event_match = re.search(r'event=(\w+)', line)
+                        ts_match = re.search(r'timestamp_ms=(\d+)', line)
+                        
+                        if id_match and event_match and ts_match:
+                            unique_id = id_match.group(1)
+                            event = event_match.group(1)
+                            timestamp = int(ts_match.group(1))
+                            
+                            if event == "start":
+                                start_times[unique_id] = timestamp
+                            elif event == "end":
+                                end_times[unique_id] = timestamp
+                        
+                        # Parse TPS from custom events
+                        if "ovms_metrics" in line:
+                            tps_match = re.search(r'tps=([\d.]+)', line)
+                            if tps_match:
+                                tps_values.append(float(tps_match.group(1)))
+                                
+            except (IOError, OSError) as e:
+                logger.warning(f"Error reading metrics file {log_file}: {e}")
+                continue
+        
+        # Calculate latencies from start/end pairs
+        latencies = []
+        for unique_id in start_times:
+            if unique_id in end_times:
+                latency_ms = end_times[unique_id] - start_times[unique_id]
+                if latency_ms > 0:  # Filter invalid
+                    latencies.append(latency_ms)
+        
+        metrics["total_transactions"] = len(latencies)
+        
+        if latencies:
+            metrics["avg_latency_ms"] = sum(latencies) / len(latencies)
+            sorted_latencies = sorted(latencies)
+            p95_idx = int(len(sorted_latencies) * 0.95)
+            metrics["p95_latency_ms"] = sorted_latencies[min(p95_idx, len(sorted_latencies) - 1)]
+        
+        if tps_values:
+            metrics["avg_tps"] = sum(tps_values) / len(tps_values)
+        
+        logger.debug(f"VLM metrics collected: {metrics}")
+        return metrics
+    
+    def _get_latency_metric(self, result: DineInIterationResult) -> float:
+        """Get the configured latency metric value."""
+        if self.latency_metric == "avg":
+            return result.avg_latency_ms
+        elif self.latency_metric == "p95":
+            return result.p95_latency_ms
+        elif self.latency_metric == "max":
+            return result.max_latency_ms
+        return result.avg_latency_ms
+    
+    def _start_services(self):
+        """Start dine-in services via docker compose."""
+        print("Starting dine-in services...")
+        self._docker_compose("up -d")
+        time.sleep(5)
+    
+    def _stop_services(self):
+        """Stop dine-in services via docker compose."""
+        print("Stopping dine-in services...")
+        self._docker_compose("down")
+        time.sleep(3)
+    
+    def _wait_for_ready(self):
+        """Wait for services to be ready."""
+        print(f"Waiting {self.init_duration}s for services to initialize...")
+        
+        # Poll for health
+        import urllib.request
+        import urllib.error
+        
+        start = time.time()
+        ready = False
+        
+        while time.time() - start < self.init_duration:
+            try:
+                req = urllib.request.Request(f"{self.api_endpoint}/health")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        ready = True
+                        break
+            except (urllib.error.URLError, TimeoutError):
+                pass
+            time.sleep(5)
+        
+        if ready:
+            print("Services ready!")
+            # Additional warmup time
+            remaining = self.init_duration - (time.time() - start)
+            if remaining > 0:
+                print(f"Additional warmup: {remaining:.0f}s")
+                time.sleep(remaining)
+        else:
+            print("WARNING: Services may not be fully ready")
+    
+    def _docker_compose(self, action: str):
+        """Execute docker compose command."""
+        cmd = f"docker compose -f {shlex.quote(self.compose_file)} {action}"
+        logger.debug(f"Executing: {cmd}")
+        
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            env=self.env_vars,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0 and "down" not in action:
+            logger.warning(f"docker compose warning: {result.stderr}")
+    
+    def _clean_metrics_files(self):
+        """Clean up previous metrics files."""
+        patterns = [
+            "vlm_application_metrics_*.txt",
+            "vlm_performance_metrics_*.txt"
+        ]
+        
+        search_dirs = [
+            self.results_dir,
+            Path("/tmp"),
+            Path(self.compose_file).parent / "results"
+        ]
+        
+        for dir_path in search_dirs:
+            for pattern in patterns:
+                for f in glob.glob(str(dir_path / pattern)):
+                    try:
+                        os.remove(f)
+                        logger.debug(f"Removed: {f}")
+                    except OSError:
+                        pass
+    
+    def _check_memory_safe(self) -> bool:
+        """Check if memory usage is within safe threshold."""
+        mem = psutil.virtual_memory()
+        if mem.percent > self.MEMORY_SAFETY_THRESHOLD_PERCENT:
+            logger.warning(f"Memory usage {mem.percent}% exceeds threshold {self.MEMORY_SAFETY_THRESHOLD_PERCENT}%")
+            return False
+        return True
+    
+    def _print_header(self):
+        """Print test header."""
+        print("=" * 70)
+        print("Dine-In Order Accuracy Stream Density - Image-Based Latency Mode")
+        print("=" * 70)
+        print(f"Target Latency: {self.target_latency_ms}ms ({self.target_latency_ms/1000:.1f}s)")
+        print(f"Latency Metric: {self.latency_metric}")
+        print(f"Density Increment: +{self.density_increment} image(s) per iteration")
+        print(f"Init Duration: {self.init_duration}s")
+        print(f"Min Requests: {self.min_requests}")
+        print(f"Request Timeout: {self.request_timeout}s")
+        print(f"Images Directory: {self.images_dir}")
+        print(f"Results Directory: {self.results_dir}")
+        print("=" * 70)
+    
+    def _print_iteration_results(self, result: DineInIterationResult):
+        """Print results for a single iteration."""
+        print(f"\nResults for density={result.density} concurrent images:")
+        print(f"  Requests: {result.successful_requests}/{result.total_requests} successful")
+        print(f"  Avg Latency: {result.avg_latency_ms:.0f}ms ({result.avg_latency_ms/1000:.2f}s)")
+        print(f"  P95 Latency: {result.p95_latency_ms:.0f}ms ({result.p95_latency_ms/1000:.2f}s)")
+        print(f"  Min/Max: {result.min_latency_ms:.0f}ms / {result.max_latency_ms:.0f}ms")
+        print(f"  Avg TPS: {result.avg_tps:.2f}")
+        print(f"  Memory: {result.memory_percent:.1f}%  CPU: {result.cpu_percent:.1f}%")
+    
+    def _export_results(self, result: DineInDensityResult):
+        """Export results to JSON and CSV files."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Build JSON result
+        result_dict = {
+            "mode": result.mode,
+            "target_latency_ms": result.target_latency_ms,
+            "target_latency_sec": result.target_latency_ms / 1000,
+            "max_density": result.max_density,
+            "met_target": result.met_target,
+            "total_images_processed": result.total_images_processed,
+            "iterations": [
+                {
+                    "density": it.density,
+                    "avg_latency_ms": round(it.avg_latency_ms, 2),
+                    "avg_latency_sec": round(it.avg_latency_ms / 1000, 2),
+                    "p95_latency_ms": round(it.p95_latency_ms, 2),
+                    "p95_latency_sec": round(it.p95_latency_ms / 1000, 2),
+                    "min_latency_ms": round(it.min_latency_ms, 2),
+                    "max_latency_ms": round(it.max_latency_ms, 2),
+                    "avg_tps": round(it.avg_tps, 2),
+                    "total_requests": it.total_requests,
+                    "successful_requests": it.successful_requests,
+                    "failed_requests": it.failed_requests,
+                    "passed": it.passed,
+                    "memory_percent": round(it.memory_percent, 1),
+                    "cpu_percent": round(it.cpu_percent, 1),
+                    "timestamp": it.timestamp
+                }
+                for it in result.iterations
+            ],
+            "best_iteration": {
+                "density": result.best_iteration.density,
+                "avg_latency_ms": round(result.best_iteration.avg_latency_ms, 2),
+                "avg_latency_sec": round(result.best_iteration.avg_latency_ms / 1000, 2),
+                "p95_latency_ms": round(result.best_iteration.p95_latency_ms, 2),
+                "avg_tps": round(result.best_iteration.avg_tps, 2),
+                "successful_requests": result.best_iteration.successful_requests
+            } if result.best_iteration else None
+        }
+        
+        # Export JSON
+        json_path = self.results_dir / f"dinein_density_results_{timestamp}.json"
+        with open(json_path, 'w') as f:
+            json.dump(result_dict, f, indent=2)
+        print(f"\nResults exported to: {json_path}")
+        
+        # Export CSV summary
+        csv_path = self.results_dir / f"dinein_density_summary_{timestamp}.csv"
+        with open(csv_path, 'w') as f:
+            f.write("density,avg_latency_ms,avg_latency_sec,p95_latency_ms,avg_tps,")
+            f.write("successful,failed,passed,memory_pct,cpu_pct\n")
+            for it in result.iterations:
+                f.write(f"{it.density},{it.avg_latency_ms:.0f},{it.avg_latency_ms/1000:.2f},")
+                f.write(f"{it.p95_latency_ms:.0f},{it.avg_tps:.2f},")
+                f.write(f"{it.successful_requests},{it.failed_requests},{it.passed},")
+                f.write(f"{it.memory_percent:.1f},{it.cpu_percent:.1f}\n")
+        print(f"Summary exported to: {csv_path}")
+    
+    def _print_summary(self, result: DineInDensityResult):
+        """Print final summary."""
+        print("\n" + "=" * 70)
+        print("DINE-IN STREAM DENSITY RESULTS - IMAGE-BASED LATENCY MODE")
+        print("=" * 70)
+        print(f"Target Latency: {result.target_latency_ms}ms ({result.target_latency_ms/1000:.1f}s)")
+        print(f"Max Density: {result.max_density} concurrent images")
+        print(f"Met Target: {'Yes' if result.met_target else 'No'}")
+        print(f"Total Images Processed: {result.total_images_processed}")
+        
+        if result.best_iteration:
+            print(f"\nBest Iteration (max density maintaining target latency):")
+            print(f"  Density: {result.best_iteration.density} concurrent images")
+            print(f"  Avg Latency: {result.best_iteration.avg_latency_ms:.0f}ms ({result.best_iteration.avg_latency_ms/1000:.2f}s)")
+            print(f"  P95 Latency: {result.best_iteration.p95_latency_ms:.0f}ms ({result.best_iteration.p95_latency_ms/1000:.2f}s)")
+            print(f"  Avg TPS: {result.best_iteration.avg_tps:.2f}")
+            print(f"  Successful Requests: {result.best_iteration.successful_requests}")
+        
+        print("\nIteration History:")
+        print("-" * 70)
+        print(f"{'Density':<10}{'Avg Latency':<15}{'P95 Latency':<15}{'TPS':<10}{'Success':<10}{'Status':<10}")
+        print("-" * 70)
+        for it in result.iterations:
+            latency_str = f"{it.avg_latency_ms/1000:.2f}s"
+            p95_str = f"{it.p95_latency_ms/1000:.2f}s"
+            success_str = f"{it.successful_requests}/{it.total_requests}"
+            status = "✓ PASS" if it.passed else "✗ FAIL"
+            print(f"{it.density:<10}{latency_str:<15}{p95_str:<15}{it.avg_tps:<10.2f}{success_str:<10}{status:<10}")
+        print("=" * 70)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+def main():
+    """Main entry point."""
+    import argparse
+    
+    if not AIOHTTP_AVAILABLE:
+        print("Error: aiohttp is required. Install with: pip install aiohttp")
+        sys.exit(1)
+    
+    parser = argparse.ArgumentParser(
+        description="Dine-In Order Accuracy Stream Density Test - Image-Based Latency Scaling\n\n"
+                    "Increases concurrent image validations until target latency is exceeded.\n"
+                    "Density = Number of concurrent images being processed through VLM.\n\n"
+                    "Example:\n"
+                    "  python stream_density_oa_dine_in.py \\\n"
+                    "      --compose_file /path/to/dine-in/docker-compose.yml \\\n"
+                    "      --target_latency_ms 15000 \\\n"
+                    "      --results_dir ./results",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--compose_file",
+        type=str,
+        required=True,
+        help="Path to dine-in docker-compose.yml file"
+    )
+    parser.add_argument(
+        "--target_latency_ms",
+        type=float,
+        default=15000,
+        help="Target latency threshold in milliseconds (default: 15000 = 15s)"
+    )
+    parser.add_argument(
+        "--latency_metric",
+        type=str,
+        choices=["avg", "p95", "max"],
+        default="avg",
+        help="Which latency metric to use: avg, p95, or max (default: avg)"
+    )
+    parser.add_argument(
+        "--density_increment",
+        type=int,
+        default=1,
+        help="Number of concurrent images to add each iteration (default: 1)"
+    )
+    parser.add_argument(
+        "--init_duration",
+        type=int,
+        default=60,
+        help="Service initialization duration in seconds (default: 60)"
+    )
+    parser.add_argument(
+        "--min_requests",
+        type=int,
+        default=3,
+        help="Minimum successful requests per iteration (default: 3)"
+    )
+    parser.add_argument(
+        "--request_timeout",
+        type=int,
+        default=300,
+        help="Individual request timeout in seconds (default: 300)"
+    )
+    parser.add_argument(
+        "--api_endpoint",
+        type=str,
+        default="http://localhost:8083",
+        help="Dine-in API endpoint (default: http://localhost:8083)"
+    )
+    parser.add_argument(
+        "--images_dir",
+        type=str,
+        default=None,
+        help="Path to images directory (default: compose_file_dir/images)"
+    )
+    parser.add_argument(
+        "--orders_file",
+        type=str,
+        default=None,
+        help="Path to orders.json file (default: compose_file_dir/configs/orders.json)"
+    )
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default="./results",
+        help="Directory for results output (default: ./results)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate compose file exists
+    compose_file = os.path.abspath(args.compose_file)
+    if not os.path.exists(compose_file):
+        print(f"Error: Compose file not found: {compose_file}")
+        sys.exit(1)
+    
+    # Create and run density test
+    tester = DineInStreamDensity(
+        compose_file=compose_file,
+        results_dir=args.results_dir,
+        api_endpoint=args.api_endpoint,
+        images_dir=args.images_dir,
+        orders_file=args.orders_file,
+        target_latency_ms=args.target_latency_ms,
+        latency_metric=args.latency_metric,
+        density_increment=args.density_increment,
+        init_duration=args.init_duration,
+        min_requests=args.min_requests,
+        request_timeout=args.request_timeout
+    )
+    
+    result = tester.run()
+    
+    # Exit code based on result
+    sys.exit(0 if result.met_target else 1)
+
+
+if __name__ == "__main__":
+    main()
