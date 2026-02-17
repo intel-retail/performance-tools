@@ -100,7 +100,7 @@ docker run --network host --privileged --user root -e VIDEO_FILE="$1" \
 	-v /tmp/.X11-unix:/tmp/.X11-unix \
 	-v "$SAMPLE_MEDIA_DIR"/:/vids \
 	-w /vids -i --rm intel/dlstreamer:2025.2.0-ubuntu24 \
-       bash -c "if [ -f /vids/$result ]; then exit 1; else gst-launch-1.0 filesrc location=/vids/$1 ! decodebin ! videoconvert ! videoscale ! videorate ! 'video/x-raw,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1' ! x264enc ! h264parse ! mp4mux ! filesink location=/vids/$result; fi"
+       bash -c "if [ -f /vids/$result ]; then exit 1; else gst-launch-1.0 filesrc location=/vids/$1 ! decodebin ! videoconvert ! videoscale ! videorate ! 'video/x-raw,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1' ! x264enc tune=zerolatency ! h264parse ! mp4mux ! filesink location=/vids/$result; fi"
 
 rm ../sample-media/"$1"
 echo "Result will be created in ../sample-media/$result"

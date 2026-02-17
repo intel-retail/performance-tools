@@ -725,7 +725,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
 def get_pipeline_stream_count(base_dir=None):
     """
     Detects the number of video streams defined in the pipeline.sh script
-    by counting occurrences of 'filesrc' elements.
+   by counting occurrences of 'filesrc' or 'rtspsrc' elements.
 
     Args:
         base_dir (str, optional): Base directory to locate the pipeline script.
@@ -747,17 +747,17 @@ def get_pipeline_stream_count(base_dir=None):
             print(f"WARN: Pipeline script not found at {pipeline_script_path}")
             return 0
 
-        # Read and search for 'filesrc' occurrences
+        # Read and search for 'filesrc' or 'rtspsrc' occurrences
         with open(pipeline_script_path, 'r') as f:
             content = f.read()
 
-        matches = re.findall(r'\bfilesrc\b', content)
+        matches = re.findall(r'\b(filesrc|rtspsrc)\b', content)
         if matches:
             detected_streams = len(matches)
             print(f"DEBUG: Detected {detected_streams} stream(s) from {pipeline_script_path}")
             return detected_streams
         else:
-            print(f"DEBUG: No 'filesrc' tokens found in {pipeline_script_path}")
+            print(f"DEBUG: No 'filesrc' or 'rtspsrc' tokens found in {pipeline_script_path}")
             return 0
 
     except Exception as e:
