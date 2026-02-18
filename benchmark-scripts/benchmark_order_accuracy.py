@@ -2,11 +2,14 @@
 Order Accuracy Benchmark Script
 
 Orchestrates benchmark execution for the Order Accuracy pipeline.
-Integrates with performance-tools for metrics collection and stream density analysis.
+Integrates with performance-tools for metrics collection.
 
 Usage:
-    python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --pipelines 1
-    python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --target_fps 14.95
+    python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --workers 2 --duration 300
+
+Note: For stream density testing, use the application-specific scripts directly:
+    - Take-Away: stream_density_latency_oa.py (RTSP/workers based)
+    - Dine-In: stream_density_oa_dine_in.py (concurrent images based)
 """
 
 import argparse
@@ -18,30 +21,29 @@ import shlex
 import json
 import csv
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
 # Import from performance-tools benchmark scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import stream_density
-from stream_density_latency_oa import OrderAccuracyStreamDensity
 
 
 class OrderAccuracyBenchmark:
     """
     Benchmark orchestrator for Order Accuracy pipeline.
     
-    Supports two modes:
-    1. Fixed workers: Runs N station workers for specified duration
-    2. Stream density: Finds maximum workers that maintain target throughput
-    
+    Runs N station workers for specified duration and collects metrics.
     Order Accuracy uses WORKERS to scale, not traditional pipelines.
     Each worker processes one RTSP station stream.
+    
+    For stream density testing, use application-specific scripts:
+        - Take-Away: stream_density_latency_oa.py
+        - Dine-In: stream_density_oa_dine_in.py
     """
     
     # Default configuration
     DEFAULT_INIT_DURATION = 120  # seconds
     DEFAULT_DURATION = 300  # seconds
-    DEFAULT_TARGET_FPS = 14.95
     DEFAULT_WORKERS = 1
     
     def __init__(
@@ -153,66 +155,6 @@ class OrderAccuracyBenchmark:
         self._export_results(results, "fixed_workers")
         
         return results
-    
-    def run_stream_density(
-        self,
-        target_fps: float,
-        init_duration: int,
-        density_increment: Optional[int] = None,
-        container_name: str = "order-accuracy-vlm"
-    ) -> Tuple[int, bool, Dict]:
-        """
-        Run stream density benchmark to find maximum pipelines.
-        
-        Args:
-            target_fps: Target FPS to maintain per stream
-            init_duration: Warmup duration in seconds
-            density_increment: Pipeline count increment (auto if None)
-            container_name: Container to monitor
-            
-        Returns:
-            Tuple of (max_pipelines, met_target, metrics_dict)
-        """
-        print(f"\n{'='*60}")
-        print(f"Order Accuracy Benchmark - Stream Density Mode")
-        print(f"Target FPS: {target_fps}")
-        print(f"Init Duration: {init_duration}s")
-        print(f"Container: {container_name}")
-        print(f"{'='*60}\n")
-        
-        # Configure stream density
-        self.env_vars["TARGET_FPS"] = str(target_fps)
-        self.env_vars["INIT_DURATION"] = str(init_duration)
-        self.env_vars["CONTAINER_NAME"] = container_name
-        
-        if density_increment:
-            self.env_vars["PIPELINE_INC"] = str(density_increment)
-        
-        # Use Order Accuracy specific stream density
-        oa_density = OrderAccuracyStreamDensity(
-            self.env_vars,
-            self.compose_files,
-            self.results_dir
-        )
-        
-        max_pipelines, met_target = oa_density.run_iterations(
-            target_fps=target_fps,
-            container_name=container_name
-        )
-        
-        # Collect final metrics
-        metrics = oa_density.get_final_metrics()
-        
-        # Export results
-        self._export_results({
-            "mode": "stream_density",
-            "target_fps": target_fps,
-            "max_pipelines": max_pipelines,
-            "met_target": met_target,
-            "metrics": metrics
-        }, "stream_density")
-        
-        return max_pipelines, met_target, metrics
     
     def _clean_pipeline_logs(self):
         """Remove previous pipeline log files."""
@@ -474,11 +416,15 @@ Examples:
   # Run with 2 workers for 5 minutes
   python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --workers 2 --duration 300
   
-  # Run stream density to find max workers at target throughput
-  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --target_fps 15.0
+  # Run with 1 worker (default)
+  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml
+
+For stream density testing, use application-specific scripts:
+  # Take-Away (RTSP/workers based)
+  python stream_density_latency_oa.py --compose_files ../../docker-compose.yaml
   
-  # Run stream density with custom increment
-  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --target_fps 14.95 --density_increment 2
+  # Dine-In (concurrent images based)
+  python stream_density_oa_dine_in.py --compose_file ../../docker-compose.yml
         """
     )
     
@@ -493,24 +439,8 @@ Examples:
     parser.add_argument(
         '--workers',
         type=int,
-        default=0,
-        help='Number of station workers to run (0 = use stream density mode)'
-    )
-    
-    parser.add_argument(
-        '--target_fps',
-        type=float,
-        nargs='*',
-        default=None,
-        help='Target FPS for stream density mode'
-    )
-    
-    parser.add_argument(
-        '--container_names',
-        type=str,
-        nargs='*',
-        default=None,
-        help='Container names for stream density (1:1 with target_fps)'
+        default=1,
+        help='Number of station workers to run'
     )
     
     parser.add_argument(
@@ -525,13 +455,6 @@ Examples:
         type=int,
         default=300,
         help='Benchmark duration in seconds'
-    )
-    
-    parser.add_argument(
-        '--density_increment',
-        type=int,
-        default=None,
-        help='Worker increment for stream density'
     )
     
     parser.add_argument(
@@ -586,53 +509,14 @@ def main():
         target_device=args.target_device
     )
     
-    # Determine mode
-    target_fps_list = args.target_fps if args.target_fps else []
-    container_names = args.container_names if args.container_names else []
-    
-    if args.workers > 0:
-        # Fixed workers mode
-        print("Running in fixed workers mode...")
-        results = benchmark.run_fixed_workers(
-            workers=args.workers,
-            init_duration=args.init_duration,
-            duration=args.duration
-        )
-        print(f"\nBenchmark complete. Results: {results}")
-        
-    elif target_fps_list:
-        # Stream density mode
-        print("Running in stream density mode...")
-        
-        if len(target_fps_list) > 1 and len(target_fps_list) != len(container_names):
-            print("Error: Number of target_fps values must match container_names")
-            sys.exit(1)
-        
-        for i, target_fps in enumerate(target_fps_list):
-            container_name = container_names[i] if container_names else "oa_service"
-            
-            max_workers, met_target, metrics = benchmark.run_stream_density(
-                target_fps=target_fps,
-                init_duration=args.init_duration,
-                density_increment=args.density_increment,
-                container_name=container_name
-            )
-            
-            print(f"\n{'='*60}")
-            print(f"Stream Density Results:")
-            print(f"  Target FPS: {target_fps}")
-            print(f"  Max Workers: {max_workers}")
-            print(f"  Met Target: {met_target}")
-            print(f"{'='*60}")
-    else:
-        # Default: single worker
-        print("No mode specified. Running with 1 worker...")
-        results = benchmark.run_fixed_workers(
-            workers=1,
-            init_duration=args.init_duration,
-            duration=args.duration
-        )
-        print(f"\nBenchmark complete. Results: {results}")
+    # Run fixed workers benchmark
+    print(f"Running benchmark with {args.workers} worker(s)...")
+    results = benchmark.run_fixed_workers(
+        workers=args.workers,
+        init_duration=args.init_duration,
+        duration=args.duration
+    )
+    print(f"\nBenchmark complete. Results: {results}")
 
 
 if __name__ == '__main__':
