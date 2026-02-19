@@ -335,7 +335,7 @@ class DineInStreamDensity:
     
     # Configuration constants
     DEFAULT_TARGET_LATENCY_MS = 15000  # 15 seconds
-    MAX_ITERATIONS = 50
+    DEFAULT_MAX_ITERATIONS = 50
     MEMORY_SAFETY_THRESHOLD_PERCENT = 90
     MIN_REQUESTS_PER_ITERATION = 3
     
@@ -351,7 +351,8 @@ class DineInStreamDensity:
         density_increment: int = 1,
         init_duration: int = 60,
         min_requests: int = MIN_REQUESTS_PER_ITERATION,
-        request_timeout: int = 300
+        request_timeout: int = 300,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS
     ):
         self.compose_file = compose_file
         self.results_dir = Path(results_dir)
@@ -362,6 +363,7 @@ class DineInStreamDensity:
         self.init_duration = init_duration
         self.min_requests = min_requests
         self.request_timeout = request_timeout
+        self.max_iterations = max_iterations
         
         # Resolve paths relative to compose file
         compose_dir = Path(compose_file).parent
@@ -396,7 +398,7 @@ class DineInStreamDensity:
         best_result: Optional[DineInIterationResult] = None
         total_images = 0
         
-        for iteration in range(1, self.MAX_ITERATIONS + 1):
+        for iteration in range(1, self.max_iterations + 1):
             print(f"\n{'='*70}")
             print(f"Iteration {iteration}: Testing density={density} concurrent images")
             print(f"{'='*70}")
@@ -574,7 +576,7 @@ class DineInStreamDensity:
                     if resp.status == 200:
                         ready = True
                         break
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, ConnectionResetError, ConnectionRefusedError, OSError):
                 pass
             time.sleep(5)
         
@@ -859,6 +861,12 @@ def main():
         default=env_results_dir,
         help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
+    parser.add_argument(
+        "--max_iterations",
+        type=int,
+        default=50,
+        help="Maximum number of density iterations to run (default: 50)"
+    )
     
     args = parser.parse_args()
     
@@ -872,6 +880,7 @@ def main():
     print(f"  REQUEST_TIMEOUT: {args.request_timeout}")
     print(f"  API_ENDPOINT: {args.api_endpoint}")
     print(f"  RESULTS_DIR: {args.results_dir}")
+    print(f"  MAX_ITERATIONS: {args.max_iterations}")
     print()
     
     # Validate compose file exists
@@ -892,7 +901,8 @@ def main():
         density_increment=args.density_increment,
         init_duration=args.init_duration,
         min_requests=args.min_requests,
-        request_timeout=args.request_timeout
+        request_timeout=args.request_timeout,
+        max_iterations=args.max_iterations
     )
     
     result = tester.run()
