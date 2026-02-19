@@ -151,7 +151,25 @@ class VLMMetricsLogger:
             self.logger.info(message)
         
         return timestamp_ms
-    
+        
+    def log_ovms_performance_metrics(self, usecase_name, vlm_metrics_result):
+        timestamp_ms = int(time.time() * 1000)
+        log_data = {
+            'application': os.getenv(usecase_name),
+            'timestamp_ms': timestamp_ms,
+        }
+        
+        # Update log_data with vlm_metrics_result dictionary
+        if isinstance(vlm_metrics_result, dict):
+            log_data.update(vlm_metrics_result)
+        
+        # Format log message
+        message_parts = [f"{key}={value}" for key, value in log_data.items()]
+        message = " ".join(message_parts)
+        
+        self.performance_logger.info(message)
+        return timestamp_ms
+        
     def log_performance_metrics(self, usecase_name, vlm_metrics_result_object, unique_id='retail-default'):
         
         timestamp_ms = int(time.time() * 1000)
@@ -208,3 +226,7 @@ def log_custom_event(event_type, application_name, unique_id='retail-default', *
 def log_performance_metric(application_name,metrics, unique_id='retail-default'):
     """Convenience function for logging performance metrics"""
     return get_logger().log_performance_metrics(application_name,metrics, unique_id=unique_id)
+
+def log_ovms_performance_metric(application_name,metrics):
+    """Convenience function for logging OVMS performance metrics"""
+    return get_logger().log_ovms_performance_metrics(application_name,metrics)
