@@ -406,8 +406,10 @@ class DineInStreamDensity:
                 print(f"Memory threshold exceeded. Stopping at density={density - self.density_increment}")
                 break
             
-            # Clean previous metrics
-            self._clean_metrics_files()
+            # Clean previous metrics only on first iteration
+            # (subsequent iterations append to metrics files)
+            if iteration == 1:
+                self._clean_metrics_files()
             
             # Start services if not running (first iteration)
             if iteration == 1:
@@ -500,7 +502,7 @@ class DineInStreamDensity:
         successful = len(latencies)
         failed = len(results) - successful
         
-        # Calculate metrics
+        # Calculate metrics from HTTP response latencies
         avg_latency = sum(latencies) / len(latencies) if latencies else 0
         sorted_latencies = sorted(latencies) if latencies else [0]
         p95_idx = int(len(sorted_latencies) * 0.95) if sorted_latencies else 0
@@ -508,14 +510,9 @@ class DineInStreamDensity:
         min_latency = min(sorted_latencies) if sorted_latencies else 0
         max_latency = max(sorted_latencies) if sorted_latencies else 0
         
-        # Collect VLM metrics from logger files
-        vlm_metrics = self._collect_vlm_logger_metrics()
-        avg_tps = vlm_metrics.get("avg_tps", 0.0)
-        
-        # If VLM metrics have better latency data, use them
-        if vlm_metrics.get("avg_latency_ms", 0) > 0:
-            avg_latency = vlm_metrics["avg_latency_ms"]
-            p95_latency = vlm_metrics.get("p95_latency_ms", p95_latency)
+        # TPS calculated from successful requests / total time
+        total_time_sec = max_latency / 1000 if max_latency > 0 else 1
+        avg_tps = successful / total_time_sec if successful > 0 else 0.0
         
         # System metrics
         memory_percent = psutil.virtual_memory().percent
@@ -536,92 +533,6 @@ class DineInStreamDensity:
             cpu_percent=cpu_percent,
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
-    
-    def _collect_vlm_logger_metrics(self) -> Dict:
-        """
-        Collect metrics from vlm_metrics_logger output files.
-        
-        Parses vlm_application_metrics_*.txt files to extract latency and TPS.
-        
-        Returns:
-            Dictionary with VLM latency metrics
-        """
-        metrics = {
-            "total_transactions": 0,
-            "avg_latency_ms": 0.0,
-            "p95_latency_ms": 0.0,
-            "avg_tps": 0.0
-        }
-        
-        # Search in results dir and common locations
-        search_paths = [
-            os.path.join(self.results_dir, "vlm_application_metrics_*.txt"),
-            "/tmp/vlm_application_metrics_*.txt",
-            os.path.join(Path(self.compose_file).parent, "results", "vlm_application_metrics_*.txt")
-        ]
-        
-        log_files = []
-        for pattern in search_paths:
-            log_files.extend(glob.glob(pattern))
-        
-        if not log_files:
-            logger.debug("No vlm_metrics_logger files found")
-            return metrics
-        
-        start_times = {}
-        end_times = {}
-        tps_values = []
-        
-        for log_file in log_files:
-            try:
-                with open(log_file, 'r') as f:
-                    for line in f:
-                        # Parse unique_id, event, and timestamp
-                        id_match = re.search(r'id=([\w_-]+)', line)
-                        event_match = re.search(r'event=(\w+)', line)
-                        ts_match = re.search(r'timestamp_ms=(\d+)', line)
-                        
-                        if id_match and event_match and ts_match:
-                            unique_id = id_match.group(1)
-                            event = event_match.group(1)
-                            timestamp = int(ts_match.group(1))
-                            
-                            if event == "start":
-                                start_times[unique_id] = timestamp
-                            elif event == "end":
-                                end_times[unique_id] = timestamp
-                        
-                        # Parse TPS from custom events
-                        if "ovms_metrics" in line:
-                            tps_match = re.search(r'tps=([\d.]+)', line)
-                            if tps_match:
-                                tps_values.append(float(tps_match.group(1)))
-                                
-            except (IOError, OSError) as e:
-                logger.warning(f"Error reading metrics file {log_file}: {e}")
-                continue
-        
-        # Calculate latencies from start/end pairs
-        latencies = []
-        for unique_id in start_times:
-            if unique_id in end_times:
-                latency_ms = end_times[unique_id] - start_times[unique_id]
-                if latency_ms > 0:  # Filter invalid
-                    latencies.append(latency_ms)
-        
-        metrics["total_transactions"] = len(latencies)
-        
-        if latencies:
-            metrics["avg_latency_ms"] = sum(latencies) / len(latencies)
-            sorted_latencies = sorted(latencies)
-            p95_idx = int(len(sorted_latencies) * 0.95)
-            metrics["p95_latency_ms"] = sorted_latencies[min(p95_idx, len(sorted_latencies) - 1)]
-        
-        if tps_values:
-            metrics["avg_tps"] = sum(tps_values) / len(tps_values)
-        
-        logger.debug(f"VLM metrics collected: {metrics}")
-        return metrics
     
     def _get_latency_metric(self, result: DineInIterationResult) -> float:
         """Get the configured latency metric value."""
