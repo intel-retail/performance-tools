@@ -141,7 +141,7 @@ class LatencyBasedStreamDensity:
         print(f"Latency Metric: {self.latency_metric}")
         print(f"Worker Increment: {self.worker_increment}")
         print(f"Init Duration: {self.init_duration}s")
-        print(f"Min Transactions: {self.min_transactions}")
+        print(f"Min Transactions: {self.min_transactions} per worker (scales with worker count)")
         print("=" * 70)
         
         workers = 1
@@ -163,9 +163,10 @@ class LatencyBasedStreamDensity:
             # Run benchmark iteration
             result = self._run_iteration(workers)
             
-            # Check if we got enough transactions
-            if result.total_transactions < self.min_transactions:
-                print(f"WARNING: Only got {result.total_transactions} transactions (need {self.min_transactions})")
+            # Check if we got enough transactions (scaled by worker count)
+            required_transactions = self.min_transactions * workers
+            if result.total_transactions < required_transactions:
+                print(f"WARNING: Only got {result.total_transactions} transactions (need {required_transactions} = {self.min_transactions} × {workers} workers)")
                 print("Latency measurement may be unreliable.")
             
             self.iterations.append(result)
@@ -191,6 +192,12 @@ class LatencyBasedStreamDensity:
             elif current_latency == 0:
                 print(f"  ⚠ NO DATA - No latency measurements collected")
                 print(f"  Trying next iteration anyway...")
+                workers += self.worker_increment
+            elif current_latency < 0:
+                print(f"  ⚠ CORRUPTED METRICS - Negative latency {current_latency:.0f}ms detected")
+                print(f"  This usually means a video-loop ID collision in the metrics file.")
+                print(f"  Discarding this iteration result; trying next...")
+                self.iterations.pop()  # Remove the corrupt entry already appended above
                 workers += self.worker_increment
             else:
                 print(f"  ✗ FAILED (latency {current_latency/1000:.1f}s > {self.target_latency_ms/1000:.1f}s)")
@@ -241,12 +248,13 @@ class LatencyBasedStreamDensity:
         print(f"Waiting {self.init_duration}s for initialization...")
         time.sleep(self.init_duration)
         
-        # Poll for transactions until we have enough
-        print(f"Waiting for {self.min_transactions} transactions...")
+        # Poll for transactions until we have enough (scaled by worker count)
+        required_transactions = self.min_transactions * workers
+        print(f"Waiting for {required_transactions} transactions ({self.min_transactions} per worker × {workers} worker(s))...")
         start_time = time.time()
         transactions = 0
         
-        while transactions < self.min_transactions:
+        while transactions < required_transactions:
             elapsed = time.time() - start_time
             
             if elapsed > self.MAX_WAIT_SEC:
@@ -257,9 +265,9 @@ class LatencyBasedStreamDensity:
             metrics = self._collect_vlm_logger_metrics()
             transactions = metrics.get("total_transactions", 0)
             
-            if transactions < self.min_transactions:
-                remaining = self.min_transactions - transactions
-                print(f"  Transactions: {transactions}/{self.min_transactions} "
+            if transactions < required_transactions:
+                remaining = required_transactions - transactions
+                print(f"  Transactions: {transactions}/{required_transactions} "
                       f"(waiting for {remaining} more, {elapsed:.0f}s elapsed)")
                 time.sleep(self.POLL_INTERVAL_SEC)
         
@@ -324,6 +332,14 @@ class LatencyBasedStreamDensity:
                             timestamp = int(ts_match.group(1))
                             
                             if event == "start":
+                                # If this ID already has a completed start+end pair (video loop
+                                # reuse), save it under a unique key before overwriting so the
+                                # latency isn't corrupted by end(loop N) - start(loop N+1).
+                                if unique_id in start_times and unique_id in end_times:
+                                    saved_key = f"{unique_id}_run{len([k for k in start_times if k.startswith(unique_id)])}"
+                                    start_times[saved_key] = start_times[unique_id]
+                                    end_times[saved_key] = end_times[unique_id]
+                                    del end_times[unique_id]
                                 start_times[unique_id] = timestamp
                             elif event == "end":
                                 end_times[unique_id] = timestamp

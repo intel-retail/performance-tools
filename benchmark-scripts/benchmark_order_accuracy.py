@@ -101,34 +101,24 @@ class OrderAccuracyBenchmark:
         self,
         workers: int,
         init_duration: int,
-        duration: int,
-        profile: str = "parallel",
-        iterations: int = 0
+        duration: int
     ) -> Dict:
         """
         Run benchmark with fixed number of station workers.
         
         Args:
-            workers: Number of concurrent station workers
+            workers: Number of concurrent station workers (RTSP streams)
             init_duration: Warmup duration in seconds
-            duration: Benchmark duration in seconds (ignored if iterations > 0)
-            profile: Docker compose profile to use (parallel, benchmark, worker)
-            iterations: Number of iterations per worker (0 = use duration-based)
+            duration: Benchmark duration in seconds
             
         Returns:
             Dictionary with benchmark results
         """
-        is_iteration_mode = iterations > 0
-        
         print(f"\n{'='*60}")
         print(f"Order Accuracy Benchmark - Fixed Workers Mode")
         print(f"Workers: {workers}")
-        print(f"Profile: {profile}")
-        if is_iteration_mode:
-            print(f"Iterations: {iterations} per worker")
-        else:
-            print(f"Init Duration: {init_duration}s")
-            print(f"Benchmark Duration: {duration}s")
+        print(f"Init Duration: {init_duration}s")
+        print(f"Benchmark Duration: {duration}s")
         print(f"{'='*60}\n")
         
         # Clean previous logs
@@ -139,26 +129,17 @@ class OrderAccuracyBenchmark:
         self.env_vars["VLM_WORKERS"] = str(workers)
         self.env_vars["SERVICE_MODE"] = "parallel"
         
-        # Set iterations for dine-in mode
-        if is_iteration_mode:
-            self.env_vars["ITERATIONS"] = str(iterations)
-        
-        # Start containers with specified profile
+        # Start containers with parallel profile
         print("Starting containers...")
-        self.docker_compose_cmd(f"--profile {profile} up", "-d")
+        self.docker_compose_cmd("--profile parallel up", "-d")
         
         # Wait for initialization
         print(f"Waiting {init_duration}s for initialization...")
         time.sleep(init_duration)
         
-        if is_iteration_mode:
-            # Wait for workers to complete iterations
-            print(f"Waiting for workers to complete {iterations} iterations...")
-            self._wait_for_workers_completion(workers, profile, timeout=duration if duration > 0 else 3600)
-        else:
-            # Run benchmark for fixed duration
-            print(f"Running benchmark for {duration}s...")
-            time.sleep(duration)
+        # Run benchmark
+        print(f"Running benchmark for {duration}s...")
+        time.sleep(duration)
         
         # Collect metrics
         results = self._collect_metrics(workers)
@@ -166,107 +147,14 @@ class OrderAccuracyBenchmark:
         # Collect VLM metrics from vlm_metrics_logger
         results["vlm_metrics"] = self._collect_vlm_logger_metrics()
         
-        # Collect dine-in results if in iteration mode
-        if is_iteration_mode:
-            results["worker_results"] = self._collect_worker_results()
-        
         # Stop containers
         print("Stopping containers...")
-        self.docker_compose_cmd(f"--profile {profile} down")
+        self.docker_compose_cmd("--profile parallel down")
         
         # Export results
         self._export_results(results, "fixed_workers")
         
         return results
-    
-    def _wait_for_workers_completion(self, workers: int, profile: str, timeout: int = 3600):
-        """Wait for all worker containers to complete."""
-        import subprocess
-        
-        start_time = time.time()
-        check_interval = 10  # seconds
-        
-        while time.time() - start_time < timeout:
-            # Check if any worker containers are still running
-            cmd = f"docker compose {' '.join(f'-f {f}' for f in self.compose_files)} --profile {profile} ps --format json"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=self.env_vars)
-            
-            if result.returncode != 0:
-                print(f"Warning: Could not check container status: {result.stderr}")
-                time.sleep(check_interval)
-                continue
-            
-            # Parse JSON output (docker compose ps outputs one JSON per line)
-            running_workers = 0
-            for line in result.stdout.strip().split('\n'):
-                if not line:
-                    continue
-                try:
-                    container = json.loads(line)
-                    name = container.get('Name', container.get('name', ''))
-                    state = container.get('State', container.get('state', ''))
-                    if 'worker' in name.lower() and state == 'running':
-                        running_workers += 1
-                except json.JSONDecodeError:
-                    continue
-            
-            if running_workers == 0:
-                print("All workers completed.")
-                return
-            
-            print(f"  {running_workers} workers still running...")
-            time.sleep(check_interval)
-        
-        print(f"Warning: Timeout reached after {timeout}s. Workers may not have completed.")
-    
-    def _collect_worker_results(self) -> Dict:
-        """Collect results from dine-in worker output files."""
-        import glob
-        
-        worker_results = {
-            "total_iterations": 0,
-            "successful": 0,
-            "failed": 0,
-            "avg_latency_ms": 0.0,
-            "results_files": []
-        }
-        
-        # Look for worker result files
-        patterns = ["worker_*.json", "results_*.json", "*results*.json"]
-        
-        for pattern in patterns:
-            for f in glob.glob(os.path.join(self.results_dir, pattern)):
-                try:
-                    with open(f, 'r') as fp:
-                        data = json.load(fp)
-                        worker_results["results_files"].append(f)
-                        
-                        # Aggregate stats if present
-                        if "stats" in data:
-                            stats = data["stats"]
-                            worker_results["total_iterations"] += stats.get("total_iterations", 0)
-                            worker_results["successful"] += stats.get("successful_iterations", 0)
-                            worker_results["failed"] += stats.get("failed_iterations", 0)
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"Warning: Could not read results from {f}: {e}")
-        
-        # Calculate average latency
-        if worker_results["successful"] > 0:
-            total_latency = 0
-            count = 0
-            for f in worker_results["results_files"]:
-                try:
-                    with open(f, 'r') as fp:
-                        data = json.load(fp)
-                        if "stats" in data and "avg_latency_ms" in data["stats"]:
-                            total_latency += data["stats"]["avg_latency_ms"]
-                            count += 1
-                except:
-                    pass
-            if count > 0:
-                worker_results["avg_latency_ms"] = total_latency / count
-        
-        return worker_results
     
     def _clean_pipeline_logs(self):
         """Remove previous pipeline log files."""
@@ -525,14 +413,11 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Take-Away: Run with 2 workers for 5 minutes (RTSP streams)
+  # Run with 2 workers for 5 minutes
   python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml --workers 2 --duration 300
   
-  # Dine-In: Run with 2 workers, 10 iterations each (image-based)
-  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yml --workers 2 --iterations 10 --profile benchmark
-  
-  # Dine-In: Quick test with 1 iteration
-  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yml --workers 1 --iterations 1 --profile benchmark --skip_perf_tools
+  # Run with 1 worker (default)
+  python benchmark_order_accuracy.py --compose_file ../../docker-compose.yaml
 
 For stream density testing, use application-specific scripts:
   # Take-Away (RTSP/workers based)
@@ -559,20 +444,6 @@ For stream density testing, use application-specific scripts:
     )
     
     parser.add_argument(
-        '--profile',
-        type=str,
-        default='parallel',
-        help='Docker compose profile to use (parallel for take-away, benchmark for dine-in)'
-    )
-    
-    parser.add_argument(
-        '--iterations',
-        type=int,
-        default=0,
-        help='Number of iterations per worker (dine-in mode). 0 = use duration-based.'
-    )
-    
-    parser.add_argument(
         '--init_duration',
         type=int,
         default=120,
@@ -583,7 +454,7 @@ For stream density testing, use application-specific scripts:
         '--duration',
         type=int,
         default=300,
-        help='Benchmark duration in seconds (ignored if --iterations > 0)'
+        help='Benchmark duration in seconds'
     )
     
     parser.add_argument(
@@ -643,9 +514,7 @@ def main():
     results = benchmark.run_fixed_workers(
         workers=args.workers,
         init_duration=args.init_duration,
-        duration=args.duration,
-        profile=args.profile,
-        iterations=args.iterations
+        duration=args.duration
     )
     print(f"\nBenchmark complete. Results: {results}")
 
