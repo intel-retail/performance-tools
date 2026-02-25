@@ -358,7 +358,7 @@ class DineInStreamDensity:
     
     # Configuration constants
     DEFAULT_TARGET_LATENCY_MS = 15000  # 15 seconds
-    MAX_ITERATIONS = 50
+    DEFAULT_MAX_ITERATIONS = 50
     MEMORY_SAFETY_THRESHOLD_PERCENT = 90
     MIN_REQUESTS_PER_ITERATION = 3
     
@@ -374,7 +374,10 @@ class DineInStreamDensity:
         density_increment: int = 1,
         init_duration: int = 60,
         min_requests: int = MIN_REQUESTS_PER_ITERATION,
-        request_timeout: int = 300
+        request_timeout: int = 300,
+        single_run: bool = False,
+        concurrent_images: int = 1,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS
     ):
         self.compose_file = compose_file
         self.results_dir = Path(results_dir)
@@ -385,6 +388,9 @@ class DineInStreamDensity:
         self.init_duration = init_duration
         self.min_requests = min_requests
         self.request_timeout = request_timeout
+        self.single_run = single_run
+        self.concurrent_images = concurrent_images
+        self.max_iterations = max_iterations
         
         # Resolve paths relative to compose file
         compose_dir = Path(compose_file).parent
@@ -403,6 +409,9 @@ class DineInStreamDensity:
         logger.info(f"  Images: {self.images_dir}")
         logger.info(f"  Orders: {self.orders_file}")
         logger.info(f"  Target Latency: {self.target_latency_ms}ms")
+        logger.info(f"  Single Run Mode: {self.single_run}")
+        if self.single_run:
+            logger.info(f"  Concurrent Images: {self.concurrent_images}")
     
     def run(self) -> DineInDensityResult:
         """
@@ -415,11 +424,13 @@ class DineInStreamDensity:
         """
         self._print_header()
         
-        density = 1
+        # In single_run mode, just run once with specified concurrent_images
+        density = self.concurrent_images if self.single_run else 1
+        max_iter = 1 if self.single_run else self.max_iterations
         best_result: Optional[DineInIterationResult] = None
         total_images = 0
         
-        for iteration in range(1, self.MAX_ITERATIONS + 1):
+        for iteration in range(1, max_iter + 1):
             print(f"\n{'='*70}")
             print(f"Iteration {iteration}: Testing density={density} concurrent images")
             print(f"{'='*70}")
@@ -543,6 +554,9 @@ class DineInStreamDensity:
             elif not r.get("success"):
                 print(f"  [{r.get('image_id', '?')}] ✗ FAILED - {r.get('error', 'unknown error')}")
         
+        # Print detailed validation results
+        self._print_detailed_validation_results(results)
+        
         # Calculate metrics from HTTP response latencies
         avg_latency = sum(latencies) / len(latencies) if latencies else 0
         sorted_latencies = sorted(latencies) if latencies else [0]
@@ -587,6 +601,70 @@ class DineInStreamDensity:
         elif self.latency_metric == "max":
             return result.max_latency_ms
         return result.avg_latency_ms
+    
+    def _print_detailed_validation_results(self, results: List[Dict]):
+        """Print detailed validation results with item breakdowns."""
+        print("\n" + "=" * 70)
+        print("VALIDATION DETAILS")
+        print("=" * 70)
+        
+        for r in results:
+            image_id = r.get("image_id", "unknown")
+            latency_ms = r.get("latency_ms", 0)
+            
+            if not r.get("success"):
+                print(f"\n🖼️  {image_id} - ❌ Request Failed")
+                print(f"   Error: {r.get('error', 'unknown error')}")
+                print(f"   Latency: {latency_ms:.0f}ms")
+                continue
+            
+            resp = r.get("response", {})
+            order_complete = resp.get("order_complete", False)
+            accuracy = resp.get("accuracy_score", 0.0)
+            matched_items = resp.get("matched_items", [])
+            missing_items = resp.get("missing_items", [])
+            extra_items = resp.get("extra_items", [])
+            qty_mismatches = resp.get("quantity_mismatches", [])
+            
+            complete_icon = "✅" if order_complete else "❌"
+            complete_label = "Order Complete" if order_complete else "Order Incomplete"
+            
+            print(f"\n🖼️  {image_id}")
+            print(f"   {complete_icon} {complete_label}")
+            print(f"   Accuracy: {accuracy * 100:.0f}%")
+            print(f"   Latency: {latency_ms:.0f}ms")
+            
+            if matched_items:
+                print(f"   ✔️  Matched Items:")
+                for item in matched_items:
+                    name = item.get("detected_name") or item.get("expected_name", "?")
+                    qty = item.get("quantity", 1)
+                    sim = item.get("similarity", 0)
+                    print(f"      • {name} (×{qty}) - {sim * 100:.0f}% match")
+            
+            if missing_items:
+                print(f"   ⚠️  Missing Items:")
+                for item in missing_items:
+                    name = item.get("name", "?")
+                    qty = item.get("quantity", 1)
+                    print(f"      • {name} (×{qty})")
+            
+            if extra_items:
+                print(f"   ➕ Extra Items Detected:")
+                for item in extra_items:
+                    name = item.get("name", "?")
+                    qty = item.get("quantity", 1)
+                    print(f"      • {name} (×{qty})")
+            
+            if qty_mismatches:
+                print(f"   🔢 Quantity Mismatches:")
+                for item in qty_mismatches:
+                    name = item.get("item", "?")
+                    exp = item.get("expected_quantity", "?")
+                    got = item.get("detected_quantity", "?")
+                    print(f"      • {name}: expected ×{exp}, detected ×{got}")
+        
+        print("\n" + "=" * 70)
     
     def _start_services(self):
         """Start dine-in services via docker compose."""
@@ -1082,6 +1160,23 @@ def main():
         default=env_results_dir,
         help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
+    parser.add_argument(
+        "--single_run",
+        action="store_true",
+        help="Run a single benchmark iteration without density scaling (simple benchmark mode)"
+    )
+    parser.add_argument(
+        "--concurrent_images",
+        type=int,
+        default=1,
+        help="Number of concurrent images for single_run mode (default: 1)"
+    )
+    parser.add_argument(
+        "--max_iterations",
+        type=int,
+        default=50,
+        help="Maximum iterations for density scaling (default: 50)"
+    )
     
     args = parser.parse_args()
     
@@ -1095,6 +1190,9 @@ def main():
     print(f"  REQUEST_TIMEOUT: {args.request_timeout}")
     print(f"  API_ENDPOINT: {args.api_endpoint}")
     print(f"  RESULTS_DIR: {args.results_dir}")
+    print(f"  SINGLE_RUN: {args.single_run}")
+    if args.single_run:
+        print(f"  CONCURRENT_IMAGES: {args.concurrent_images}")
     print()
     
     # Validate compose file exists
@@ -1115,7 +1213,10 @@ def main():
         density_increment=args.density_increment,
         init_duration=args.init_duration,
         min_requests=args.min_requests,
-        request_timeout=args.request_timeout
+        request_timeout=args.request_timeout,
+        single_run=args.single_run,
+        concurrent_images=args.concurrent_images,
+        max_iterations=args.max_iterations
     )
     
     result = tester.run()
