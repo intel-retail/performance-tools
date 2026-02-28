@@ -24,6 +24,7 @@ import json
 import psutil
 import shlex
 import subprocess
+import shutil
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,6 +41,7 @@ class IterationResult:
     passed: bool
     memory_percent: float
     timestamp: str
+    station_results: Dict = field(default_factory=dict)  # Per-station validation results
 
 
 @dataclass
@@ -141,11 +143,13 @@ class LatencyBasedStreamDensity:
         print(f"Latency Metric: {self.latency_metric}")
         print(f"Worker Increment: {self.worker_increment}")
         print(f"Init Duration: {self.init_duration}s")
-        print(f"Min Transactions: {self.min_transactions}")
+        print(f"Min Transactions: {self.min_transactions} per worker (scales with worker count)")
         print("=" * 70)
         
         workers = 1
         best_result: Optional[IterationResult] = None
+        consecutive_failures = 0  # Track consecutive 0-transaction failures
+        MAX_CONSECUTIVE_FAILURES = 2  # Stop after this many consecutive failures
         
         for iteration in range(1, self.MAX_ITERATIONS + 1):
             print(f"\n{'='*60}")
@@ -163,9 +167,10 @@ class LatencyBasedStreamDensity:
             # Run benchmark iteration
             result = self._run_iteration(workers)
             
-            # Check if we got enough transactions
-            if result.total_transactions < self.min_transactions:
-                print(f"WARNING: Only got {result.total_transactions} transactions (need {self.min_transactions})")
+            # Check if we got enough transactions (scaled by worker count)
+            required_transactions = self.min_transactions * workers
+            if result.total_transactions < required_transactions:
+                print(f"WARNING: Only got {result.total_transactions} transactions (need {required_transactions} = {self.min_transactions} × {workers} workers)")
                 print("Latency measurement may be unreliable.")
             
             self.iterations.append(result)
@@ -187,17 +192,34 @@ class LatencyBasedStreamDensity:
             if current_latency <= self.target_latency_ms and current_latency > 0:
                 print(f"  ✓ PASSED (latency {current_latency/1000:.1f}s <= {self.target_latency_ms/1000:.1f}s)")
                 best_result = result
+                consecutive_failures = 0  # Reset on success
                 workers += self.worker_increment
             elif current_latency == 0:
-                print(f"  ⚠ NO DATA - No latency measurements collected")
-                print(f"  Trying next iteration anyway...")
+                consecutive_failures += 1
+                print(f"  ⚠ NO DATA - No latency measurements collected ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES} consecutive failures)")
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"\n  ✗ STOPPING: {MAX_CONSECUTIVE_FAILURES} consecutive failures detected (likely GPU OOM)")
+                    print(f"  Maximum sustainable workers: {best_result.workers if best_result else 0}")
+                    break
+                print(f"  Trying next iteration...")
+                workers += self.worker_increment
+            elif current_latency < 0:
+                consecutive_failures += 1
+                print(f"  ⚠ CORRUPTED METRICS - Negative latency {current_latency:.0f}ms detected")
+                print(f"  This usually means a video-loop ID collision in the metrics file.")
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"\n  ✗ STOPPING: {MAX_CONSECUTIVE_FAILURES} consecutive failures detected")
+                    print(f"  Maximum sustainable workers: {best_result.workers if best_result else 0}")
+                    break
+                print(f"  Discarding this iteration result; trying next...")
+                self.iterations.pop()  # Remove the corrupt entry already appended above
                 workers += self.worker_increment
             else:
                 print(f"  ✗ FAILED (latency {current_latency/1000:.1f}s > {self.target_latency_ms/1000:.1f}s)")
                 break
         
-        # Final cleanup
-        self._docker_compose("--profile parallel down")
+        # Final cleanup (with volumes to ensure clean state for next run)
+        self._docker_compose("--profile parallel down -v")
         
         # Build result
         density_result = DensityResult(
@@ -222,16 +244,35 @@ class LatencyBasedStreamDensity:
         Run a single benchmark iteration with specified workers.
         
         Polls for transactions instead of waiting fixed duration.
+        Cleans MinIO data before each iteration for clean results.
         """
+        iteration_num = len(self.iterations) + 1
+        
         # Set environment for workers
         self.env_vars["WORKERS"] = str(workers)
         self.env_vars["VLM_WORKERS"] = str(workers)
         self.env_vars["SERVICE_MODE"] = "parallel"
         
-        # Stop any existing containers
+        # Stop any existing containers (with volume cleanup to clear sync state)
         print("Stopping existing containers...")
-        self._docker_compose("--profile parallel down")
-        time.sleep(5)
+        self._docker_compose("--profile parallel down -v")
+        time.sleep(3)
+        
+        # Clean MinIO data for fresh start
+        print("Cleaning MinIO data for fresh iteration...")
+        self._clean_minio()
+        
+        # Clean sync volume (CRITICAL: prevents 2PC deadlock on iteration 2+)
+        # Note: docker compose down -v should handle this, but double-check
+        print("Cleaning sync volume...")
+        self._clean_sync_volume()
+        
+        # Clean station result files from previous iteration
+        self._clean_station_results()
+        
+        # Clean metrics files so transaction count starts from 0
+        print("Cleaning metrics files...")
+        self._clean_metrics_files()
         
         # Start containers
         print("Starting containers...")
@@ -241,12 +282,13 @@ class LatencyBasedStreamDensity:
         print(f"Waiting {self.init_duration}s for initialization...")
         time.sleep(self.init_duration)
         
-        # Poll for transactions until we have enough
-        print(f"Waiting for {self.min_transactions} transactions...")
+        # Poll for transactions until we have enough (scaled by worker count)
+        required_transactions = self.min_transactions * workers
+        print(f"Waiting for {required_transactions} transactions ({self.min_transactions} per worker × {workers} worker(s))...")
         start_time = time.time()
         transactions = 0
         
-        while transactions < self.min_transactions:
+        while transactions < required_transactions:
             elapsed = time.time() - start_time
             
             if elapsed > self.MAX_WAIT_SEC:
@@ -257,15 +299,20 @@ class LatencyBasedStreamDensity:
             metrics = self._collect_vlm_logger_metrics()
             transactions = metrics.get("total_transactions", 0)
             
-            if transactions < self.min_transactions:
-                remaining = self.min_transactions - transactions
-                print(f"  Transactions: {transactions}/{self.min_transactions} "
+            if transactions < required_transactions:
+                remaining = required_transactions - transactions
+                print(f"  Transactions: {transactions}/{required_transactions} "
                       f"(waiting for {remaining} more, {elapsed:.0f}s elapsed)")
                 time.sleep(self.POLL_INTERVAL_SEC)
         
         # Collect final metrics
         vlm_metrics = self._collect_vlm_logger_metrics()
         memory_percent = psutil.virtual_memory().percent
+        
+        # Collect station results before stopping containers
+        print("Collecting station results...")
+        station_results = self._collect_station_results(iteration_num, workers)
+        print(f"  Collected results from {len(station_results)} station(s)")
         
         # Stop containers
         print("Stopping containers...")
@@ -280,7 +327,8 @@ class LatencyBasedStreamDensity:
             total_transactions=vlm_metrics.get("total_transactions", 0),
             passed=True,  # Will be updated after comparison
             memory_percent=memory_percent,
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            station_results=station_results
         )
     
     def _collect_vlm_logger_metrics(self) -> Dict:
@@ -324,6 +372,14 @@ class LatencyBasedStreamDensity:
                             timestamp = int(ts_match.group(1))
                             
                             if event == "start":
+                                # If this ID already has a completed start+end pair (video loop
+                                # reuse), save it under a unique key before overwriting so the
+                                # latency isn't corrupted by end(loop N) - start(loop N+1).
+                                if unique_id in start_times and unique_id in end_times:
+                                    saved_key = f"{unique_id}_run{len([k for k in start_times if k.startswith(unique_id)])}"
+                                    start_times[saved_key] = start_times[unique_id]
+                                    end_times[saved_key] = end_times[unique_id]
+                                    del end_times[unique_id]
                                 start_times[unique_id] = timestamp
                             elif event == "end":
                                 end_times[unique_id] = timestamp
@@ -393,6 +449,122 @@ class LatencyBasedStreamDensity:
                 except OSError:
                     pass
     
+    def _clean_minio(self):
+        """Clean MinIO data bucket before each iteration."""
+        print("Cleaning MinIO data...")
+        
+        # Stop MinIO container if running
+        subprocess.run(
+            "docker stop oa_minio 2>/dev/null || true",
+            shell=True,
+            capture_output=True
+        )
+        
+        # Remove MinIO container
+        subprocess.run(
+            "docker rm oa_minio 2>/dev/null || true",
+            shell=True,
+            capture_output=True
+        )
+        
+        # Remove MinIO volume
+        subprocess.run(
+            "docker volume rm take-away_minio_data 2>/dev/null || true",
+            shell=True,
+            capture_output=True
+        )
+        
+        print("  MinIO data cleared")
+    
+    def _clean_sync_volume(self):
+        """Clean pipeline sync volume to prevent 2PC deadlock between iterations.
+        
+        The pipeline_sync volume contains ready/prepare/commit signal files.
+        If not cleaned, stale files from previous iteration cause 2PC protocol
+        to deadlock (pipelines wait for COMMIT that was already issued).
+        """
+        print("Cleaning pipeline sync volume...")
+        
+        # Remove the sync volume - it will be recreated on next compose up
+        result = subprocess.run(
+            "docker volume rm take-away_pipeline_sync 2>/dev/null || true",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        # Also try without the project prefix (depends on compose project name)
+        subprocess.run(
+            "docker volume rm pipeline_sync 2>/dev/null || true",
+            shell=True,
+            capture_output=True
+        )
+        
+        # List remaining sync-related volumes for debugging
+        result = subprocess.run(
+            "docker volume ls | grep -i sync || true",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        if result.stdout.strip():
+            print(f"  Warning: Remaining sync volumes: {result.stdout.strip()}")
+        else:
+            print("  Pipeline sync volume cleared")
+    
+    def _clean_station_results(self):
+        """Clean previous station result files."""
+        patterns = [
+            "station_*_report.md",
+            "station_*_summary.json"
+        ]
+        
+        for pattern in patterns:
+            for f in glob.glob(os.path.join(self.results_dir, pattern)):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        
+        print("  Station results cleared")
+    
+    def _collect_station_results(self, iteration_num: int, workers: int) -> Dict:
+        """Collect station results for this iteration."""
+        station_results = {}
+        
+        for station_id in range(1, workers + 1):
+            summary_file = os.path.join(self.results_dir, f"station_{station_id}_summary.json")
+            report_file = os.path.join(self.results_dir, f"station_{station_id}_report.md")
+            
+            if os.path.exists(summary_file):
+                try:
+                    with open(summary_file, 'r') as f:
+                        summary_data = json.load(f)
+                    station_results[f"station_{station_id}"] = summary_data
+                    
+                    # Write to iteration-specific file (avoid shutil.copy permission issues)
+                    iter_summary_file = os.path.join(
+                        self.results_dir, 
+                        f"iteration_{iteration_num}_station_{station_id}_summary.json"
+                    )
+                    with open(iter_summary_file, 'w') as f:
+                        json.dump(summary_data, f, indent=2)
+                    
+                    if os.path.exists(report_file):
+                        iter_report_file = os.path.join(
+                            self.results_dir,
+                            f"iteration_{iteration_num}_station_{station_id}_report.md"
+                        )
+                        with open(report_file, 'r') as f:
+                            report_content = f.read()
+                        with open(iter_report_file, 'w') as f:
+                            f.write(report_content)
+                        
+                except (json.JSONDecodeError, IOError, PermissionError) as e:
+                    print(f"  Warning: Could not read station {station_id} summary: {e}")
+        
+        return station_results
+    
     def _check_memory_available(self, workers: int) -> bool:
         """Check if memory is available for workers."""
         mem = psutil.virtual_memory()
@@ -431,7 +603,8 @@ class LatencyBasedStreamDensity:
                     "total_transactions": it.total_transactions,
                     "passed": it.passed,
                     "memory_percent": it.memory_percent,
-                    "timestamp": it.timestamp
+                    "timestamp": it.timestamp,
+                    "station_results": it.station_results
                 }
                 for it in result.iterations
             ],
