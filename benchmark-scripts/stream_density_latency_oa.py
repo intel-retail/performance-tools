@@ -252,6 +252,10 @@ class LatencyBasedStreamDensity:
         self.env_vars["WORKERS"] = str(workers)
         self.env_vars["VLM_WORKERS"] = str(workers)
         self.env_vars["SERVICE_MODE"] = "parallel"
+        # Set LOOP_COUNT to get enough transactions
+        # Each loop generates 1 transaction per station (worker)
+        # Need min_transactions per worker, so LOOP_COUNT = min_transactions
+        self.env_vars["LOOP_COUNT"] = str(self.min_transactions)
         
         # Stop any existing containers (with volume cleanup to clear sync state)
         print("Stopping existing containers...")
