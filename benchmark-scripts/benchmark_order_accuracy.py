@@ -112,7 +112,7 @@ class OrderAccuracyBenchmark:
             workers: Number of concurrent station workers
             init_duration: Warmup duration in seconds
             duration: Benchmark duration in seconds (ignored if iterations > 0)
-            profile: Docker compose profile to use (parallel, benchmark, worker)
+            profile: Docker compose profile to use (parallel for take-away, benchmark for dine-in)
             iterations: Number of iterations per worker (0 = use duration-based)
             
         Returns:
@@ -228,29 +228,48 @@ class OrderAccuracyBenchmark:
             "successful": 0,
             "failed": 0,
             "avg_latency_ms": 0.0,
-            "results_files": []
+            "results_files": [],
+            "details": []
         }
         
-        # Look for worker result files
-        patterns = ["worker_*.json", "results_*.json", "*results*.json"]
+        # Look for worker result files (only worker_*.json pattern to avoid duplicates)
+        seen_files = set()
+        for f in glob.glob(os.path.join(self.results_dir, "worker_*.json")):
+            if f in seen_files:
+                continue
+            seen_files.add(f)
+            try:
+                with open(f, 'r') as fp:
+                    data = json.load(fp)
+                    worker_results["results_files"].append(f)
+                    
+                    # Worker results have stats at root level, not in "stats" key
+                    worker_results["total_iterations"] += data.get("total_iterations", 0)
+                    worker_results["successful"] += data.get("successful_iterations", 0)
+                    worker_results["failed"] += data.get("failed_iterations", 0)
+                    
+                    # Collect detailed results
+                    if "results" in data:
+                        for result in data["results"]:
+                            worker_results["details"].append({
+                                "worker_id": result.get("worker_id"),
+                                "order_id": result.get("order_id"),
+                                "success": result.get("success"),
+                                "order_complete": result.get("order_complete"),
+                                "accuracy_score": result.get("accuracy_score"),
+                                "items_detected": result.get("items_detected"),
+                                "items_expected": result.get("items_expected"),
+                                "missing_items": result.get("missing_items", 0),
+                                "extra_items": result.get("extra_items", 0),
+                                "missing_items_list": result.get("missing_items_list", []),
+                                "extra_items_list": result.get("extra_items_list", []),
+                                "total_latency_ms": result.get("total_latency_ms"),
+                                "tps": result.get("tps")
+                            })
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Warning: Could not read results from {f}: {e}")
         
-        for pattern in patterns:
-            for f in glob.glob(os.path.join(self.results_dir, pattern)):
-                try:
-                    with open(f, 'r') as fp:
-                        data = json.load(fp)
-                        worker_results["results_files"].append(f)
-                        
-                        # Aggregate stats if present
-                        if "stats" in data:
-                            stats = data["stats"]
-                            worker_results["total_iterations"] += stats.get("total_iterations", 0)
-                            worker_results["successful"] += stats.get("successful_iterations", 0)
-                            worker_results["failed"] += stats.get("failed_iterations", 0)
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"Warning: Could not read results from {f}: {e}")
-        
-        # Calculate average latency
+        # Calculate average latency from root level avg_latency_ms
         if worker_results["successful"] > 0:
             total_latency = 0
             count = 0
@@ -258,8 +277,8 @@ class OrderAccuracyBenchmark:
                 try:
                     with open(f, 'r') as fp:
                         data = json.load(fp)
-                        if "stats" in data and "avg_latency_ms" in data["stats"]:
-                            total_latency += data["stats"]["avg_latency_ms"]
+                        if "avg_latency_ms" in data:
+                            total_latency += data["avg_latency_ms"]
                             count += 1
                 except:
                     pass

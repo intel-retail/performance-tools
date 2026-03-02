@@ -214,6 +214,12 @@ class LatencyBasedStreamDensity:
                 print(f"  Discarding this iteration result; trying next...")
                 self.iterations.pop()  # Remove the corrupt entry already appended above
                 workers += self.worker_increment
+            elif current_latency < 0:
+                print(f"  ⚠ CORRUPTED METRICS - Negative latency {current_latency:.0f}ms detected")
+                print(f"  This usually means a video-loop ID collision in the metrics file.")
+                print(f"  Discarding this iteration result; trying next...")
+                self.iterations.pop()  # Remove the corrupt entry already appended above
+                workers += self.worker_increment
             else:
                 print(f"  ✗ FAILED (latency {current_latency/1000:.1f}s > {self.target_latency_ms/1000:.1f}s)")
                 break
