@@ -75,15 +75,16 @@ def get_vlm_application_latency(log_file_path):
     
     for app_id_combo in apps_to_analyze:
         events = sorted(timing_data[app_id_combo], key=lambda x: x['timestamp_ms'])
-        start_time = None
+        start_times = []  # Use a stack to track multiple start times
         
         for event in events:
             if event['event'] == 'start':
-                start_time = event['timestamp_ms']
-            elif event['event'] == 'end' and start_time is not None:
+                start_times.append(event['timestamp_ms'])
+            elif event['event'] == 'end' and start_times:
+                # Pair with the most recent start time (LIFO)
+                start_time = start_times.pop()
                 duration = event['timestamp_ms'] - start_time
                 app_durations[app_id_combo].append(duration)
-                start_time = None
 
     durations = dict(app_durations)
 
