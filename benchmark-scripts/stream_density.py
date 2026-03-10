@@ -709,7 +709,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         
         # --- Compute average across all files for this stream index ---
         if num_pipelines > 0:
-            final_stream_avg = stream_avg_sum / num_pipelines
+            final_stream_avg = stream_avg_sum
             stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
             total_fps += final_stream_avg
         else:
