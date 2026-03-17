@@ -64,6 +64,9 @@ class OrderAccuracyBenchmark:
         self.env_vars["RESULTS_DIR"] = self.results_dir
         self.env_vars["log_dir"] = self.results_dir
         self.env_vars["DEVICE"] = target_device
+        self.env_vars["TARGET_DEVICE"] = target_device
+        self.env_vars["VLM_DEVICE"] = target_device
+        self.env_vars["OPENVINO_DEVICE"] = target_device
         
     def docker_compose_cmd(
         self,
@@ -103,7 +106,8 @@ class OrderAccuracyBenchmark:
         init_duration: int,
         duration: int,
         profile: str = "parallel",
-        iterations: int = 0
+        iterations: int = 0,
+        skip_export: bool = False
     ) -> Dict:
         """
         Run benchmark with fixed number of station workers.
@@ -175,7 +179,8 @@ class OrderAccuracyBenchmark:
         self.docker_compose_cmd(f"--profile {profile} down")
         
         # Export results
-        self._export_results(results, "fixed_workers")
+        if not skip_export:
+            self._export_results(results, "fixed_workers")
         
         return results
     
@@ -626,6 +631,12 @@ For stream density testing, use application-specific scripts:
         help='Skip adding performance-tools docker-compose.yaml (avoids benchmark container build)'
     )
     
+    parser.add_argument(
+        '--skip_export',
+        action='store_true',
+        help='Skip exporting fixed_workers results JSON/CSV (useful when metrics come from app-level reports)'
+    )
+    
     return parser.parse_args()
 
 
@@ -664,9 +675,13 @@ def main():
         init_duration=args.init_duration,
         duration=args.duration,
         profile=args.profile,
-        iterations=args.iterations
+        iterations=args.iterations,
+        skip_export=args.skip_export
     )
-    print(f"\nBenchmark complete. Results: {results}")
+    if not args.skip_export:
+        print(f"\nBenchmark complete. Results: {results}")
+    else:
+        print("\nBenchmark complete.")
 
 
 if __name__ == '__main__':
