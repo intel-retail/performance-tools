@@ -64,6 +64,9 @@ class OrderAccuracyBenchmark:
         self.env_vars["RESULTS_DIR"] = self.results_dir
         self.env_vars["log_dir"] = self.results_dir
         self.env_vars["DEVICE"] = target_device
+        self.env_vars["TARGET_DEVICE"] = target_device
+        self.env_vars["VLM_DEVICE"] = target_device
+        self.env_vars["OPENVINO_DEVICE"] = target_device
         
     def docker_compose_cmd(
         self,
