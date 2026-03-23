@@ -13,6 +13,8 @@ Note: For stream density testing, use the application-specific scripts directly:
 """
 
 import argparse
+import contextlib
+import io
 import os
 import sys
 import time
@@ -330,11 +332,12 @@ class OrderAccuracyBenchmark:
         
         # Calculate FPS from logs
         try:
-            total_fps, fps_per_stream, fps_dict = stream_density.calculate_total_fps(
-                num_pipelines,
-                self.results_dir,
-                "order-accuracy"
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                total_fps, fps_per_stream, fps_dict = stream_density.calculate_total_fps(
+                    num_pipelines,
+                    self.results_dir,
+                    "order-accuracy"
+                )
             metrics["fps"] = {
                 "total": total_fps,
                 "per_stream": fps_per_stream,
@@ -345,11 +348,12 @@ class OrderAccuracyBenchmark:
         
         # Calculate latency from logs
         try:
-            total_latency, latency_per_stream = stream_density.calculate_pipeline_latency(
-                num_pipelines,
-                self.results_dir,
-                "order-accuracy"
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                total_latency, latency_per_stream = stream_density.calculate_pipeline_latency(
+                    num_pipelines,
+                    self.results_dir,
+                    "order-accuracy"
+                )
             metrics["latency"] = {
                 "total_ms": total_latency,
                 "per_stream_ms": latency_per_stream
@@ -636,6 +640,12 @@ For stream density testing, use application-specific scripts:
         action='store_true',
         help='Skip exporting fixed_workers results JSON/CSV (useful when metrics come from app-level reports)'
     )
+    parser.add_argument('--parser_script', 
+                        default=os.path.join(os.path.curdir, 'parse_qmassa_metrics_to_json.py'), 
+                        help='full path to the parsing script to obtain FPS')
+    parser.add_argument('--parser_args', default='-k device -k qmassa', 
+                        help='arguments to pass to the parser script, ' + 
+                        'pass args with spaces in quotes: "args with spaces"')
     
     return parser.parse_args()
 
@@ -646,7 +656,7 @@ def main():
     
     # Resolve compose files
     compose_files = [os.path.abspath(f) for f in args.compose_file]
-    
+    env_vars = os.environ.copy()
     # Validate compose files exist
     for cf in compose_files:
         if not os.path.exists(cf):
@@ -683,6 +693,16 @@ def main():
     else:
         print("\nBenchmark complete.")
 
+    try:
+        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, args.parser_args))
+        # print("======DEBUG======: %s" % parser_string)
+        cmd_args = shlex.split(parser_string)
+
+        subprocess.run(cmd_args,
+                       check=True, env=env_vars)  # nosec B404, B603
+    except subprocess.CalledProcessError:
+        print("Exception calling %s\n parser %s: %s" %
+              (parser_string, args.parser_script, traceback.format_exc()))
 
 if __name__ == '__main__':
     main()
