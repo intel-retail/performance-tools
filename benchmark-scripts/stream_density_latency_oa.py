@@ -24,6 +24,7 @@ import json
 import psutil
 import shlex
 import subprocess
+import traceback
 import shutil
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -749,6 +750,17 @@ def main():
         default=env_results_dir,
         help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
+    parser.add_argument(
+        '--parser_script',
+        default=os.path.join(os.path.curdir, 'parse_qmassa_metrics_to_json.py'),
+        help='full path to the parsing script to obtain GPU metrics'
+    )
+    parser.add_argument(
+        '--parser_args',
+        default='-k device -k qmassa',
+        help='arguments to pass to the parser script, '
+             'pass args with spaces in quotes: "args with spaces"'
+    )
     
     args = parser.parse_args()
     
@@ -783,7 +795,17 @@ def main():
     )
     
     result = tester.run()
-    
+
+    env_vars = os.environ.copy()
+    try:
+        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, args.parser_args))
+        cmd_args = shlex.split(parser_string)
+        subprocess.run(cmd_args,
+                       check=True, env=env_vars)  # nosec B404, B603
+    except subprocess.CalledProcessError:
+        print("Exception calling %s\n parser %s: %s" %
+              (parser_string, args.parser_script, traceback.format_exc()))
+
     # Exit code based on result
     sys.exit(0 if result.met_target else 1)
 
