@@ -16,7 +16,6 @@ services:
     pid: host
     network_mode: "host"
     environment:
-      - HTTP_PROXY=${HTTP_PROXY}
       - NPU_LOG=/tmp/results/npu_usage.csv
     volumes:
       - ${log_dir}:/tmp/results
