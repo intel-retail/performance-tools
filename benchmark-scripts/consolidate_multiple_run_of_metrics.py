@@ -128,7 +128,7 @@ class CPUUsageExtractor(KPIExtractor):
                     idle_cpu_percentage = float(sar_cpu_usage_row_m.group(self._IDLE_CPU_PERCENT_GROUP))
                     cpu_usages.append(float(100) - idle_cpu_percentage)
         if len(cpu_usages) > 0:
-            return {AVG_CPU_USAGE_CONSTANT: mean(cpu_usages)}
+            return {AVG_CPU_USAGE_CONSTANT: round(mean(cpu_usages), 2)}
         else:
             return {AVG_CPU_USAGE_CONSTANT: "NA"}
 
@@ -425,7 +425,7 @@ class MemUsageExtractor(KPIExtractor):
                     mem_usages.append(mem_usage)
 
         if len(mem_usages) > 0:
-            return {AVG_MEM_USAGE_CONSTANT: mean(mem_usages) * 100}
+            return {AVG_MEM_USAGE_CONSTANT: round(mean(mem_usages) * 100, 2)}
         else:
             return {AVG_MEM_USAGE_CONSTANT: "NA"}
 
@@ -455,7 +455,7 @@ class PowerUsageExtractor(KPIExtractor):
         power_kpi_dict = {}
         for socket_id, power_usages in power_dict.items():
             socket_key = "{} {}".format(socket_id, AVG_POWER_USAGE_CONSTANT)
-            power_kpi_dict[socket_key] = mean(power_usages)
+            power_kpi_dict[socket_key] = round(mean(power_usages), 2)
 
         if power_kpi_dict:
             return power_kpi_dict
@@ -494,8 +494,8 @@ class DiskBandwidthExtractor(KPIExtractor):
 
         megabytes_to_bytes = 1000000
         if len(disk_read_bytes_per_second) > 0 and len(disk_write_bytes_per_second) > 0:
-            return {AVG_DISK_READ_BANDWIDTH_CONSTANT: mean(disk_read_bytes_per_second) / megabytes_to_bytes, 
-                    AVG_DISK_WRITE_BANDWIDTH_CONSTANT: mean(disk_write_bytes_per_second) / megabytes_to_bytes}
+            return {AVG_DISK_READ_BANDWIDTH_CONSTANT: round(mean(disk_read_bytes_per_second) / megabytes_to_bytes, 2), 
+                    AVG_DISK_WRITE_BANDWIDTH_CONSTANT: round(mean(disk_write_bytes_per_second) / megabytes_to_bytes, 2)}
         else:
             {AVG_DISK_READ_BANDWIDTH_CONSTANT: "NA", AVG_DISK_WRITE_BANDWIDTH_CONSTANT: "NA"}
 
@@ -516,7 +516,7 @@ class MemBandwidthExtractor(KPIExtractor):
             if 'Memory (MB/s)' in column:
                 socket_key = "S{} {}".format(socket_count, AVG_MEM_BANDWIDTH_CONSTANT)
                 mem_bandwidth = df[column].tolist()
-                socket_memory_bandwidth[socket_key] = mean([ x for x in mem_bandwidth if pd.isna(x) == False ])
+                socket_memory_bandwidth[socket_key] = round(mean([ x for x in mem_bandwidth if pd.isna(x) == False ]), 2)
                 socket_count = socket_count + 1
 
         if socket_memory_bandwidth:
@@ -543,7 +543,7 @@ class PIPELINEFPSExtractor(KPIExtractor):
               average_fps_list.append(float(line))
 
         if len(average_fps_list) > 0:
-            camera_fps[camera_key] = mean(average_fps_list)
+            camera_fps[camera_key] = round(mean(average_fps_list), 2)
         else:
             camera_fps[camera_key] = "NA"
 
@@ -568,7 +568,7 @@ class FPSExtractor(KPIExtractor):
                     average_fps_list.append(float((line.split(":"))[1].replace(",", "")))
 
         if len(average_fps_list) > 0:
-            camera_fps[camera_key] = mean(average_fps_list)
+            camera_fps[camera_key] = round(mean(average_fps_list), 2)
 
         if camera_fps:
             return camera_fps
@@ -702,7 +702,7 @@ class PCMExtractor(KPIExtractor):
                             pass
                 if numeric_values:  # Make sure we have values to calculate mean
                     socket_key = "S{} {}".format(socket_count, AVG_MEM_BANDWIDTH_CONSTANT)
-                    socket_memory_and_power[socket_key] = 1000 * mean(numeric_values)
+                    socket_memory_and_power[socket_key] = round(1000 * mean(numeric_values), 2)
                 socket_count = socket_count + 1
 
         print("parsing power usage")
@@ -723,7 +723,7 @@ class PCMExtractor(KPIExtractor):
                             pass
                 if numeric_values:  # Make sure we have values to calculate mean
                     socket_key = "S{} {}".format(socket_count, AVG_POWER_USAGE_CONSTANT)
-                    socket_memory_and_power[socket_key] = mean(numeric_values)
+                    socket_memory_and_power[socket_key] = round(mean(numeric_values), 2)
                 socket_count = socket_count + 1
 
         if socket_memory_and_power:
