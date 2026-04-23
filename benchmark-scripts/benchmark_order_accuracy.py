@@ -754,8 +754,32 @@ def main():
         print("\nBenchmark complete.")
 
     try:
-        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, args.parser_args))
-        # print("======DEBUG======: %s" % parser_string)
+        # Only pass -k <keyword> for keywords that have matching *tool-generated.json files
+        # in results_dir; avoids spurious "No files found" warnings for absent hardware counters.
+        all_keywords = []
+        parts = shlex.split(args.parser_args)
+        i = 0
+        while i < len(parts):
+            if parts[i] == '-k' and i + 1 < len(parts):
+                all_keywords.append(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+
+        active_keywords = []
+        if os.path.isdir(args.results_dir):
+            for entry in os.scandir(args.results_dir):
+                if entry.is_file() and entry.name.endswith('tool-generated.json'):
+                    for kw in all_keywords:
+                        if entry.name.startswith(kw) and kw not in active_keywords:
+                            active_keywords.append(kw)
+
+        effective_parser_args = (
+            ' '.join(f'-k {kw}' for kw in active_keywords)
+            if active_keywords else args.parser_args  # fall back so script can diagnose
+        )
+
+        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, effective_parser_args))
         cmd_args = shlex.split(parser_string)
 
         subprocess.run(cmd_args,
