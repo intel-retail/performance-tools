@@ -210,6 +210,15 @@ class OrderAccuracyBenchmark:
                         "per_pipeline": {"pipeline_stream": round(fps / workers, 2)}
                     }
         
+        # Derive latency from vlm_metrics when GStreamer pipeline logs are absent
+        if results.get("latency", {}).get("total_ms", 0) == 0:
+            vm = results.get("vlm_metrics", {})
+            if vm.get("avg_latency_ms", 0) > 0:
+                results["latency"] = {
+                    "total_ms": vm["avg_latency_ms"],
+                    "per_stream_ms": vm["avg_latency_ms"]
+                }
+        
         # Stop containers
         print("Stopping containers...")
         self.docker_compose_cmd(f"--profile {profile} down")
@@ -519,9 +528,10 @@ class OrderAccuracyBenchmark:
                             elif event == "end":
                                 end_times[unique_id] = timestamp
                         
-                        # Parse TPS from ovms_vlm_request event
+                        # Parse TPS from ovms_vlm_request event.
+                        # Dine-in emits tps=<val>; take-away emits throughput_mean=<val> (tokens/sec)
                         if "ovms_vlm_request" in line:
-                            tps_match = re.search(r'tps=([\d.]+)', line)
+                            tps_match = re.search(r'(?:tps|throughput_mean)=([\d.]+)', line)
                             if tps_match:
                                 tps_values.append(float(tps_match.group(1)))
             except (IOError, OSError) as e:
