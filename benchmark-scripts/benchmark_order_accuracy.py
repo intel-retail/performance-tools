@@ -172,9 +172,52 @@ class OrderAccuracyBenchmark:
         # Collect VLM metrics from vlm_metrics_logger
         results["vlm_metrics"] = self._collect_vlm_logger_metrics()
         
+        # Derive vlm_inference from vlm_logger data when direct log parsing yields nothing
+        # (order-accuracy does not emit the GStreamer vlm*.log files that _collect_vlm_metrics parses)
+        if results["vlm_inference"].get("inference_count", 0) == 0:
+            vm = results.get("vlm_metrics", {})
+            if vm.get("total_transactions", 0) > 0:
+                results["vlm_inference"] = {
+                    "inference_count": vm["total_transactions"],
+                    "avg_inference_ms": vm["avg_latency_ms"],
+                    "tokens_per_second": vm["avg_tps"]
+                }
+        
         # Collect dine-in results if in iteration mode
         if is_iteration_mode:
             results["worker_results"] = self._collect_worker_results()
+        
+        # Compute FPS for image-based workflows (no GStreamer pipeline logs exist)
+        if results["fps"].get("total", 0) == 0:
+            if is_iteration_mode:
+                wr = results.get("worker_results", {})
+                if wr.get("successful", 0) > 0 and wr.get("avg_latency_ms", 0) > 0:
+                    # Each worker processes one image at a time; throughput = workers / avg_latency_s
+                    fps = workers * 1000.0 / wr["avg_latency_ms"]
+                    results["fps"] = {
+                        "total": round(fps, 2),
+                        "per_stream": round(fps / workers, 2),
+                        "per_pipeline": {"pipeline_stream": round(fps / workers, 2)}
+                    }
+            else:
+                vm = results.get("vlm_metrics", {})
+                if vm.get("total_transactions", 0) > 0 and duration > 0:
+                    # Duration-based mode: use VLM transaction count over benchmark duration
+                    fps = vm["total_transactions"] / duration
+                    results["fps"] = {
+                        "total": round(fps, 2),
+                        "per_stream": round(fps / workers, 2),
+                        "per_pipeline": {"pipeline_stream": round(fps / workers, 2)}
+                    }
+        
+        # Derive latency from vlm_metrics when GStreamer pipeline logs are absent
+        if results.get("latency", {}).get("total_ms", 0) == 0:
+            vm = results.get("vlm_metrics", {})
+            if vm.get("avg_latency_ms", 0) > 0:
+                results["latency"] = {
+                    "total_ms": vm["avg_latency_ms"],
+                    "per_stream_ms": vm["avg_latency_ms"]
+                }
         
         # Stop containers
         print("Stopping containers...")
@@ -295,18 +338,33 @@ class OrderAccuracyBenchmark:
         return worker_results
     
     def _clean_pipeline_logs(self):
-        """Remove previous pipeline log files."""
+        """Remove previous pipeline log and results files to prevent stale data."""
         import glob
         
         patterns = [
             "pipeline*.log",
             "gst*.log",
             "vlm*.log",
-            "latency*.json"
+            "latency*.json",
+            # Worker result files from previous runs — must be cleaned or _collect_worker_results
+            # will aggregate both old and new data, producing inflated/incorrect metrics.
+            "worker_*.json",
+            "vlm_application_metrics_*.txt",
+            "vlm_performance_metrics_*.txt",
         ]
         
         for pattern in patterns:
             for f in glob.glob(os.path.join(self.results_dir, pattern)):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        
+        # Also clean VLM metrics from storage/results (compose-adjacent path)
+        compose_dir = os.path.dirname(self.compose_files[0]) if self.compose_files else "."
+        storage_results_dir = os.path.join(compose_dir, "storage", "results")
+        for pattern in ["vlm_application_metrics_*.txt", "vlm_performance_metrics_*.txt"]:
+            for f in glob.glob(os.path.join(storage_results_dir, pattern)):
                 try:
                     os.remove(f)
                 except OSError:
@@ -454,8 +512,9 @@ class OrderAccuracyBenchmark:
             try:
                 with open(log_file, 'r') as f:
                     for line in f:
-                        # Parse: id=station_1_7 event=start timestamp_ms=1234567890
-                        id_match = re.search(r'id=([\w_]+)', line)
+                        # Parse: id=<unique_id> event=start timestamp_ms=1234567890
+                        # Use \S+ to capture IDs that may contain dashes (e.g., dine_in_MCD-1001)
+                        id_match = re.search(r'id=(\S+)', line)
                         event_match = re.search(r'event=(\w+)', line)
                         ts_match = re.search(r'timestamp_ms=(\d+)', line)
                         
@@ -469,9 +528,10 @@ class OrderAccuracyBenchmark:
                             elif event == "end":
                                 end_times[unique_id] = timestamp
                         
-                        # Parse TPS from ovms_metrics event
-                        if "ovms_metrics" in line:
-                            tps_match = re.search(r'tps=([\d.]+)', line)
+                        # Parse TPS from ovms_vlm_request event.
+                        # Dine-in emits tps=<val>; take-away emits throughput_mean=<val> (tokens/sec)
+                        if "ovms_vlm_request" in line:
+                            tps_match = re.search(r'(?:tps|throughput_mean)=([\d.]+)', line)
                             if tps_match:
                                 tps_values.append(float(tps_match.group(1)))
             except (IOError, OSError) as e:
@@ -694,8 +754,32 @@ def main():
         print("\nBenchmark complete.")
 
     try:
-        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, args.parser_args))
-        # print("======DEBUG======: %s" % parser_string)
+        # Only pass -k <keyword> for keywords that have matching *tool-generated.json files
+        # in results_dir; avoids spurious "No files found" warnings for absent hardware counters.
+        all_keywords = []
+        parts = shlex.split(args.parser_args)
+        i = 0
+        while i < len(parts):
+            if parts[i] == '-k' and i + 1 < len(parts):
+                all_keywords.append(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+
+        active_keywords = []
+        if os.path.isdir(args.results_dir):
+            for entry in os.scandir(args.results_dir):
+                if entry.is_file() and entry.name.endswith('tool-generated.json'):
+                    for kw in all_keywords:
+                        if entry.name.startswith(kw) and kw not in active_keywords:
+                            active_keywords.append(kw)
+
+        effective_parser_args = (
+            ' '.join(f'-k {kw}' for kw in active_keywords)
+            if active_keywords else args.parser_args  # fall back so script can diagnose
+        )
+
+        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, effective_parser_args))
         cmd_args = shlex.split(parser_string)
 
         subprocess.run(cmd_args,
