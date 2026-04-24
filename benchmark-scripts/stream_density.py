@@ -40,8 +40,9 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
     # Clean up any previous logs and containers
     clean_up_pipeline_logs(results_dir)
     benchmark.docker_compose_containers(
-        "down", compose_files=compose_files, env_vars=env_vars)
-    time.sleep(3)
+        "down", compose_files=compose_files,
+        compose_post_args="-t 30 --volumes --remove-orphans", env_vars=env_vars)
+    time.sleep(5)
 
     # Measure available memory before starting the pipeline
     before_mem = psutil.virtual_memory().available
@@ -58,8 +59,9 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
 
     # Stop the pipeline
     benchmark.docker_compose_containers(
-        "down", compose_files=compose_files, env_vars=env_vars)
-    time.sleep(3)
+        "down", compose_files=compose_files,
+        compose_post_args="-t 30 --volumes --remove-orphans", env_vars=env_vars)
+    time.sleep(5)
 
     # Calculate usage in MB
     usage_bytes = before_mem - after_mem
@@ -450,6 +452,14 @@ def run_pipeline_iterations(
                 num_pipelines = 1
             return num_pipelines, False
 
+        # Bring down previous iteration's containers before starting new ones
+        print("Stopping previous containers before scaling...")
+        benchmark.docker_compose_containers(
+            "down", compose_files=compose_files,
+            compose_post_args="-t 30 --volumes --remove-orphans", env_vars=env_vars)
+        time.sleep(15)  # Allow kernel to reclaim cgroup memory and shared memory
+        clean_up_pipeline_logs(results_dir)
+
         env_vars["PIPELINE_COUNT"] = str(num_pipelines)
         print(f"Starting num. of pipelines: {num_pipelines}")
         benchmark.docker_compose_containers(
@@ -626,10 +636,11 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                     benchmark.docker_compose_containers(
                         "down",
                         compose_files=compose_files,
+                        compose_post_args="-t 30 --volumes --remove-orphans",
                         env_vars=env_vars
                     )
-                    # give some time for processes to clean up:
-                    time.sleep(10)
+                    # give time for processes and kernel cgroup memory to clean up:
+                    time.sleep(15)
 
             # end of for-loop
             print("stream_density done!")
@@ -659,7 +670,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
-    time.sleep(100)  # Ensure logs are fully written
+    time.sleep(10)  # Ensure logs are fully written
     
     # --- Loop over all streams ---
     for idx in range(stream_count):
