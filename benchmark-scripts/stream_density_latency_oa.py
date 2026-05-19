@@ -150,7 +150,7 @@ class LatencyBasedStreamDensity:
         workers = 1
         best_result: Optional[IterationResult] = None
         consecutive_failures = 0  # Track consecutive 0-transaction failures
-        MAX_CONSECUTIVE_FAILURES = 2  # Stop after this many consecutive failures
+        MAX_CONSECUTIVE_FAILURES = 3  # Stop after this many consecutive failures
         
         for iteration in range(1, self.MAX_ITERATIONS + 1):
             print(f"\n{'='*60}")
@@ -215,12 +215,6 @@ class LatencyBasedStreamDensity:
                 print(f"  Discarding this iteration result; trying next...")
                 self.iterations.pop()  # Remove the corrupt entry already appended above
                 workers += self.worker_increment
-            elif current_latency < 0:
-                print(f"  ⚠ CORRUPTED METRICS - Negative latency {current_latency:.0f}ms detected")
-                print(f"  This usually means a video-loop ID collision in the metrics file.")
-                print(f"  Discarding this iteration result; trying next...")
-                self.iterations.pop()  # Remove the corrupt entry already appended above
-                workers += self.worker_increment
             else:
                 print(f"  ✗ FAILED (latency {current_latency/1000:.1f}s > {self.target_latency_ms/1000:.1f}s)")
                 break
@@ -259,10 +253,12 @@ class LatencyBasedStreamDensity:
         self.env_vars["WORKERS"] = str(workers)
         self.env_vars["VLM_WORKERS"] = str(workers)
         self.env_vars["SERVICE_MODE"] = "parallel"
-        # Set LOOP_COUNT to get enough transactions
-        # Each loop generates 1 transaction per station (worker)
-        # Need min_transactions per worker, so LOOP_COUNT = min_transactions
-        self.env_vars["LOOP_COUNT"] = str(self.min_transactions)
+        # Use infinite looping so the RTSP stream survives the first-start YOLO model-load
+        # delay (gvapython stalls >120s on first run while OpenVINO loads the model).
+        # With LOOP_COUNT=N the streamer exits after N loops; if that happens before YOLO
+        # finishes loading the pipeline can never restart → 0 transactions → density stuck.
+        # The polling loop already enforces the per-iteration transaction budget.
+        self.env_vars["LOOP_COUNT"] = "-1"
         
         # Stop any existing containers (with volume cleanup to clear sync state)
         print("Stopping existing containers...")

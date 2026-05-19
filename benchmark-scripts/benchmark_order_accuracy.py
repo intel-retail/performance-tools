@@ -22,6 +22,7 @@ import subprocess
 import shlex
 import json
 import csv
+import traceback
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -69,6 +70,16 @@ class OrderAccuracyBenchmark:
         self.env_vars["TARGET_DEVICE"] = target_device
         self.env_vars["VLM_DEVICE"] = target_device
         self.env_vars["OPENVINO_DEVICE"] = target_device
+
+        # Select YOLO model based on device — only set if not already in the environment
+        # so that a user-supplied YOLO_MODEL_PATH override is respected.
+        # CPU uses INT8 (fast integer arithmetic on CPU).
+        # GPU/NPU uses FP32 (standard precision; INT8 op fall-backs degrade GPU utilisation).
+        if "YOLO_MODEL_PATH" not in self.env_vars or not self.env_vars["YOLO_MODEL_PATH"]:
+            if target_device.upper() == "CPU":
+                self.env_vars["YOLO_MODEL_PATH"] = "/models/yolo11n_int8_openvino_model"
+            else:
+                self.env_vars["YOLO_MODEL_PATH"] = "/models/yolo11n_openvino_model"
         
     def docker_compose_cmd(
         self,
