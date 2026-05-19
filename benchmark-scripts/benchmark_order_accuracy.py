@@ -71,15 +71,9 @@ class OrderAccuracyBenchmark:
         self.env_vars["VLM_DEVICE"] = target_device
         self.env_vars["OPENVINO_DEVICE"] = target_device
 
-        # Select YOLO model based on device — only set if not already in the environment
-        # so that a user-supplied YOLO_MODEL_PATH override is respected.
-        # CPU uses INT8 (fast integer arithmetic on CPU).
-        # GPU/NPU uses FP32 (standard precision; INT8 op fall-backs degrade GPU utilisation).
-        if "YOLO_MODEL_PATH" not in self.env_vars or not self.env_vars["YOLO_MODEL_PATH"]:
-            if target_device.upper() == "CPU":
-                self.env_vars["YOLO_MODEL_PATH"] = "/models/yolo11n_int8_openvino_model"
-            else:
-                self.env_vars["YOLO_MODEL_PATH"] = "/models/yolo11n_openvino_model"
+        # YOLO_MODEL_PATH is set by the Makefile (YOLO_MODEL_PATH ?= ...) based on TARGET_DEVICE
+        # and exported via the bare 'export' directive, so it arrives in os.environ already.
+        # No fallback needed here — keep model selection as a single source of truth in the Makefile.
         
     def docker_compose_cmd(
         self,
