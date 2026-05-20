@@ -22,6 +22,7 @@ import subprocess
 import shlex
 import json
 import csv
+import traceback
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -69,6 +70,10 @@ class OrderAccuracyBenchmark:
         self.env_vars["TARGET_DEVICE"] = target_device
         self.env_vars["VLM_DEVICE"] = target_device
         self.env_vars["OPENVINO_DEVICE"] = target_device
+
+        # YOLO_MODEL_PATH is set by the Makefile (YOLO_MODEL_PATH ?= ...) based on TARGET_DEVICE
+        # and exported via the bare 'export' directive, so it arrives in os.environ already.
+        # No fallback needed here — keep model selection as a single source of truth in the Makefile.
         
     def docker_compose_cmd(
         self,

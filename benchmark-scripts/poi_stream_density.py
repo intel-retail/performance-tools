@@ -169,9 +169,15 @@ def _set_stream_density(app_dir: str, density: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _compose_cmd(app_dir: str) -> str:
-    """Build the base ``docker compose`` invocation matching the POI Makefile."""
+    """Build a combined compose invocation spanning SceneScape + POI.
+
+    Includes scenescape-overrides and cameras override when present.
+    The cameras override may reference POI services (e.g. poi-backend
+    environment), so the POI compose file must be included too.
+    """
     scenescape_dir = str(Path(app_dir) / ".." / "scenescape")
     scenescape_compose = os.path.join(scenescape_dir, "docker-compose.yaml")
+    overrides = os.path.join(app_dir, "docker-compose.scenescape-overrides.yml")
     poi_compose = os.path.join(app_dir, "docker-compose.yml")
     env_file = os.path.join(app_dir, "docker", ".env")
 
@@ -180,8 +186,10 @@ def _compose_cmd(app_dir: str) -> str:
         f"--project-directory {shlex.quote(app_dir)}",
         f"--env-file {shlex.quote(env_file)}",
         f"-f {shlex.quote(scenescape_compose)}",
-        f"-f {shlex.quote(poi_compose)}",
     ]
+    if os.path.isfile(overrides):
+        parts.append(f"-f {shlex.quote(overrides)}")
+    parts.append(f"-f {shlex.quote(poi_compose)}")
     # Layer in cameras override if it exists
     cameras_override = os.path.join(app_dir, "docker", "docker-compose.cameras.yaml")
     if os.path.isfile(cameras_override):
@@ -189,14 +197,30 @@ def _compose_cmd(app_dir: str) -> str:
     return " ".join(parts)
 
 
+def _poi_compose_cmd(app_dir: str) -> str:
+    """Build compose command for POI-only services."""
+    poi_compose = os.path.join(app_dir, "docker-compose.yml")
+    return f"docker compose -f {shlex.quote(poi_compose)}"
+
+
 def _docker_compose(app_dir: str, action: str) -> int:
-    # Ensure the external network exists before any compose up
+    """Run a combined compose action (SceneScape + POI)."""
     if "up" in action:
         subprocess.run(
             "docker network create storewide-lp",
             shell=True, capture_output=True,
         )
     cmd = f"{_compose_cmd(app_dir)} {action}"
+    logger.info("Running: %s", cmd)
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0 and "down" not in action:
+        logger.warning("docker compose stderr:\n%s", result.stderr[-500:])
+    return result.returncode
+
+
+def _poi_compose(app_dir: str, action: str) -> int:
+    """Run a compose action against POI-only services."""
+    cmd = f"{_poi_compose_cmd(app_dir)} {action}"
     logger.info("Running: %s", cmd)
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0 and "down" not in action:
@@ -497,7 +521,7 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90) -> N
 
     # Recreate poi-backend to pick up new camera subscriptions
     logger.info("Recreating poi-backend to subscribe to new cameras …")
-    _docker_compose(app_dir, "up -d --force-recreate poi-backend")
+    _poi_compose(app_dir, "up -d --force-recreate poi-backend")
 
     logger.info("Waiting %ds for services to initialise …", wait)
     time.sleep(wait)
