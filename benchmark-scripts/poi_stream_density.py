@@ -655,10 +655,13 @@ def _collect_poi_e2e_latency_from_alerts(
 
     latencies_ms: list[float] = []
     skipped = 0
+    used_mqtt_received = 0
+    used_frame_timestamp = 0
     for alert in alerts:
         # Prefer mqtt_received_at (POI application latency only, excludes
         # DLStreamer pipeline latency) over timestamp (frame capture time).
-        start_str = alert.get("mqtt_received_at", "") or alert.get("timestamp", "")
+        mqtt_recv = alert.get("mqtt_received_at", "")
+        start_str = mqtt_recv or alert.get("timestamp", "")
         dispatched_str = alert.get("dispatched_at", "")
         if not start_str or not dispatched_str:
             continue
@@ -668,17 +671,24 @@ def _collect_poi_e2e_latency_from_alerts(
             start = _dt.fromisoformat(start_str)
             dispatched = _dt.fromisoformat(dispatched_str)
 
+            # Normalize both to UTC-aware to avoid mixed tz subtraction errors
+            start_utc = start.astimezone(_tz.utc) if start.tzinfo else start.replace(tzinfo=_tz.utc)
+            dispatched_utc = dispatched.astimezone(_tz.utc) if dispatched.tzinfo else dispatched.replace(tzinfo=_tz.utc)
+
             # Filter out alerts from before the benchmark started
             if since is not None:
                 since_aware = since.astimezone(_tz.utc) if since.tzinfo else since.replace(tzinfo=_tz.utc)
-                dispatched_utc = dispatched.astimezone(_tz.utc) if dispatched.tzinfo else dispatched.replace(tzinfo=_tz.utc)
                 if dispatched_utc < since_aware:
                     skipped += 1
                     continue
 
-            delta_ms = (dispatched - start).total_seconds() * 1000
+            delta_ms = (dispatched_utc - start_utc).total_seconds() * 1000
             if delta_ms >= 0:
                 latencies_ms.append(delta_ms)
+                if mqtt_recv:
+                    used_mqtt_received += 1
+                else:
+                    used_frame_timestamp += 1
         except (ValueError, TypeError):
             continue
 
@@ -694,9 +704,14 @@ def _collect_poi_e2e_latency_from_alerts(
         "poi_e2e_latency_min_ms": min(latencies_ms),
         "poi_e2e_alert_count": len(latencies_ms),
     }
+    label = "MQTT receive → alert dispatch"
+    if used_frame_timestamp and not used_mqtt_received:
+        label = "frame capture → alert dispatch (includes DLStreamer latency)"
+    elif used_frame_timestamp:
+        label = "start → alert dispatch (mixed sources)"
     logger.info(
-        "E2E latency (MQTT receive → alert dispatch): "
-        "avg=%.0fms, min=%.0fms, max=%.0fms (%d alerts)",
+        "E2E latency (%s): avg=%.0fms, min=%.0fms, max=%.0fms (%d alerts)",
+        label,
         stats["poi_e2e_latency_avg_ms"],
         stats["poi_e2e_latency_min_ms"],
         stats["poi_e2e_latency_max_ms"],
@@ -965,8 +980,9 @@ class POIStreamDensity:
                      duration, poll_interval)
 
         while elapsed < duration:
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            sleep_time = min(poll_interval, duration - elapsed)
+            time.sleep(sleep_time)
+            elapsed += sleep_time
 
             try:
                 req = urllib.request.Request("http://localhost:8000/api/v1/alerts")
@@ -1024,9 +1040,13 @@ class POIStreamDensity:
                 logger.info("Collecting data for %ds …", self.stabilise_duration)
                 time.sleep(self.stabilise_duration)
 
+            # Use actual elapsed time for log collection window
+            elapsed_seconds = int((datetime.utcnow() - iteration_start).total_seconds())
+            log_window = elapsed_seconds if self.single_run else self.stabilise_duration
+
             # Collect latency from metrics files + docker logs
             log_stats = _collect_poi_latency_from_docker_logs(
-                self.app_dir, self.stabilise_duration)
+                self.app_dir, log_window)
             file_stats = _collect_poi_latency_from_metrics_files(
                 self.results_dir, stream_density=not self.single_run)
             e2e_stats = _collect_poi_e2e_latency_from_alerts(since=iteration_start)
