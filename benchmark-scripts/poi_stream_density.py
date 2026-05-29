@@ -449,7 +449,9 @@ def _generate_dlstreamer_config(app_dir: str, num_scenes: int) -> None:
         base_pipeline_2 = cfg2["config"]["pipelines"][0]
     else:
         cfg2 = copy.deepcopy(cfg1)
-        base_pipeline_2 = base_pipeline_1
+        # Rename Camera_01 references to Camera_02 for the second container
+        cfg2 = json.loads(json.dumps(cfg2).replace(base_camera, "Camera_02"))
+        base_pipeline_2 = cfg2["config"]["pipelines"][0]
 
     # Reset to single base pipeline each before adding extras
     cfg1["config"]["pipelines"] = [base_pipeline_1]
@@ -560,13 +562,15 @@ def _wait_for_services_ready(timeout: int = 120) -> None:
         except (urllib.error.URLError, OSError):
             pass
 
-        # Check DLStreamer container
-        dlstreamer_ok = False
-        result = subprocess.run(
-            "docker inspect storewide-lp-lp-video-1 --format '{{.State.Running}}'",
-            shell=True, capture_output=True, text=True)
-        if result.stdout.strip() == "true":
-            dlstreamer_ok = True
+        # Check DLStreamer containers (both lp-video and lp-video-2)
+        dlstreamer_ok = True
+        for ctr in ("storewide-lp-lp-video-1", "storewide-lp-lp-video-2-1"):
+            result = subprocess.run(
+                f"docker inspect {ctr} --format '{{{{.State.Running}}}}'",
+                shell=True, capture_output=True, text=True)
+            if result.stdout.strip() != "true":
+                dlstreamer_ok = False
+                break
 
         if backend_ok and dlstreamer_ok:
             elapsed = (attempt + 1) * poll_interval
@@ -593,10 +597,8 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, reso
       4. Generate per-camera DLStreamer pipeline configs
       5. Start extra camera services
       6. In parallel: clean stale scenes + scene-import, recreate DLStreamer
+         and poi-backend
       7. Poll until services are ready
-
-    Note: poi-backend is NOT restarted — it uses wildcard MQTT subscriptions
-    (scenescape/data/camera/+) and automatically picks up new cameras.
     """
     logger.info("Scaling POI to %d scene(s) …", num_scenes)
 
@@ -621,6 +623,8 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, reso
 
     def _scene_cleanup_and_import():
         """Clean stale scenes and re-run scene-import."""
+        # Wait for web container before issuing docker exec / REST calls
+        _wait_for_web_healthy()
         logger.info("Cleaning stale scene-import extract dirs …")
         _run_cmd("docker exec storewide-lp-web-1 bash -c "
                  "'rm -rf /workspace/media/storewide-loss-prevention-[0-9]*'")
@@ -630,18 +634,21 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, reso
         _docker_compose(app_dir, "up -d scene-import")
 
     def _recreate_pipeline_services():
-        """Recreate DLStreamer containers with updated pipeline configs.
-
-        poi-backend is NOT restarted — it uses wildcard MQTT subscriptions
-        (scenescape/data/camera/+) and automatically receives events from
-        new cameras without a restart.
-        """
-        logger.info("Recreating lp-video and lp-video-2 (DLStreamer) …")
+        """Recreate DLStreamer and poi-backend with updated configs/env vars."""
+        logger.info("Recreating lp-video, lp-video-2, and poi-backend …")
         result = subprocess.run(
             f"{_compose_cmd(app_dir)} up -d --force-recreate lp-video lp-video-2",
             shell=True, capture_output=True, text=True)
         if result.returncode != 0:
             logger.warning("DLStreamer recreate stderr:\n%s", result.stderr[-500:])
+        # Recreate poi-backend so updated env vars (RTSP_PREWARM_CAMERAS,
+        # MQTT_IMAGE_CAMERAS, STREAM_DENSITY) take effect.
+        result = subprocess.run(
+            "docker compose --env-file docker/.env -f docker-compose.yml "
+            "up -d --force-recreate poi-backend",
+            shell=True, capture_output=True, text=True, cwd=app_dir)
+        if result.returncode != 0:
+            logger.warning("poi-backend recreate stderr:\n%s", result.stderr[-500:])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         scene_future = pool.submit(_scene_cleanup_and_import)
@@ -1398,9 +1405,9 @@ def cmd_run(args) -> None:
 def cmd_generate(args) -> None:
     num = args.scenes
     _set_stream_density(args.app_dir, num)
-    _generate_dlstreamer_config(args.app_dir, num)
     _generate_cameras_override(args.app_dir, num)
     _reinit_env(args.app_dir, resource_config=args.resource_config)
+    _generate_dlstreamer_config(args.app_dir, num)
     print(f"Generated overrides for {num} scene(s).  Run 'make demo' to start.")
 
 
@@ -1413,9 +1420,9 @@ def cmd_clean(args) -> None:
         logger.info("Restored zone_config.json from backup")
     else:
         _set_stream_density(app_dir, 1)
-    _generate_dlstreamer_config(app_dir, 1)
     _clean_cameras_override(app_dir)
     _reinit_env(app_dir, resource_config=getattr(args, "resource_config", ""))
+    _generate_dlstreamer_config(app_dir, 1)
     print("Cleaned up – stream_density reset to 1.")
 
 
