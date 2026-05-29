@@ -58,6 +58,7 @@ RESOURCE_CONFIG         Path to device resource config file relative to app_dir
 """
 
 import argparse
+import copy
 import csv
 import glob
 import json
@@ -412,10 +413,15 @@ def _generate_cameras_override(app_dir: str, num_scenes: int) -> None:
 
 def _generate_dlstreamer_config(app_dir: str, num_scenes: int) -> None:
     """
-    Generate a multi-pipeline DLStreamer config for N scenes.
+    Generate multi-pipeline DLStreamer configs for N scenes.
 
-    Reads the base pipeline config template and replicates it for each
-    additional camera, updating the camera name in each pipeline.
+    POI uses two DLStreamer containers (lp-video, lp-video-2) with separate
+    config files mounted via Docker Compose configs.  Extra camera pipelines
+    are appended into these existing config files so that force-recreating
+    the containers picks them up — no additional volume mounts needed.
+
+    Distribution: extra cameras are round-robin'd across lp-video (Camera_01)
+    and lp-video-2 (Camera_02).
     """
     scenescape_dir = Path(app_dir) / ".." / "scenescape"
     dlstreamer_dir = scenescape_dir / "dlstreamer-pipeline-server"
@@ -424,36 +430,61 @@ def _generate_dlstreamer_config(app_dir: str, num_scenes: int) -> None:
     base_camera = base["camera_name"]
     base_camera_count = 2
 
-    # Read existing Camera_01 pipeline config as template
-    template_path = dlstreamer_dir / f"person-of-interest-{base_camera}-pipeline-config.json"
-    if not template_path.exists():
-        logger.warning("Pipeline template not found: %s", template_path)
+    # Read rendered Camera_01 config (already processed by init.sh with
+    # correct model paths, devices, etc.)
+    cfg_path_1 = dlstreamer_dir / f"person-of-interest-{base_camera}-pipeline-config.json"
+    cfg_path_2 = dlstreamer_dir / f"person-of-interest-Camera_02-pipeline-config.json"
+
+    if not cfg_path_1.exists():
+        logger.warning("Pipeline config not found: %s", cfg_path_1)
         return
 
-    with open(template_path) as fh:
-        template_cfg = json.load(fh)
+    with open(cfg_path_1) as fh:
+        cfg1 = json.load(fh)
+    base_pipeline_1 = cfg1["config"]["pipelines"][0]
 
-    # Generate config for each additional camera
+    if cfg_path_2.exists():
+        with open(cfg_path_2) as fh:
+            cfg2 = json.load(fh)
+        base_pipeline_2 = cfg2["config"]["pipelines"][0]
+    else:
+        cfg2 = copy.deepcopy(cfg1)
+        # Rename Camera_01 references to Camera_02 for the second container
+        cfg2 = json.loads(json.dumps(cfg2).replace(base_camera, "Camera_02"))
+        base_pipeline_2 = cfg2["config"]["pipelines"][0]
+
+    # Reset to single base pipeline each before adding extras
+    cfg1["config"]["pipelines"] = [base_pipeline_1]
+    cfg2["config"]["pipelines"] = [base_pipeline_2]
+
+    # Generate extra pipelines and distribute across the two containers
     for i in range(1, num_scenes):
         cam_idx = base_camera_count + i
         cam_name = f"{base_camera}-{cam_idx}"
-        output_path = dlstreamer_dir / f"person-of-interest-{cam_name}-pipeline-config.json"
 
-        # Deep-copy and substitute camera name
-        cfg_str = json.dumps(template_cfg)
-        cfg_str = cfg_str.replace(base_camera, cam_name)
-        cfg = json.loads(cfg_str)
+        # Use Camera_01's pipeline as template (same model paths/devices)
+        pipeline_str = json.dumps(base_pipeline_1)
+        pipeline_str = pipeline_str.replace(base_camera, cam_name)
+        pipeline = json.loads(pipeline_str)
+        pipeline["name"] = f"reid_{cam_name}"
 
-        # Update pipeline name
-        if "config" in cfg and "pipelines" in cfg["config"]:
-            for pipeline in cfg["config"]["pipelines"]:
-                pipeline["name"] = f"reid_{cam_name}"
+        # Round-robin: odd extras → lp-video, even extras → lp-video-2
+        if i % 2 == 1:
+            cfg1["config"]["pipelines"].append(pipeline)
+        else:
+            cfg2["config"]["pipelines"].append(pipeline)
 
-        with open(output_path, "w") as fh:
-            json.dump(cfg, fh, indent=2)
-        logger.info("Generated pipeline config: %s", output_path)
+    # Write updated configs back
+    with open(cfg_path_1, "w") as fh:
+        json.dump(cfg1, fh, indent=2)
+    logger.info("Updated %s with %d pipelines", cfg_path_1.name, len(cfg1["config"]["pipelines"]))
 
-    logger.info("Generated DLStreamer configs for %d total cameras", base_camera_count + num_scenes - 1)
+    with open(cfg_path_2, "w") as fh:
+        json.dump(cfg2, fh, indent=2)
+    logger.info("Updated %s with %d pipelines", cfg_path_2.name, len(cfg2["config"]["pipelines"]))
+
+    total = len(cfg1["config"]["pipelines"]) + len(cfg2["config"]["pipelines"])
+    logger.info("Total DLStreamer pipelines across both containers: %d", total)
 
 
 def _reinit_env(app_dir: str, resource_config: str = "") -> None:
@@ -508,6 +539,53 @@ def _wait_for_web_healthy(timeout: int = 300) -> None:
     logger.warning("Web container did not become healthy after %ds — continuing anyway", timeout)
 
 
+def _wait_for_services_ready(timeout: int = 120) -> None:
+    """Poll poi-backend and DLStreamer until ready, instead of blind sleep.
+
+    Checks poi-backend /api/v1/status and DLStreamer container running state
+    every 5 seconds, returning as soon as both are up or timeout expires.
+    """
+    import urllib.request
+    import urllib.error
+
+    poll_interval = 5
+    logger.info("Waiting up to %ds for services to be ready …", timeout)
+
+    for attempt in range(timeout // poll_interval):
+        # Check poi-backend
+        backend_ok = False
+        try:
+            req = urllib.request.Request("http://localhost:8000/api/v1/status")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    backend_ok = True
+        except (urllib.error.URLError, OSError):
+            pass
+
+        # Check DLStreamer containers (both lp-video and lp-video-2)
+        dlstreamer_ok = True
+        for ctr in ("storewide-lp-lp-video-1", "storewide-lp-lp-video-2-1"):
+            result = subprocess.run(
+                f"docker inspect {ctr} --format '{{{{.State.Running}}}}'",
+                shell=True, capture_output=True, text=True)
+            if result.stdout.strip() != "true":
+                dlstreamer_ok = False
+                break
+
+        if backend_ok and dlstreamer_ok:
+            elapsed = (attempt + 1) * poll_interval
+            logger.info("Services ready after %ds (saved %ds)", elapsed, timeout - elapsed)
+            return
+
+        if attempt % 6 == 0:
+            logger.info("  poi-backend=%s  dlstreamer=%s  (waiting…)",
+                        "up" if backend_ok else "down",
+                        "up" if dlstreamer_ok else "down")
+        time.sleep(poll_interval)
+
+    logger.warning("Services not fully ready after %ds — continuing anyway", timeout)
+
+
 def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, resource_config: str = "") -> None:
     """
     Scale the POI video pipeline to N scenes.
@@ -517,10 +595,10 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, reso
       2. Generate docker-compose.cameras.yaml with extra RTSP streams
       3. Re-run init.sh to update .env
       4. Generate per-camera DLStreamer pipeline configs
-      5. Bring up new camera services
-      6. Wait for web container healthy
-      7. Clean stale scenes, restart scene-import
-      8. Recreate lp-video (DLStreamer) and poi-backend
+      5. Start extra camera services
+      6. In parallel: clean stale scenes + scene-import, recreate DLStreamer
+         and poi-backend
+      7. Poll until services are ready
     """
     logger.info("Scaling POI to %d scene(s) …", num_scenes)
 
@@ -529,35 +607,57 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90, reso
     _reinit_env(app_dir, resource_config=resource_config)
     _generate_dlstreamer_config(app_dir, num_scenes)
 
-    # Bring up any new camera services
-    logger.info("Starting new camera streams …")
-    _docker_compose(app_dir, "up -d --no-recreate")
+    # Start only the extra camera services needed for this iteration.
+    # Avoids the broad `up -d --no-recreate` which tries all services and
+    # hits container-name conflicts (e.g. poi-alert-service).
+    base_camera_count = 2
+    extra_cams = [f"lp-cams-{base_camera_count + i}" for i in range(1, num_scenes)]
+    if extra_cams:
+        svc_list = " ".join(extra_cams)
+        logger.info("Starting extra cameras: %s", svc_list)
+        _docker_compose(app_dir, f"up -d --force-recreate {svc_list}")
 
-    _wait_for_web_healthy()
+    # Scene cleanup + scene-import restart run concurrently with DLStreamer
+    # and poi-backend restarts below via threading.
+    import concurrent.futures
 
-    # Clean stale scene extracts in web container
-    logger.info("Cleaning stale scene-import extract dirs …")
-    _run_cmd("docker exec storewide-lp-web-1 bash -c "
-             "'rm -rf /workspace/media/storewide-loss-prevention-[0-9]*'")
+    def _scene_cleanup_and_import():
+        """Clean stale scenes and re-run scene-import."""
+        # Wait for web container before issuing docker exec / REST calls
+        _wait_for_web_healthy()
+        logger.info("Cleaning stale scene-import extract dirs …")
+        _run_cmd("docker exec storewide-lp-web-1 bash -c "
+                 "'rm -rf /workspace/media/storewide-loss-prevention-[0-9]*'")
+        _delete_cloned_scenes(app_dir, num_scenes)
+        logger.info("Re-running scene-import for %d scenes …", num_scenes)
+        _docker_compose(app_dir, "rm -f -s scene-import")
+        _docker_compose(app_dir, "up -d scene-import")
 
-    _delete_cloned_scenes(app_dir, num_scenes)
+    def _recreate_pipeline_services():
+        """Recreate DLStreamer and poi-backend with updated configs/env vars."""
+        logger.info("Recreating lp-video, lp-video-2, and poi-backend …")
+        result = subprocess.run(
+            f"{_compose_cmd(app_dir)} up -d --force-recreate lp-video lp-video-2",
+            shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("DLStreamer recreate stderr:\n%s", result.stderr[-500:])
+        # Recreate poi-backend so updated env vars (RTSP_PREWARM_CAMERAS,
+        # MQTT_IMAGE_CAMERAS, STREAM_DENSITY) take effect.
+        result = subprocess.run(
+            "docker compose --env-file docker/.env -f docker-compose.yml "
+            "up -d --force-recreate poi-backend",
+            shell=True, capture_output=True, text=True, cwd=app_dir)
+        if result.returncode != 0:
+            logger.warning("poi-backend recreate stderr:\n%s", result.stderr[-500:])
 
-    # Re-run scene-import
-    logger.info("Re-running scene-import for %d scenes …", num_scenes)
-    _docker_compose(app_dir, "rm -f -s scene-import")
-    _docker_compose(app_dir, "up -d scene-import")
-    time.sleep(15)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        scene_future = pool.submit(_scene_cleanup_and_import)
+        pipeline_future = pool.submit(_recreate_pipeline_services)
+        # Wait for both to finish
+        scene_future.result()
+        pipeline_future.result()
 
-    # Recreate lp-video so updated DLStreamer config is mounted
-    logger.info("Recreating lp-video (DLStreamer) with new config …")
-    _docker_compose(app_dir, "up -d --force-recreate lp-video")
-
-    # Recreate poi-backend to pick up new camera subscriptions
-    logger.info("Recreating poi-backend to subscribe to new cameras …")
-    _poi_compose(app_dir, "up -d --force-recreate poi-backend")
-
-    logger.info("Waiting %ds for services to initialise …", wait)
-    time.sleep(wait)
+    _wait_for_services_ready(wait)
 
 
 def _clean_cameras_override(app_dir: str) -> None:
@@ -1305,9 +1405,9 @@ def cmd_run(args) -> None:
 def cmd_generate(args) -> None:
     num = args.scenes
     _set_stream_density(args.app_dir, num)
-    _generate_dlstreamer_config(args.app_dir, num)
     _generate_cameras_override(args.app_dir, num)
     _reinit_env(args.app_dir, resource_config=args.resource_config)
+    _generate_dlstreamer_config(args.app_dir, num)
     print(f"Generated overrides for {num} scene(s).  Run 'make demo' to start.")
 
 
@@ -1320,9 +1420,9 @@ def cmd_clean(args) -> None:
         logger.info("Restored zone_config.json from backup")
     else:
         _set_stream_density(app_dir, 1)
-    _generate_dlstreamer_config(app_dir, 1)
     _clean_cameras_override(app_dir)
     _reinit_env(app_dir, resource_config=getattr(args, "resource_config", ""))
+    _generate_dlstreamer_config(app_dir, 1)
     print("Cleaned up – stream_density reset to 1.")
 
 
