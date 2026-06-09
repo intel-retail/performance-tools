@@ -101,15 +101,17 @@ def get_vlm_application_latency(log_file_path):
     return statistics
 
 
-def get_vlm_application_latency_stream_density(results_dir, last_n_pairs=20):
+def get_vlm_application_latency_stream_density(results_dir, last_n_pairs=20,
+                                               since_ms=None):
     """Extract per-application average latency from the most recent
     vlm_application_metrics file in *results_dir*, using only the last
-    *last_n_pairs* completed start/end pairs to reflect current-iteration
-    performance.
+    *last_n_pairs* completed start/end pairs that begin at or after
+    *since_ms* (epoch milliseconds).  Pass ``since_ms=None`` to use all pairs.
 
     Args:
         results_dir: Directory to search for vlm_application_metrics*.txt.
         last_n_pairs: Number of most-recent completed pairs to use per app.
+        since_ms: If set, ignore events with timestamp_ms < since_ms.
 
     Returns:
         dict mapping ``app_id`` → ``avg_latency_ms`` (float), or empty dict
@@ -143,8 +145,11 @@ def get_vlm_application_latency_stream_density(results_dir, last_n_pairs=20):
             event = data.get("event", "")
             timestamp_ms = data.get("timestamp_ms", "")
             if app_name and id_value and event in ("start", "end") and timestamp_ms:
+                ts = int(timestamp_ms)
+                if since_ms is not None and ts < since_ms:
+                    continue
                 timing_data[f"{app_name}_{id_value}"].append(
-                    {"event": event, "timestamp_ms": int(timestamp_ms)}
+                    {"event": event, "timestamp_ms": ts}
                 )
 
     result = {}
