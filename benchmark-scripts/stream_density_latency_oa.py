@@ -24,6 +24,7 @@ import json
 import psutil
 import shlex
 import subprocess
+import traceback
 import shutil
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -149,7 +150,7 @@ class LatencyBasedStreamDensity:
         workers = 1
         best_result: Optional[IterationResult] = None
         consecutive_failures = 0  # Track consecutive 0-transaction failures
-        MAX_CONSECUTIVE_FAILURES = 2  # Stop after this many consecutive failures
+        MAX_CONSECUTIVE_FAILURES = 3  # Stop after this many consecutive failures
         
         for iteration in range(1, self.MAX_ITERATIONS + 1):
             print(f"\n{'='*60}")
@@ -214,12 +215,6 @@ class LatencyBasedStreamDensity:
                 print(f"  Discarding this iteration result; trying next...")
                 self.iterations.pop()  # Remove the corrupt entry already appended above
                 workers += self.worker_increment
-            elif current_latency < 0:
-                print(f"  ⚠ CORRUPTED METRICS - Negative latency {current_latency:.0f}ms detected")
-                print(f"  This usually means a video-loop ID collision in the metrics file.")
-                print(f"  Discarding this iteration result; trying next...")
-                self.iterations.pop()  # Remove the corrupt entry already appended above
-                workers += self.worker_increment
             else:
                 print(f"  ✗ FAILED (latency {current_latency/1000:.1f}s > {self.target_latency_ms/1000:.1f}s)")
                 break
@@ -258,10 +253,12 @@ class LatencyBasedStreamDensity:
         self.env_vars["WORKERS"] = str(workers)
         self.env_vars["VLM_WORKERS"] = str(workers)
         self.env_vars["SERVICE_MODE"] = "parallel"
-        # Set LOOP_COUNT to get enough transactions
-        # Each loop generates 1 transaction per station (worker)
-        # Need min_transactions per worker, so LOOP_COUNT = min_transactions
-        self.env_vars["LOOP_COUNT"] = str(self.min_transactions)
+        # Use infinite looping so the RTSP stream survives the first-start YOLO model-load
+        # delay (gvapython stalls >120s on first run while OpenVINO loads the model).
+        # With LOOP_COUNT=N the streamer exits after N loops; if that happens before YOLO
+        # finishes loading the pipeline can never restart → 0 transactions → density stuck.
+        # The polling loop already enforces the per-iteration transaction budget.
+        self.env_vars["LOOP_COUNT"] = "-1"
         
         # Stop any existing containers (with volume cleanup to clear sync state)
         print("Stopping existing containers...")
@@ -749,6 +746,17 @@ def main():
         default=env_results_dir,
         help=f"Directory for results output (default: {env_results_dir}, env: RESULTS_DIR)"
     )
+    parser.add_argument(
+        '--parser_script',
+        default=os.path.join(os.path.curdir, 'parse_qmassa_metrics_to_json.py'),
+        help='full path to the parsing script to obtain GPU metrics'
+    )
+    parser.add_argument(
+        '--parser_args',
+        default='-k device -k qmassa',
+        help='arguments to pass to the parser script, '
+             'pass args with spaces in quotes: "args with spaces"'
+    )
     
     args = parser.parse_args()
     
@@ -783,7 +791,17 @@ def main():
     )
     
     result = tester.run()
-    
+
+    env_vars = os.environ.copy()
+    try:
+        parser_string = ("python3 %s -d %s %s" % (args.parser_script, args.results_dir, args.parser_args))
+        cmd_args = shlex.split(parser_string)
+        subprocess.run(cmd_args,
+                       check=True, env=env_vars)  # nosec B404, B603
+    except subprocess.CalledProcessError:
+        print("Exception calling %s\n parser %s: %s" %
+              (parser_string, args.parser_script, traceback.format_exc()))
+
     # Exit code based on result
     sys.exit(0 if result.met_target else 1)
 

@@ -1,6 +1,5 @@
-FROM ubuntu:25.04@sha256:95a416ad2446813278ec13b7efdeb551190c94e12028707dd7525632d3cec0d1
+FROM ubuntu:25.10@sha256:4a9232cc47bf99defcc8860ef6222c99773330367fcecbf21ba2edb0b810a31e
 
-ARG HTTP_PROXY
 ENV PCM_DIRECTORY=/opt/intel
 
 # Optional: Set APT proxy if needed
@@ -26,7 +25,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     pkg-config libudev-dev udev \
     supervisor    
 
-RUN cargo install qmassa --version 1.0.1 --locked
+RUN cargo install qmassa --version 1.3.2 --locked
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages

@@ -6,13 +6,12 @@
 
 services:
   benchmark:
-    image: intel/retail-benchmark:2026.0-rc1
+    image: intel/retail-benchmark:2026.0.0
     container_name: metrics-collector
     privileged: true
     pid: host
     network_mode: "host"
     environment:
-      - HTTP_PROXY=${HTTP_PROXY}
       - NPU_LOG=/tmp/results/npu_usage.csv
     volumes:
       - ${log_dir}:/tmp/results

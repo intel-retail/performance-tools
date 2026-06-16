@@ -75,15 +75,16 @@ def get_vlm_application_latency(log_file_path):
     
     for app_id_combo in apps_to_analyze:
         events = sorted(timing_data[app_id_combo], key=lambda x: x['timestamp_ms'])
-        start_time = None
+        start_times = []  # Use a stack to track multiple start times
         
         for event in events:
             if event['event'] == 'start':
-                start_time = event['timestamp_ms']
-            elif event['event'] == 'end' and start_time is not None:
+                start_times.append(event['timestamp_ms'])
+            elif event['event'] == 'end' and start_times:
+                # Pair with the most recent start time (LIFO)
+                start_time = start_times.pop()
                 duration = event['timestamp_ms'] - start_time
                 app_durations[app_id_combo].append(duration)
-                start_time = None
 
     durations = dict(app_durations)
 
@@ -98,6 +99,74 @@ def get_vlm_application_latency(log_file_path):
             statistics[f"Based on {count} total calls, the average {app_id_combo} in (ms)"] = 0
     
     return statistics
+
+
+def get_vlm_application_latency_stream_density(results_dir, last_n_pairs=20,
+                                               since_ms=None):
+    """Extract per-application average latency from the most recent
+    vlm_application_metrics file in *results_dir*, using only the last
+    *last_n_pairs* completed start/end pairs that begin at or after
+    *since_ms* (epoch milliseconds).  Pass ``since_ms=None`` to use all pairs.
+
+    Args:
+        results_dir: Directory to search for vlm_application_metrics*.txt.
+        last_n_pairs: Number of most-recent completed pairs to use per app.
+        since_ms: If set, ignore events with timestamp_ms < since_ms.
+
+    Returns:
+        dict mapping ``app_id`` → ``avg_latency_ms`` (float), or empty dict
+        if no metrics files are found.
+    """
+    metrics_files = sorted(
+        fnmatch.filter(
+            [str(p) for p in pathlib.Path(results_dir).rglob("vlm_application_metrics*.txt")],
+            "*vlm_application_metrics*",
+        ),
+        key=os.path.getmtime,
+    )
+    if not metrics_files:
+        return {}
+
+    log_file_path = metrics_files[-1]
+
+    timing_data = defaultdict(list)
+    with open(log_file_path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if "application=" not in line or "timestamp_ms=" not in line:
+                continue
+            pattern = r'(\w+)=((?:[^\s=]+(?:\s(?!\w+=)[^\s=]+)*)?)'
+            matches = re.findall(pattern, line)
+            data = dict(matches)
+            if not data:
+                continue
+            app_name = data.get("application", "")
+            id_value = data.get("id", "")
+            event = data.get("event", "")
+            timestamp_ms = data.get("timestamp_ms", "")
+            if app_name and id_value and event in ("start", "end") and timestamp_ms:
+                ts = int(timestamp_ms)
+                if since_ms is not None and ts < since_ms:
+                    continue
+                timing_data[f"{app_name}_{id_value}"].append(
+                    {"event": event, "timestamp_ms": ts}
+                )
+
+    result = {}
+    for app_id, events in timing_data.items():
+        events.sort(key=lambda x: x["timestamp_ms"])
+        durations = []
+        start_stack = []
+        for ev in events:
+            if ev["event"] == "start":
+                start_stack.append(ev["timestamp_ms"])
+            elif ev["event"] == "end" and start_stack:
+                durations.append(ev["timestamp_ms"] - start_stack.pop())
+        if durations:
+            tail = durations[-last_n_pairs:]
+            result[app_id] = sum(tail) / len(tail)
+
+    return result
 
 class KPIExtractor(ABC):
     @abstractmethod
@@ -674,6 +743,43 @@ class PipelineLatencyExtractor(KPIExtractor):
 
     def return_blank(self):
         return {"LATENCY": "NA"}
+
+class StreamDensityExtractor(KPIExtractor):
+    """Extract stream density benchmark results from JSON files."""
+    def extract_data(self, log_file_path):
+        try:
+            with open(log_file_path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+        results = {}
+        results["Stream Density Target Latency (ms)"] = data.get("target_latency_ms", "NA")
+        results["Stream Density Max Scenes"] = data.get("max_scenes", "NA")
+        results["Stream Density Met Target"] = data.get("met_target", "NA")
+
+        if data.get("best_iteration"):
+            best = data["best_iteration"]
+            results["Stream Density Best Latency (ms)"] = best.get("latency_ms", "NA")
+            results["Stream Density Best Scenes"] = best.get("num_scenes", "NA")
+
+        iterations = data.get("iterations", [])
+        for it in iterations:
+            n = it.get("num_scenes", "?")
+            prefix = f"Stream Density {n} Scene(s)"
+            results[f"{prefix} Latency (ms)"] = it.get("latency_ms", "NA")
+            results[f"{prefix} Throughput Ratio"] = it.get("throughput_ratio", "NA")
+            results[f"{prefix} Actual Samples"] = it.get("actual_samples", "NA")
+            results[f"{prefix} Expected Samples"] = it.get("expected_samples", "NA")
+            results[f"{prefix} Samples/Scene"] = it.get("samples_per_scene", "NA")
+            results[f"{prefix} Passed"] = it.get("passed", "NA")
+            results[f"{prefix} Memory %"] = it.get("memory_percent", "NA")
+            results[f"{prefix} CPU %"] = it.get("cpu_percent", "NA")
+
+        return results
+
+    def return_blank(self):
+        return {"Stream Density Max Scenes": "-"}
         
 class PCMExtractor(KPIExtractor):
     #overriding abstract method
@@ -748,7 +854,8 @@ KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        r"(?:^xpum).*\.json$": XPUMUsageExtractor,
                        r"^qmassa.*parsed.*\.json$": QMASSAGPUUsageExtractor,
                        r"^vlm_application_metrics.*\.txt$": VLMAppMetricsExtractor,
-                       r"^vlm_performance_metrics.*\.txt$": VLMPerformanceMetricsExtractor}
+                       r"^vlm_performance_metrics.*\.txt$": VLMPerformanceMetricsExtractor,
+                       r"^(?:swlp|poi)_stream_density.*\.json$": StreamDensityExtractor}
 
 def add_parser():
     parser = argparse.ArgumentParser(description='Consolidate data')
@@ -776,7 +883,7 @@ if __name__ == '__main__':
                     fileFound = True
                     extractor = KPIExtractor_OPTION.get(kpiExtractor)()
                     kpi_dict = extractor.extract_data(
-                        os.path.join(root_directory, file))
+                        os.path.join(dirpath, file))
                     if kpi_dict:
                         # Collect max median from each file for aggregate statistics
                         for key, value in kpi_dict.items():

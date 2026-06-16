@@ -18,3 +18,5 @@ stream_density.sh
 efficientnet-b0/
 model_server/
 .coverage
+venv/
+*.egg-info/

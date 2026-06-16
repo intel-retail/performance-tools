@@ -21,157 +21,164 @@ class VLMMetricsLogger:
         
         self.logger = None
         self.performance_logger = None
-        self._setup_logger(max_bytes, backup_count)
+        self._max_bytes = max_bytes
+        self._backup_count = backup_count
     
-    def _setup_logger(self, max_bytes, backup_count):
-        """Setup the logger with file rotation"""
-        # Create logs directory if it doesn't exist
+    def _ensure_log_dir(self):
+        """Create logs directory if it doesn't exist"""
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Delete existing VLM metrics files if they exist
+    def _cleanup_existing_files(self, prefix):
+        """Delete existing metrics files matching prefix"""
         if self.log_dir:
             for filename in os.listdir(self.log_dir):
-                if filename.startswith('vlm_application_metrics') or filename.startswith('vlm_performance_metrics'):
+                if filename.startswith(prefix):
                     file_path = os.path.join(self.log_dir, filename)
                     try:
                         os.remove(file_path)
                     except OSError:
-                        pass  # Ignore errors if file can't be deleted
+                        pass
+
+    def _ensure_app_logger(self):
+        """Setup application logger on first use"""
+        if self.logger is not None:
+            return
+        self._ensure_log_dir()
+        self._cleanup_existing_files('vlm_application_metrics')
         
-        # Create main logger
         self.logger = logging.getLogger('vlm_metrics_logger')
         self.logger.setLevel(logging.INFO)
         
-        # Create performance logger
-        self.performance_logger = logging.getLogger('vlm_performance_logger')
-        self.performance_logger.setLevel(logging.INFO)
-        
-        # Avoid duplicate handlers
         if not self.logger.handlers:
-            # Create file handler for main logs
             log_path = os.path.join(self.log_dir, self.log_file)
             file_handler = RotatingFileHandler(
                 log_path, 
-                maxBytes=max_bytes, 
-                backupCount=backup_count
+                maxBytes=self._max_bytes, 
+                backupCount=self._backup_count
             )
-            
-            # Create formatter
             formatter = logging.Formatter(
                 '%(asctime)s - %(levelname)s - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
-            
-            # Set formatter
             file_handler.setFormatter(formatter)
-            
-            # Add handler to main logger
             self.logger.addHandler(file_handler)
+
+    def _ensure_performance_logger(self):
+        """Setup performance logger on first use"""
+        if self.performance_logger is not None:
+            return
+        self._ensure_log_dir()
+        self._cleanup_existing_files('vlm_performance_metrics')
         
-        # Setup performance logger
+        self.performance_logger = logging.getLogger('vlm_performance_logger')
+        self.performance_logger.setLevel(logging.INFO)
+        
         if not self.performance_logger.handlers:
-            # Create file handler for performance logs
             performance_log_path = os.path.join(self.log_dir, self.performance_log_file)
             performance_file_handler = RotatingFileHandler(
                 performance_log_path,
-                maxBytes=max_bytes,
-                backupCount=backup_count
+                maxBytes=self._max_bytes,
+                backupCount=self._backup_count
             )
-            
-            # Create formatter for performance logs
             performance_formatter = logging.Formatter(
                 '%(asctime)s - %(levelname)s - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
-            
             performance_file_handler.setFormatter(performance_formatter)
-            
-            # Add handler to performance logger (no console output for performance)
             self.performance_logger.addHandler(performance_file_handler)
     
     def log_start_time(self, usecase_name=None, unique_id='retail-default'):
-        
+        self._ensure_app_logger()
         timestamp_ms = int(time.time() * 1000)
-        
         log_data = {
             'application': os.getenv(usecase_name),
             'id': unique_id,
             'event': 'start',
             'timestamp_ms': timestamp_ms
         }
-        
-        # Format log message
         message_parts = [f"{key}={value}" for key, value in log_data.items()]
         message = " ".join(message_parts)
-        
         self.logger.info(message)
         return timestamp_ms
     
+    def user_log_start_time(self, timestamp_milliseconds, usecase_name=None, unique_id='retail-default'):
+        self._ensure_app_logger()
+        timestamp_ms = int(timestamp_milliseconds)
+        log_data = {
+            'application': os.getenv(usecase_name),
+            'id': unique_id,
+            'event': 'start',
+            'timestamp_ms': timestamp_ms
+        }
+        message_parts = [f"{key}={value}" for key, value in log_data.items()]
+        message = " ".join(message_parts)
+        self.logger.info(message)
+        return timestamp_ms
+        
     def log_end_time(self, usecase_name, unique_id='retail-default'):
-        
+        self._ensure_app_logger()
         timestamp_ms = int(time.time() * 1000)
-        
         log_data = {
             'application': os.getenv(usecase_name),
             'id': unique_id,
             'event': 'end',
             'timestamp_ms': timestamp_ms
         }
-            
-        # Format log message
         message_parts = [f"{key}={value}" for key, value in log_data.items()]
         message = " ".join(message_parts)
-        
         self.logger.info(message)
         return timestamp_ms
     
-    def log_custom_event(self, event_type, usecase_name, unique_id='retail-default', **kwargs):
-        timestamp_ms = int(time.time() * 1000)
+    def user_log_end_time(self, timestamp_milliseconds, usecase_name, unique_id='retail-default'):
+        self._ensure_app_logger()
+        timestamp_ms = int(timestamp_milliseconds)
+        log_data = {
+            'application': os.getenv(usecase_name),
+            'id': unique_id,
+            'event': 'end',
+            'timestamp_ms': timestamp_ms
+        }
+        message_parts = [f"{key}={value}" for key, value in log_data.items()]
+        message = " ".join(message_parts)
+        self.logger.info(message)
+        return timestamp_ms
         
+    def log_custom_event(self, event_type, usecase_name, unique_id='retail-default', **kwargs):
+        self._ensure_app_logger()
+        timestamp_ms = int(time.time() * 1000)
         log_data = {
             'application': os.getenv(usecase_name),
             'id': unique_id,
             'event': event_type,
             'timestamp_ms': timestamp_ms
         }
-        
-        # Add custom parameters
         log_data.update(kwargs)
-        
-        # Format log message
         message_parts = [f"{key}={value}" for key, value in log_data.items()]
         message = " ".join(message_parts)
-        
-        # Log at appropriate level
         if event_type.lower() == 'error':
             self.logger.error(message)
         elif event_type.lower() == 'warning':
             self.logger.warning(message)
         else:
             self.logger.info(message)
-        
         return timestamp_ms
         
     def log_ovms_performance_metrics(self, usecase_name, vlm_metrics_result):
+        self._ensure_performance_logger()
         timestamp_ms = int(time.time() * 1000)
         log_data = {
             'application': os.getenv(usecase_name),
             'timestamp_ms': timestamp_ms,
         }
-        
-        # Update log_data with vlm_metrics_result dictionary
         if isinstance(vlm_metrics_result, dict):
             log_data.update(vlm_metrics_result)
-        
-        # Format log message
         message_parts = [f"{key}={value}" for key, value in log_data.items()]
         message = " ".join(message_parts)
-        
         self.performance_logger.info(message)
         return timestamp_ms
         
     def log_performance_metrics(self, usecase_name, vlm_metrics_result_object, unique_id='retail-default'):
-        
+        self._ensure_performance_logger()
         timestamp_ms = int(time.time() * 1000)
         log_data = {
             'application':  os.getenv(usecase_name),
@@ -191,12 +198,8 @@ class VLMMetricsLogger:
             'Grammar_Compile_Std':vlm_metrics_result_object.perf_metrics.get_grammar_compile_time().std,
             'Grammar_Compile_Mean':vlm_metrics_result_object.perf_metrics.get_grammar_compile_time().mean
         }
-        
-                
-        # Format log message
         message_parts = [f"{key}={value}" for key, value in log_data.items()]
         message = " ".join(message_parts)
-        
         self.performance_logger.info(message)
         return timestamp_ms
 
@@ -219,6 +222,14 @@ def log_end_time(application_name, unique_id='retail-default'):
     """Convenience function for logging end time"""
     return get_logger().log_end_time(application_name, unique_id=unique_id)
 
+def user_log_start_time(timestamp_milliseconds, application_name, unique_id='retail-default'):
+    """Convenience function for logging start time"""
+    return get_logger().user_log_start_time(timestamp_milliseconds, application_name, unique_id=unique_id)
+
+def user_log_end_time(timestamp_milliseconds, application_name, unique_id='retail-default'):
+    """Convenience function for logging end time"""
+    return get_logger().user_log_end_time(timestamp_milliseconds, application_name, unique_id=unique_id)
+    
 def log_custom_event(event_type, application_name, unique_id='retail-default', **kwargs):
     """Convenience function for logging custom events"""
     return get_logger().log_custom_event(event_type, application_name, **kwargs)

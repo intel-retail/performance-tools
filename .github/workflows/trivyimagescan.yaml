@@ -25,16 +25,14 @@ jobs:
       runs-on: "ubuntu-latest"
       steps:
         - name: Checkout code
-          uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
-          with:
-            ref: main
+          uses: actions/checkout@v4
 
         - name: Build an image from Dockerfile
           run: |
             echo "running make build platform benchmark"
             cd docker && make build-benchmark
         - name: Run Trivy vulnerability scanner
-          uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
+          uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
           with:
             image-ref: 'benchmark:latest'
             format: 'table'
@@ -44,5 +42,5 @@ jobs:
         - name: Upload Trivy scan results
           uses: actions/upload-artifact@v4
           with:
-            name: trivy-performance-tools-html-report
+            name: trivy-performance-tools-report
             path: trivy-performance-tools-results.txt

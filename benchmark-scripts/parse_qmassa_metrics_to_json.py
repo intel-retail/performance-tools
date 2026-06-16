@@ -29,11 +29,38 @@ def parse_qmassa_files(results_dir,log_name):
             else:
                 print(f"Unsupported driver: {driver_name}")
 
+def load_qmassa_json(file_path):
+    """Load qmassa output, handling both single-JSON (v1.0) and JSONL (v1.3+) formats."""
+    with open(file_path, 'r') as file:
+        try:
+            data = json.load(file)
+            return data
+        except json.JSONDecodeError:
+            pass
+    # JSONL format (v1.3+): one JSON object per line
+    # Skip version line and config line, parse state lines
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+    states = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # State lines have 'devs_state' key
+        if isinstance(obj, dict) and 'devs_state' in obj:
+            states.append(obj)
+    if states:
+        return {'states': states}
+    raise ValueError(f"No valid state data found in {file_path}")
+
 def parse_qmassa_metrics_driver_i915(results_dir, file_obj):
     
     metrics_list = []
-    with open(file_obj.path, 'r') as file:
-        data = json.load(file)            
+    data = load_qmassa_json(file_obj.path)
     states = data.get('states')
     for state in states:
         devs_state = state.get('devs_state')
@@ -58,8 +85,7 @@ def parse_qmassa_metrics_driver_i915(results_dir, file_obj):
 def parse_qmassa_metrics_driver_xe(results_dir, file_obj):
     
     metrics_list = []
-    with open(file_obj.path, 'r') as file:
-        data = json.load(file)            
+    data = load_qmassa_json(file_obj.path)
     states = data.get('states')
     for state in states:
         devs_state = state.get('devs_state')
