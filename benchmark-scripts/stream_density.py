@@ -11,6 +11,7 @@ import benchmark
 import glob
 import sys
 import re
+import statistics
 import psutil
 
 # Constants:
@@ -21,6 +22,16 @@ INIT_DURATION_KEY = "INIT_DURATION"
 RESULTS_DIR_KEY = "RESULTS_DIR"
 DEFAULT_TARGET_FPS = 14.95
 MAX_GUESS_INCREMENTS = 5
+CONSECUTIVE_FAIL_WINDOWS_KEY = "CONSECUTIVE_FAIL_WINDOWS"
+CONSECUTIVE_PASS_WINDOWS_KEY = "CONSECUTIVE_PASS_WINDOWS"
+DEFAULT_CONSECUTIVE_FAIL_WINDOWS = 2
+DEFAULT_CONSECUTIVE_PASS_WINDOWS = 2
+FPS_SAMPLE_WINDOW_KEY = "FPS_SAMPLE_WINDOW"
+HYSTERESIS_FPS_KEY = "HYSTERESIS_FPS"
+PASS_TOLERANCE_RATIO_KEY = "PASS_TOLERANCE_RATIO"
+DEFAULT_FPS_SAMPLE_WINDOW = 60
+DEFAULT_HYSTERESIS_FPS = 0.10
+DEFAULT_PASS_TOLERANCE_RATIO = 0.95
 
 
 class ArgumentError(Exception):
@@ -237,6 +248,7 @@ def check_non_empty_result_logs(num_pipelines, results_dir,
               "retry: {}".format(retry))
         matching_files = glob.glob(os.path.join(
             results_dir, f'pipeline*_{container_name}*.log'))
+        matching_files = filter_logs_for_current_timestamp(matching_files)
         if len(matching_files) >= num_pipelines and all([
               os.path.isfile(file) and os.path.getsize(file) > 0
               for file in matching_files]):
@@ -274,12 +286,107 @@ def get_latest_pipeline_logs(num_pipelines, pipeline_log_files):
         file for file, mtime in sorted_timestamp[:num_pipelines]]
     return latest_files
 
+
+def get_fps_sample_window(env_vars=None):
+    sample_window = DEFAULT_FPS_SAMPLE_WINDOW
+    if env_vars:
+        sample_window = int(env_vars.get(FPS_SAMPLE_WINDOW_KEY, sample_window))
+    if sample_window <= 0:
+        raise ArgumentError('ERROR: FPS sample window should be greater than 0')
+    return sample_window
+
+
+def extract_numeric_fps(file_path):
+    with open(file_path, "r") as file:
+        lines = file.readlines()
+
+    numeric_fps = []
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line or 'na' in stripped_line.lower():
+            continue
+        try:
+            numeric_fps.append(float(stripped_line))
+        except ValueError:
+            print(f"DEBUG: Skipping non-numeric line '{stripped_line}' in {file_path}")
+
+    return numeric_fps
+
+
+def filter_logs_for_current_timestamp(log_files):
+    '''
+    keep only log files for the current benchmark run when TIMESTAMP
+    is present in the environment.
+    Args:
+        log_files: candidate log files from glob matching
+    Returns:
+        timestamp-filtered files if possible, otherwise original list
+    '''
+    if not log_files:
+        return log_files
+
+    current_timestamp = os.getenv("TIMESTAMP", "").strip()
+    if current_timestamp:
+        filtered_files = [
+            file for file in log_files
+            if current_timestamp in os.path.basename(file)
+        ]
+        if filtered_files:
+            print(
+                f"DEBUG: TIMESTAMP={current_timestamp}, "
+                f"filtered {len(filtered_files)}/{len(log_files)} files"
+            )
+            return filtered_files
+        print(
+            f"WARN: TIMESTAMP={current_timestamp} did not match any files; "
+            f"attempting filename-based run detection"
+        )
+
+    # Fallback for cases where TIMESTAMP env is not propagated:
+    # infer the latest run token from filenames (14-20 contiguous digits).
+    token_pattern = re.compile(r'(?<!\d)(\d{14,20})(?!\d)')
+    token_to_latest_mtime = {}
+    for file in log_files:
+        basename = os.path.basename(file)
+        matches = token_pattern.findall(basename)
+        if not matches:
+            continue
+        mtime = os.path.getmtime(file)
+        for token in matches:
+            if token not in token_to_latest_mtime or mtime > token_to_latest_mtime[token]:
+                token_to_latest_mtime[token] = mtime
+
+    if not token_to_latest_mtime:
+        print("WARN: No run token detected in filenames; using all matching files")
+        return log_files
+
+    inferred_token = max(token_to_latest_mtime.items(), key=lambda item: item[1])[0]
+    filtered_files = [
+        file for file in log_files
+        if inferred_token in os.path.basename(file)
+    ]
+
+    if filtered_files:
+        print(
+            f"DEBUG: Inferred run token={inferred_token}, "
+            f"filtered {len(filtered_files)}/{len(log_files)} files"
+        )
+        return filtered_files
+
+    print(
+        f"WARN: Inferred run token={inferred_token} produced no matches; "
+        f"using all matching files"
+    )
+    return log_files
+
 def calculate_pipeline_latency(num_pipelines, results_dir, container_name):
     total_pipeline_latency = 0.0
     total_pipeline_latency_per_stream = 0.0
+    container_timestamp = os.getenv("TIMESTAMP")
     matching_files = glob.glob(os.path.join(
         results_dir, f'gst-launch*_{container_name}*.log'))
-    print(f"DEBUG: num. of gst launch matching_files = {len(matching_files)}")
+    matching_files = filter_logs_for_current_timestamp(matching_files)
+    print(f"DEBUG: {container_name} {container_timestamp}  num. of gst launch matching_files = {len(matching_files)}")
     latest_latency_logs = get_latest_pipeline_logs(
         num_pipelines, matching_files)
     
@@ -330,49 +437,6 @@ def calculate_pipeline_latency(num_pipelines, results_dir, container_name):
     print(f"DEBUG: Total latency: {total_pipeline_latency}, Per stream: {total_pipeline_latency_per_stream}")
     return total_pipeline_latency, total_pipeline_latency_per_stream
     
-def calculate_total_fps(num_pipelines, results_dir, container_name):
-    '''
-    calculates averaged fps from the current running num_pipelines
-    Args:
-        num_pipelines: number of currently running pipelines
-        results_dir: directory holding the benchmark results
-        container_name: the name of the container to match in log files,
-                        expected to be part of the filename pattern
-                        after the underscore (_)
-    Returns:
-        total_fps: accumulative total fps from all pipelines
-        total_fps_per_stream: the averaged fps for pipelines
-    '''
-    total_fps = 0
-    total_fps_per_stream = 0
-    stream_fps_dict = {} 
-    matching_files = glob.glob(os.path.join(
-        results_dir, f'pipeline*_{container_name}*.log'))
-    print(f"DEBUG: num. of matching_files = {len(matching_files)}")
-    latest_pipeline_logs = get_latest_pipeline_logs(
-        num_pipelines, matching_files)
-    for pipeline_file in latest_pipeline_logs:
-        print(f"DEBUG: in for loop pipeline_file:{pipeline_file}")
-        with open(pipeline_file, "r") as file:
-            stream_fps_list = [
-                fps for fps in
-                file.readlines()[-20:] if 'na' not in fps]
-        if not stream_fps_list:
-            print(f"WARN: No FPS returned from {pipeline_file}")
-            continue
-        stream_fps_sum = sum(float(fps) for fps in stream_fps_list)
-        stream_fps_count = len(stream_fps_list)
-        stream_fps_avg = stream_fps_sum / stream_fps_count
-        total_fps += stream_fps_avg
-        total_fps_per_stream = total_fps / num_pipelines
-        print(
-            f"INFO: Averaged FPS for pipeline file "
-            f"{pipeline_file}: {stream_fps_avg}")
-            
-    stream_fps_dict["pipeline_stream"] = round(total_fps_per_stream, 2)         
-    return total_fps, total_fps_per_stream, stream_fps_dict
-
-
 def validate_and_setup_env(env_vars, target_fps_list):
     '''
     Validates and sets up the environment variables needed for
@@ -399,6 +463,32 @@ def validate_and_setup_env(env_vars, target_fps_list):
             'ERROR: stream density increments ' +
             'should be greater than 0')
 
+    if is_env_non_empty(env_vars, CONSECUTIVE_FAIL_WINDOWS_KEY) and int(
+            env_vars[CONSECUTIVE_FAIL_WINDOWS_KEY]) <= 0:
+        raise ArgumentError(
+            'ERROR: consecutive fail windows should be greater than 0')
+
+    if is_env_non_empty(env_vars, CONSECUTIVE_PASS_WINDOWS_KEY) and int(
+            env_vars[CONSECUTIVE_PASS_WINDOWS_KEY]) <= 0:
+        raise ArgumentError(
+            'ERROR: consecutive pass windows should be greater than 0')
+
+    if is_env_non_empty(env_vars, FPS_SAMPLE_WINDOW_KEY) and int(
+            env_vars[FPS_SAMPLE_WINDOW_KEY]) <= 0:
+        raise ArgumentError(
+            'ERROR: FPS sample window should be greater than 0')
+
+    if is_env_non_empty(env_vars, HYSTERESIS_FPS_KEY) and float(
+            env_vars[HYSTERESIS_FPS_KEY]) < 0.0:
+        raise ArgumentError(
+            'ERROR: hysteresis FPS should be greater than or equal to 0')
+
+    if is_env_non_empty(env_vars, PASS_TOLERANCE_RATIO_KEY):
+        pass_tolerance_ratio = float(env_vars[PASS_TOLERANCE_RATIO_KEY])
+        if pass_tolerance_ratio <= 0.0 or pass_tolerance_ratio > 1.0:
+            raise ArgumentError(
+                'ERROR: pass tolerance ratio should be in (0, 1]')
+
     if not is_env_non_empty(env_vars, INIT_DURATION_KEY):
         env_vars[INIT_DURATION_KEY] = "120"
 
@@ -424,6 +514,32 @@ def run_pipeline_iterations(
     in_decrement = False
     increments = 1
     meet_target_fps = False
+    consecutive_fail_windows = int(
+        env_vars.get(
+            CONSECUTIVE_FAIL_WINDOWS_KEY,
+            DEFAULT_CONSECUTIVE_FAIL_WINDOWS,
+        )
+    )
+    consecutive_pass_windows = int(
+        env_vars.get(
+            CONSECUTIVE_PASS_WINDOWS_KEY,
+            DEFAULT_CONSECUTIVE_PASS_WINDOWS,
+        )
+    )
+    hysteresis_fps = float(
+        env_vars.get(
+            HYSTERESIS_FPS_KEY,
+            DEFAULT_HYSTERESIS_FPS,
+        )
+    )
+    pass_tolerance_ratio = float(
+        env_vars.get(
+            PASS_TOLERANCE_RATIO_KEY,
+            DEFAULT_PASS_TOLERANCE_RATIO,
+        )
+    )
+    fail_window_count = 0
+    pass_window_count = 0
 
     # Measure memory usage of a single pipeline
     per_pipeline_memory_mb = measure_pipeline_memory(
@@ -484,18 +600,10 @@ def run_pipeline_iterations(
             return num_pipelines, False
         # once we have all non-empty pipeline log files
         # we then can calculate the average fps
-        print(f"INFO: ########## MULTI_STREAM_MODE VALUE==== {env_vars.get('MULTI_STREAM_MODE', 0)}")
         # --- Calculate FPS and latency metrics ---
-        if int(env_vars.get("MULTI_STREAM_MODE", 0)) == 0:
-            # Multi-stream mode: use LP variant
-            total_fps, total_fps_per_stream, stream_fps_dict = calculate_total_fps(
-                num_pipelines, results_dir, container_name)
-        else:
-            # Single-stream mode: standard calculation
-            total_fps, total_fps_per_stream, stream_fps_dict = calculate_multi_stream_fps(
-                num_pipelines, results_dir, container_name)
+        total_fps, total_fps_per_stream, stream_fps_dict = calculate_multi_stream_fps(
+            num_pipelines, results_dir, container_name, env_vars)
 
-       
         print('container name:', container_name)
         print('Total FPS:', total_fps)
         print('stream_fps_dict:', stream_fps_dict)
@@ -511,40 +619,87 @@ def run_pipeline_iterations(
         f"for {num_pipelines} pipeline(s)")
 
         # --- Decide scaling logic ---
+        pass_threshold = target_fps * pass_tolerance_ratio
+        fail_threshold = pass_threshold - hysteresis_fps
+        passing_streams = {
+            name: fps for name, fps in stream_fps_dict.items()
+            if fps >= pass_threshold
+        }
+        failing_streams = {
+            name: fps for name, fps in stream_fps_dict.items()
+            if fps < fail_threshold
+        }
+        all_streams_meet_target = len(passing_streams) == len(stream_fps_dict)
+
         if not in_decrement:
-            # Check if all streams meet or exceed target FPS
-            all_streams_meet_target = all(fps >= target_fps for fps in stream_fps_dict.values())
             if all_streams_meet_target:
+                fail_window_count = 0
+                pass_window_count = 0
                 if is_env_non_empty(env_vars, PIPELINE_INCR_KEY):
                     increments = int(env_vars[PIPELINE_INCR_KEY])
                 else:
-                    increments = int(total_fps_per_stream / target_fps)
+                    per_stream_values = list(stream_fps_dict.values())
+                    robust_per_stream = statistics.median(per_stream_values) if per_stream_values else total_fps_per_stream
+                    conservative_per_stream = min(total_fps_per_stream, robust_per_stream)
+                    increments = int(conservative_per_stream / target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
-                print(f"✅ All streams meet target FPS ({target_fps}). Incrementing pipeline no. by {increments}")
-            else:
-                # Some streams below target
-                below_streams = {k: v for k, v in stream_fps_dict.items() if v < target_fps}
-                increments = -1
-                in_decrement = True
                 print(
-                    f"⚠️ Below target FPS ({target_fps}) in streams: {below_streams}. "
-                    f"Starting to decrement pipelines by 1..."
+                    f"✅ All streams meet pass threshold ({pass_threshold:.4f}) "
+                    f"for target FPS ({target_fps}). Incrementing pipeline no. by {increments}"
                 )
+            else:
+                pass_window_count = 0
+                fail_window_count += 1
+                if fail_window_count >= consecutive_fail_windows:
+                    increments = -1
+                    in_decrement = True
+                    fail_window_count = 0
+                    print(
+                        f"⚠️ Pass threshold ({pass_threshold:.4f}) not met in streams: "
+                        f"{stream_fps_dict}. Observed {consecutive_fail_windows} consecutive "
+                        f"below-threshold windows; starting to decrement pipelines by 1..."
+                    )
+                else:
+                    increments = 0
+                    if failing_streams:
+                        print(
+                            f"⚠️ Below hysteresis fail threshold ({fail_threshold:.4f}) in streams: "
+                            f"{failing_streams}. Fail window "
+                            f"{fail_window_count}/{consecutive_fail_windows}; holding pipeline "
+                            f"count at {num_pipelines} for confirmation."
+                        )
+                    else:
+                        print(
+                            f"INFO: Streams are below pass threshold ({pass_threshold:.4f}) but "
+                            f"above fail threshold ({fail_threshold:.4f}). Fail window "
+                            f"{fail_window_count}/{consecutive_fail_windows}; holding pipeline "
+                            f"count at {num_pipelines} for confirmation."
+                        )
         else:
             # --- In decrement phase ---
-            all_streams_meet_target = all(fps >= target_fps for fps in stream_fps_dict.values())
-
             if all_streams_meet_target:
-                print(
-                    f"✅ Found maximum number of pipelines to reach "
-                    f"target FPS {target_fps}")
-                meet_target_fps = True
-                print(
-                    f"🎯 Max stream density achieved for target FPS "
-                    f"{target_fps} is {num_pipelines}")
-                increments = 0
+                pass_window_count += 1
+                fail_window_count = 0
+                if pass_window_count >= consecutive_pass_windows:
+                    print(
+                        f"✅ Found maximum number of pipelines to reach "
+                        f"target FPS {target_fps}")
+                    meet_target_fps = True
+                    print(
+                        f"🎯 Max stream density achieved for target FPS "
+                        f"{target_fps} is {num_pipelines}")
+                    increments = 0
+                else:
+                    increments = 0
+                    print(
+                        f"✅ Target FPS met again. Pass window "
+                        f"{pass_window_count}/{consecutive_pass_windows}; "
+                        f"holding pipeline count at {num_pipelines} for confirmation."
+                    )
             elif num_pipelines <= 1:
+                pass_window_count = 0
+                fail_window_count = 0
                 print(
                     f"already reached num. pipeline 1, and "
                     f"the fps per stream is {total_fps_per_stream} "
@@ -552,9 +707,37 @@ def run_pipeline_iterations(
                 meet_target_fps = False
                 break
             else:
-                print(
-                    f"decrementing number of pipelines "
-                    f"{num_pipelines} by 1")
+                pass_window_count = 0
+                fail_window_count += 1
+                if fail_window_count >= consecutive_fail_windows:
+                    increments = -1
+                    fail_window_count = 0
+                    if failing_streams:
+                        print(
+                            f"decrementing number of pipelines {num_pipelines} by 1 "
+                            f"because streams are below hysteresis fail threshold {fail_threshold:.4f}: "
+                            f"{failing_streams}"
+                        )
+                    else:
+                        print(
+                            f"decrementing number of pipelines {num_pipelines} by 1 "
+                            f"because streams stayed below pass threshold ({pass_threshold:.4f}) "
+                            f"for {consecutive_fail_windows} windows."
+                        )
+                else:
+                    increments = 0
+                    if failing_streams:
+                        print(
+                            f"INFO: Below fail threshold ({fail_threshold:.4f}) in streams "
+                            f"{failing_streams}. Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"holding pipeline count at {num_pipelines} for confirmation."
+                        )
+                    else:
+                        print(
+                            f"INFO: Below pass threshold ({pass_threshold:.4f}) but above fail threshold "
+                            f"({fail_threshold:.4f}). Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"holding pipeline count at {num_pipelines} for confirmation."
+                        )
 
         # --- Update pipeline count ---
         num_pipelines += increments
@@ -604,6 +787,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     orig_stderr = sys.stderr
     try:
         with open(log_file_path, 'a') as logger:
+            logger.reconfigure(line_buffering=True, write_through=True)
             sys.stdout = logger
             sys.stderr = logger
 
@@ -644,6 +828,10 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
             # end of for-loop
             print("stream_density done!")
     except Exception as ex:
+        # Restore default streams before logging the exception, otherwise
+        # writing to redirected logger can fail if the file handle is closed.
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
         print(f'ERROR: found exception: {ex}')
         raise
     finally:
@@ -654,7 +842,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     return results
 
 
-def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
+def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_vars=None):
     """
     Calculates averaged FPS per stream for all matching log files named pipeline_stream<idx>*.log.
     Each stream index is handled independently.
@@ -669,12 +857,14 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
+    sample_window = get_fps_sample_window(env_vars)
     time.sleep(10)  # Ensure logs are fully written
     
     # --- Loop over all streams ---
     for idx in range(stream_count):
         pattern = os.path.join(results_dir, f'pipeline_stream{idx}_*_{container_name}.log')
         matching = glob.glob(pattern)
+        matching = filter_logs_for_current_timestamp(matching)
     
         if not matching:
             print(f"[WARN] No log file found for stream {idx} (container: {container_name}). Skipping...")
@@ -695,24 +885,19 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         for pipeline_file in latest_pipeline_logs:
             print(f"DEBUG: Processing file: {pipeline_file}")
             try:
-                with open(pipeline_file, 'r') as f:
-                    tail_lines = f.readlines()[-20:]
-                fps_lines = [l.strip() for l in tail_lines if l.strip() and 'na' not in l.lower()]
-                numeric_fps = []
-                for v in fps_lines:
-                    try:
-                        numeric_fps.append(float(v))
-                    except ValueError:
-                        print(f"DEBUG: Skipping non-numeric line '{v}' in {pipeline_file}")
+                numeric_fps = extract_numeric_fps(pipeline_file)
 
                 if not numeric_fps:
                     print(f"WARN: No numeric FPS entries for {pipeline_file}")
                     continue
                 file_name = os.path.basename(pipeline_file)
                 stream_fps_avg = sum(numeric_fps) / len(numeric_fps)
+                stream_fps_median = statistics.median(numeric_fps)
                 stream_avg_sum += stream_fps_avg
+                stream_fps_dict[f'pipeline_stream{idx}'] = round(stream_fps_median, 2)
 
                 print(f"INFO: Averaged FPS for {pipeline_file}: {stream_fps_avg}")
+                print(f"INFO: Median FPS for {pipeline_file}: {stream_fps_median}")
 
             except (IOError, OSError) as e:
                 print(f"WARN: Read error on {pipeline_file}: {e}")
@@ -720,7 +905,8 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name):
         # --- Compute average across all files for this stream index ---
         if num_pipelines > 0:
             final_stream_avg = stream_avg_sum
-            stream_fps_dict[f'pipeline_stream{idx}'] = round(final_stream_avg, 2)
+            if f'pipeline_stream{idx}' not in stream_fps_dict:
+                stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
             total_fps += final_stream_avg
         else:
             stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
