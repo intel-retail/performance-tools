@@ -73,12 +73,17 @@ def build_per_stream_target_fps(stream_fps_dict, env_vars, default_target_fps):
     stream_pattern = re.compile(r"pipeline_stream(\d+)")
     
     per_stream_targets = {}
+    num_cameras = len(stream_idx_to_target_fps)
     for stream_name in stream_fps_dict:
         match = stream_pattern.search(stream_name)
         stream_idx = int(match.group(1)) if match else None
-        
-        # Use direct index lookup; fall back to default
-        target_fps = stream_idx_to_target_fps.get(stream_idx, default_target_fps)
+
+        # Map replicated stream indices back to camera index per pipeline.
+        if stream_idx is not None and num_cameras > 0:
+            camera_idx = stream_idx % num_cameras
+            target_fps = stream_idx_to_target_fps.get(camera_idx, default_target_fps)
+        else:
+            target_fps = default_target_fps
         per_stream_targets[stream_name] = float(target_fps)
     
     print(f"INFO: per-stream target FPS map: {per_stream_targets}")
