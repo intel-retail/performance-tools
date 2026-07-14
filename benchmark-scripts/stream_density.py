@@ -13,6 +13,7 @@ import sys
 import re
 import statistics
 import psutil
+import json 
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -32,10 +33,62 @@ PASS_TOLERANCE_RATIO_KEY = "PASS_TOLERANCE_RATIO"
 DEFAULT_FPS_SAMPLE_WINDOW = 60
 DEFAULT_HYSTERESIS_FPS = 0.10
 DEFAULT_PASS_TOLERANCE_RATIO = 0.95
+CAMERA_STREAM_KEY = "CAMERA_STREAM"
 
 
 class ArgumentError(Exception):
     pass
+
+def build_per_stream_target_fps(stream_fps_dict, env_vars, default_target_fps):
+    """Build stream-level FPS targets from camera config."""
+    # Get camera config path
+    camera_stream = os.getenv(CAMERA_STREAM_KEY, "camera_to_workload.json")
+    
+    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "configs", camera_stream)
+    )
+    
+    # Build unified stream index -> target FPS mapping
+    stream_idx_to_target_fps = {}
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            for idx, cam in enumerate(config.get("lane_config", {}).get("cameras", [])):
+                target_fps = cam.get("targetFps") if isinstance(cam, dict) else None
+                if target_fps is not None:
+                    try:
+                        fps_value = float(target_fps)
+                        if fps_value > 0:
+                            print(idx,"idx",fps_value,"fps_value")
+                            stream_idx_to_target_fps[idx] = fps_value
+                    except (TypeError, ValueError):
+                        pass
+        except (IOError, ValueError) as e:
+            print(f"WARN: Failed to load camera config {config_path}: {e}")
+    else:
+        print(f"WARN: camera configuration not found at {config_path}. Using default target FPS for all streams.")
+    
+    # Compile regex once (if needed for stream name parsing)
+    stream_pattern = re.compile(r"pipeline_stream(\d+)")
+    
+    per_stream_targets = {}
+    for stream_name in stream_fps_dict:
+        match = stream_pattern.search(stream_name)
+        stream_idx = int(match.group(1)) if match else None
+        
+        # Use direct index lookup; fall back to default
+        target_fps = stream_idx_to_target_fps.get(stream_idx, default_target_fps)
+        per_stream_targets[stream_name] = float(target_fps)
+    
+    print(f"INFO: per-stream target FPS map: {per_stream_targets}")
+    return per_stream_targets
+
+def get_average_target_fps(stream_target_fps, fallback_target_fps):
+    values = [float(v) for v in stream_target_fps.values() if float(v) > 0]
+    if not values:
+        return float(fallback_target_fps)
+    return sum(values) / len(values)
 
 def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name):
     
@@ -618,18 +671,35 @@ def run_pipeline_iterations(
         f"{total_pipeline_latency_per_stream} "
         f"for {num_pipelines} pipeline(s)")
 
-        # --- Decide scaling logic ---
-        pass_threshold = target_fps * pass_tolerance_ratio
-        fail_threshold = pass_threshold - hysteresis_fps
+        # --- Decide scaling logic (per-stream thresholds) ---
+        stream_target_fps = build_per_stream_target_fps(
+            stream_fps_dict, env_vars, target_fps
+        )
+
+        pass_thresholds = {
+            name: stream_target_fps[name] * pass_tolerance_ratio
+            for name in stream_fps_dict
+        }
+
+        fail_thresholds = {
+            name: pass_thresholds[name] - hysteresis_fps
+            for name in stream_fps_dict
+        }
+
         passing_streams = {
             name: fps for name, fps in stream_fps_dict.items()
-            if fps >= pass_threshold
+            if fps >= pass_thresholds[name]
         }
         failing_streams = {
             name: fps for name, fps in stream_fps_dict.items()
-            if fps < fail_threshold
+            if fps < fail_thresholds[name]
         }
+        print('pass_thresholds:', pass_thresholds)
+        print('fail_thresholds:', fail_thresholds)
+        print('passing_streams:', passing_streams)
+        print('failing_streams:', failing_streams)
         all_streams_meet_target = len(passing_streams) == len(stream_fps_dict)
+        print("All streams meet target" if all_streams_meet_target else "Not all streams meet target")
 
         if not in_decrement:
             if all_streams_meet_target:
@@ -641,12 +711,14 @@ def run_pipeline_iterations(
                     per_stream_values = list(stream_fps_dict.values())
                     robust_per_stream = statistics.median(per_stream_values) if per_stream_values else total_fps_per_stream
                     conservative_per_stream = min(total_fps_per_stream, robust_per_stream)
-                    increments = int(conservative_per_stream / target_fps)
+                    average_target_fps = get_average_target_fps(stream_target_fps, target_fps)
+                    increments = int(conservative_per_stream / average_target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
                 print(
-                    f"✅ All streams meet pass threshold ({pass_threshold:.4f}) "
-                    f"for target FPS ({target_fps}). Incrementing pipeline no. by {increments}"
+                    f"✅ All streams meet pass thresholds {pass_thresholds} "
+                    f"for target FPS map {stream_target_fps}. "
+                    f"Incrementing pipeline no. by {increments}"
                 )
             else:
                 pass_window_count = 0
@@ -656,25 +728,26 @@ def run_pipeline_iterations(
                     in_decrement = True
                     fail_window_count = 0
                     print(
-                        f"⚠️ Pass threshold ({pass_threshold:.4f}) not met in streams: "
-                        f"{stream_fps_dict}. Observed {consecutive_fail_windows} consecutive "
+                        f"⚠️ Pass thresholds not met in streams: observed={stream_fps_dict}, "
+                        f"pass_thresholds={pass_thresholds}. "
+                        f"Observed {consecutive_fail_windows} consecutive "
                         f"below-threshold windows; starting to decrement pipelines by 1..."
                     )
                 else:
                     increments = 0
                     if failing_streams:
                         print(
-                            f"⚠️ Below hysteresis fail threshold ({fail_threshold:.4f}) in streams: "
-                            f"{failing_streams}. Fail window "
-                            f"{fail_window_count}/{consecutive_fail_windows}; holding pipeline "
-                            f"count at {num_pipelines} for confirmation."
+                            f"⚠️ Below hysteresis fail thresholds in streams: "
+                            f"observed={failing_streams}, fail_thresholds={fail_thresholds}. "
+                            f"Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"holding pipeline count at {num_pipelines} for confirmation."
                         )
                     else:
                         print(
-                            f"INFO: Streams are below pass threshold ({pass_threshold:.4f}) but "
-                            f"above fail threshold ({fail_threshold:.4f}). Fail window "
-                            f"{fail_window_count}/{consecutive_fail_windows}; holding pipeline "
-                            f"count at {num_pipelines} for confirmation."
+                            f"INFO: Streams are below pass thresholds ({pass_thresholds}) but "
+                            f"above fail thresholds ({fail_thresholds}). "
+                            f"Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"holding pipeline count at {num_pipelines} for confirmation."
                         )
         else:
             # --- In decrement phase ---
@@ -684,11 +757,13 @@ def run_pipeline_iterations(
                 if pass_window_count >= consecutive_pass_windows:
                     print(
                         f"✅ Found maximum number of pipelines to reach "
-                        f"target FPS {target_fps}")
+                        f"target FPS map {stream_target_fps}"
+                    )
                     meet_target_fps = True
                     print(
-                        f"🎯 Max stream density achieved for target FPS "
-                        f"{target_fps} is {num_pipelines}")
+                        f"🎯 Max stream density achieved for target FPS map "
+                        f"{stream_target_fps} is {num_pipelines}"
+                    )
                     increments = 0
                 else:
                     increments = 0
@@ -701,9 +776,9 @@ def run_pipeline_iterations(
                 pass_window_count = 0
                 fail_window_count = 0
                 print(
-                    f"already reached num. pipeline 1, and "
-                    f"the fps per stream is {total_fps_per_stream} "
-                    f"but target FPS is {target_fps}")
+                    f"already reached num. pipeline 1, and the fps per stream is "
+                    f"{total_fps_per_stream} but target FPS map is {stream_target_fps}"
+                )
                 meet_target_fps = False
                 break
             else:
@@ -715,30 +790,32 @@ def run_pipeline_iterations(
                     if failing_streams:
                         print(
                             f"decrementing number of pipelines {num_pipelines} by 1 "
-                            f"because streams are below hysteresis fail threshold {fail_threshold:.4f}: "
-                            f"{failing_streams}"
+                            f"because streams are below hysteresis fail thresholds. "
+                            f"observed={failing_streams}, fail_thresholds={fail_thresholds}"
                         )
                     else:
                         print(
                             f"decrementing number of pipelines {num_pipelines} by 1 "
-                            f"because streams stayed below pass threshold ({pass_threshold:.4f}) "
-                            f"for {consecutive_fail_windows} windows."
+                            f"because streams stayed below pass thresholds "
+                            f"({pass_thresholds}) for {consecutive_fail_windows} windows."
                         )
                 else:
                     increments = 0
                     if failing_streams:
                         print(
-                            f"INFO: Below fail threshold ({fail_threshold:.4f}) in streams "
-                            f"{failing_streams}. Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"INFO: Below fail thresholds in streams. "
+                            f"observed={failing_streams}, fail_thresholds={fail_thresholds}. "
+                            f"Fail window {fail_window_count}/{consecutive_fail_windows}; "
                             f"holding pipeline count at {num_pipelines} for confirmation."
                         )
                     else:
                         print(
-                            f"INFO: Below pass threshold ({pass_threshold:.4f}) but above fail threshold "
-                            f"({fail_threshold:.4f}). Fail window {fail_window_count}/{consecutive_fail_windows}; "
+                            f"INFO: Below pass thresholds ({pass_thresholds}) but above "
+                            f"fail thresholds ({fail_thresholds}). "
+                            f"Fail window {fail_window_count}/{consecutive_fail_windows}; "
                             f"holding pipeline count at {num_pipelines} for confirmation."
                         )
-
+                        
         # --- Update pipeline count ---
         num_pipelines += increments
         if num_pipelines <= 0:
