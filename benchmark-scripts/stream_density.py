@@ -50,11 +50,14 @@ def build_per_stream_target_fps(stream_fps_dict, env_vars, default_target_fps):
     
     # Build unified stream index -> target FPS mapping
     stream_idx_to_target_fps = {}
+    total_cameras = 0
     if os.path.isfile(config_path):
         try:
             with open(config_path, "r") as f:
                 config = json.load(f)
-            for idx, cam in enumerate(config.get("lane_config", {}).get("cameras", [])):
+            cameras = config.get("lane_config", {}).get("cameras", [])
+            total_cameras = len(cameras)
+            for idx, cam in enumerate(cameras):
                 target_fps = cam.get("targetFps") if isinstance(cam, dict) else None
                 if target_fps is not None:
                     try:
@@ -73,7 +76,7 @@ def build_per_stream_target_fps(stream_fps_dict, env_vars, default_target_fps):
     stream_pattern = re.compile(r"pipeline_stream(\d+)")
     
     per_stream_targets = {}
-    num_cameras = len(stream_idx_to_target_fps)
+    num_cameras = total_cameras
     for stream_name in stream_fps_dict:
         match = stream_pattern.search(stream_name)
         stream_idx = int(match.group(1)) if match else None
