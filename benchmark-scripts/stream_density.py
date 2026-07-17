@@ -13,7 +13,7 @@ import sys
 import re
 import statistics
 import psutil
-import json 
+import json
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -43,30 +43,45 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
     """Build stream-level FPS targets from camera config."""
     # Get camera config path
     camera_stream = os.getenv(CAMERA_STREAM_KEY, "camera_to_workload.json")
+    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "configs", camera_stream)
+    )
+
+    # Build unified stream index -> target FPS mapping (cached by config path + mtime)
+    cache = getattr(build_per_stream_target_fps, "_camera_config_cache", {})
     
-    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.abspath(camera_stream)
+    # Create cache key that includes file modification time to detect file changes
+    file_mtime = os.path.getmtime(config_path) if os.path.isfile(config_path) else 0
+    cache_key = (config_path, file_mtime)
     
-    # Build unified stream index -> target FPS mapping
-    stream_idx_to_target_fps = {}
-    total_cameras = 0
-    if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r") as f:
-                cameras = json.load(f).get("lane_config", {}).get("cameras", [])
-            total_cameras = len(cameras)
-            for idx, cam in enumerate(cameras):
-                if isinstance(cam, dict):
-                    try:
-                        fps_value = float(cam.get("targetFps", 0))
-                        if fps_value > 0:
-                            stream_idx_to_target_fps[idx] = fps_value
-                    except (TypeError, ValueError):
-                        pass
-        except (IOError, ValueError) as e:
-            print(f"WARN: Failed to load camera config {config_path}: {e}")
+    cached = cache.get(cache_key)
+    if cached is not None:
+        stream_idx_to_target_fps, total_cameras = cached
     else:
-        print(f"WARN: camera configuration not found at {config_path}. Using default target FPS for all streams.")
-    
+        stream_idx_to_target_fps = {}
+        total_cameras = 0
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    cameras = json.load(f).get("lane_config", {}).get("cameras", [])
+                total_cameras = len(cameras)
+                for idx, cam in enumerate(cameras):
+                    if isinstance(cam, dict):
+                        try:
+                            fps_value = float(cam.get("targetFps", 0))
+                            if fps_value > 0:
+                                stream_idx_to_target_fps[idx] = fps_value
+                        except (TypeError, ValueError):
+                            pass
+                cache[cache_key] = (dict(stream_idx_to_target_fps), int(total_cameras))
+                build_per_stream_target_fps._camera_config_cache = cache
+            except (IOError, ValueError) as e:
+                print(f"WARN: Failed to load camera config {config_path}: {e}")
+        else:
+            print(
+                f"WARN: camera configuration not found at {config_path}. Using default target FPS for all streams."
+            )
+            
     # Compile regex once (if needed for stream name parsing)
     stream_pattern = re.compile(r"pipeline_stream(\d+)")
     per_stream_targets = {}
@@ -81,7 +96,7 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
         per_stream_targets[stream_name] = float(target_fps)
     
     if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
-         print(f"INFO: per-stream target FPS map: {per_stream_targets}")
+        print(f"INFO: per-stream target FPS map: {per_stream_targets}")
     return per_stream_targets
 
 def get_mean_target_fps(stream_target_fps, fallback_target_fps):
@@ -694,10 +709,10 @@ def run_pipeline_iterations(
         }
         all_streams_meet_target = len(passing_streams) == len(stream_fps_dict)
         if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
-             print('pass_thresholds:', pass_thresholds)
-             print('fail_thresholds:', fail_thresholds)
-             print('passing_streams:', passing_streams)
-             print('failing_streams:', failing_streams)
+            print('pass_thresholds:', pass_thresholds)
+            print('fail_thresholds:', fail_thresholds)
+            print('passing_streams:', passing_streams)
+            print('failing_streams:', failing_streams)
         print("INFO: All streams meet target" if all_streams_meet_target else "INFO: Not all streams meet target")
 
         if not in_decrement:
@@ -711,7 +726,8 @@ def run_pipeline_iterations(
                     robust_per_stream = statistics.median(per_stream_values) if per_stream_values else total_fps_per_stream
                     conservative_per_stream = min(total_fps_per_stream, robust_per_stream)
                     average_target_fps = get_mean_target_fps(stream_target_fps, target_fps)
-                    print('mean target fps:', average_target_fps)
+                    if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
+                        print('mean target fps:', average_target_fps)
                     increments = int(conservative_per_stream / average_target_fps)
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
