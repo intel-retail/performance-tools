@@ -44,9 +44,7 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
     # Get camera config path
     camera_stream = os.getenv(CAMERA_STREAM_KEY, "camera_to_workload.json")
     
-    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "configs", camera_stream)
-    )
+    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.abspath(camera_stream)
     
     # Build unified stream index -> target FPS mapping
     stream_idx_to_target_fps = {}
