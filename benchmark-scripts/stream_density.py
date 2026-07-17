@@ -82,7 +82,8 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
             target_fps = default_target_fps
         per_stream_targets[stream_name] = float(target_fps)
     
-    print(f"INFO: per-stream target FPS map: {per_stream_targets}")
+    if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
+         print(f"INFO: per-stream target FPS map: {per_stream_targets}")
     return per_stream_targets
 
 def get_mean_target_fps(stream_target_fps, fallback_target_fps):
@@ -693,11 +694,12 @@ def run_pipeline_iterations(
             name: fps for name, fps in stream_fps_dict.items()
             if fps < fail_thresholds[name]
         }
-        print('pass_thresholds:', pass_thresholds)
-        print('fail_thresholds:', fail_thresholds)
-        print('passing_streams:', passing_streams)
-        print('failing_streams:', failing_streams)
         all_streams_meet_target = len(passing_streams) == len(stream_fps_dict)
+        if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
+             print('pass_thresholds:', pass_thresholds)
+             print('fail_thresholds:', fail_thresholds)
+             print('passing_streams:', passing_streams)
+             print('failing_streams:', failing_streams)
         print("INFO: All streams meet target" if all_streams_meet_target else "INFO: Not all streams meet target")
 
         if not in_decrement:

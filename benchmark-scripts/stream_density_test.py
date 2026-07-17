@@ -7,6 +7,8 @@
 import mock
 import subprocess  # nosec B404
 import unittest
+import tempfile
+import json
 from unittest.mock import patch, mock_open, MagicMock
 import stream_density
 from stream_density import validate_and_setup_env, ArgumentError
@@ -20,6 +22,69 @@ import os
 
 
 class Testing(unittest.TestCase):
+    def test_build_per_stream_target_fps_mixed_values(self):
+        stream_fps_dict = {
+            'pipeline_stream0': 10.0,
+            'pipeline_stream1': 10.0,
+            'pipeline_stream2': 10.0,
+            'pipeline_stream3': 10.0,
+            'pipeline_stream4': 10.0,
+        }
+        camera_config = {
+            'lane_config': {
+                'cameras': [
+                    {'targetFps': 30},
+                    {'targetFps': '15.5'},
+                    {'targetFps': 0},
+                    {'targetFps': -7},
+                    {'targetFps': 'bad'},
+                ]
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump(camera_config, temp_file)
+            temp_file.flush()
+            temp_config_path = temp_file.name
+
+        try:
+            with patch.dict(os.environ, {'CAMERA_STREAM': temp_config_path}, clear=False):
+                result = stream_density.build_per_stream_target_fps(
+                    stream_fps_dict, default_target_fps=14.95
+                )
+
+            expected = {
+                'pipeline_stream0': 30.0,
+                'pipeline_stream1': 15.5,
+                'pipeline_stream2': 14.95,
+                'pipeline_stream3': 14.95,
+                'pipeline_stream4': 14.95,
+            }
+            self.assertEqual(result, expected)
+        finally:
+            if os.path.exists(temp_config_path):
+                os.remove(temp_config_path)
+
+    def test_build_per_stream_target_fps_missing_config_uses_default(self):
+        stream_fps_dict = {
+            'pipeline_stream0': 10.0,
+            'pipeline_stream7': 10.0,
+            'stream_without_index': 10.0,
+        }
+        missing_path = '/tmp/non-existent-camera-config-for-test.json'
+
+        with patch.dict(os.environ, {'CAMERA_STREAM': missing_path}, clear=False):
+            result = stream_density.build_per_stream_target_fps(
+                stream_fps_dict, default_target_fps=22.0
+            )
+
+        expected = {
+            'pipeline_stream0': 22.0,
+            'pipeline_stream7': 22.0,
+            'stream_without_index': 22.0,
+        }
+        self.assertEqual(result, expected)
+
     def test_is_env_non_empty(self):
         sys_env = os.environ.copy()
         sys_env["EMPTY"] = ""
