@@ -77,10 +77,14 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
                 build_per_stream_target_fps._camera_config_cache = cache
             except (IOError, ValueError) as e:
                 print(f"WARN: Failed to load camera config {config_path}: {e}")
+                cache[cache_key] = ({}, 0)
+                build_per_stream_target_fps._camera_config_cache = cache
         else:
             print(
                 f"WARN: camera configuration not found at {config_path}. Using default target FPS for all streams."
             )
+            cache[cache_key] = ({}, 0)
+            build_per_stream_target_fps._camera_config_cache = cache
             
     # Compile regex once (if needed for stream name parsing)
     stream_pattern = re.compile(r"pipeline_stream(\d+)")
