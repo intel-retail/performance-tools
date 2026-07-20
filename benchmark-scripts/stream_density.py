@@ -62,7 +62,7 @@ def build_per_stream_target_fps(stream_fps_dict, default_target_fps):
         total_cameras = 0
         if os.path.isfile(config_path):
             try:
-                with open(config_path, "r") as f:
+                with open(config_path, "r", encoding="utf-8") as f:
                     cameras = json.load(f).get("lane_config", {}).get("cameras", [])
                 total_cameras = len(cameras)
                 for idx, cam in enumerate(cameras):
