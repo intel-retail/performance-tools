@@ -71,8 +71,10 @@ class Testing(unittest.TestCase):
             'pipeline_stream7': 10.0,
             'stream_without_index': 10.0,
         }
-        missing_path = '/tmp/non-existent-camera-config-for-test.json'
-
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_path = os.path.join(tmpdir, 'non-existent-camera-config-for-test.json')
+        
         with patch.dict(os.environ, {'CAMERA_STREAM': missing_path}, clear=False):
             result = stream_density.build_per_stream_target_fps(
                 stream_fps_dict, default_target_fps=22.0

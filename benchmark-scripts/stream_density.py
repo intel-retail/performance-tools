@@ -717,7 +717,8 @@ def run_pipeline_iterations(
             print('fail_thresholds:', fail_thresholds)
             print('passing_streams:', passing_streams)
             print('failing_streams:', failing_streams)
-        print("INFO: All streams meet target" if all_streams_meet_target else "INFO: Not all streams meet target")
+        if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
+            print("INFO: All streams meet target" if all_streams_meet_target else "INFO: Not all streams meet target")
 
         if not in_decrement:
             if all_streams_meet_target:
@@ -733,6 +734,8 @@ def run_pipeline_iterations(
                     if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
                         print('mean target fps:', average_target_fps)
                     increments = int(conservative_per_stream / average_target_fps)
+                    if increments <= 0:
+                        increments = 1
                     if increments == 1:
                         increments = MAX_GUESS_INCREMENTS
                 print(
