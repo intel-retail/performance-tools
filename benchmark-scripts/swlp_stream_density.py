@@ -14,7 +14,7 @@ Scaling is achieved by:
   3. Generating ``docker-compose.cameras.yaml`` with additional RTSP camera
      streams (``lp-cams-N``) for each new camera
   4. Restarting ``scene-import`` (imports cloned scenes into SceneScape),
-     ``lp-cams-*``, ``lp-video`` (DLStreamer), and ``swlp-service``
+     ``lp-cams-*``, ``lp-video`` (DLStreamer), and ``scene-understanding-service``
   5. SceneScape core services (web, controller, broker, etc.), ovms-vlm,
      behavioral-analysis, seaweedfs, and alert-service stay running
 
@@ -338,8 +338,8 @@ def _generate_cameras_override(app_dir: str, num_scenes: int) -> None:
             f.write(f'    restart: "no"\n')
             f.write(f"\n")
 
-        # Override swlp-service to set STREAM_DENSITY
-        f.write(f"  swlp-service:\n")
+        # Override scene-understanding-service to set STREAM_DENSITY
+        f.write(f"  scene-understanding-service:\n")
         f.write(f"    environment:\n")
         f.write(f"      STREAM_DENSITY: \"{num_scenes}\"\n")
 
@@ -446,7 +446,7 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90) -> N
       3. Re-run init.sh to update .env (STREAM_DENSITY)
       4. Restart scene-import → imports cloned scenes
       5. Recreate lp-video → picks up new DLStreamer config
-      6. Recreate swlp-service → subscribes to new scene topics
+      6. Recreate scene-understanding-service → subscribes to new scene topics
     """
     logger.info("Scaling to %d scene(s) …", num_scenes)
 
@@ -487,9 +487,9 @@ def _scale_pipeline_services(app_dir: str, num_scenes: int, wait: int = 90) -> N
     logger.info("Recreating lp-video (DLStreamer) with new config …")
     _docker_compose(app_dir, "up -d --force-recreate lp-video")
 
-    # Force-recreate swlp-service to pick up new env / scene subscriptions
-    logger.info("Recreating swlp-service …")
-    _docker_compose(app_dir, "up -d --force-recreate swlp-service")
+    # Force-recreate scene-understanding-service to pick up new env / scene subscriptions
+    logger.info("Recreating scene-understanding-service …")
+    _docker_compose(app_dir, "up -d --force-recreate scene-understanding-service")
 
     logger.info("Waiting %ds for services to initialise …", wait)
     time.sleep(wait)
@@ -508,7 +508,7 @@ def _clean_cameras_override(app_dir: str) -> None:
 
 def _collect_latency_from_docker_logs(app_dir: str, duration_secs: int = 30, num_scenes: int = 1) -> Dict[str, float]:
     """
-    Extract end-to-end latency from swlp-service docker logs.
+    Extract end-to-end latency from scene-understanding-service docker logs.
 
     Measures the time between "Published BA request" (last_frame_ts) and the
     corresponding "BA queue: status update" (timestamp) for the same person_id
@@ -516,7 +516,7 @@ def _collect_latency_from_docker_logs(app_dir: str, duration_secs: int = 30, num
 
     Returns a dict with latency statistics.
     """
-    container = "storewide-lp-swlp-service-1"
+    container = "storewide-lp-scene-understanding-service-1"
     since_arg = f"--since={duration_secs + 30}s"
     cmd = f"docker logs {container} {since_arg} 2>&1"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -699,7 +699,7 @@ class SADStreamDensity:
       - RTSP camera streams  (lp-cams-N)  → real video feed
       - DLStreamer pipelines (lp-video)    → inference per camera
       - SceneScape scenes    (scene-import) → scene clones in SceneScape DB
-      - swlp-service subscriptions         → MQTT topics for each scene
+      - scene-understanding-service subscriptions  → MQTT topics for each scene
 
     What stays running untouched:
       - SceneScape core  (web, controller, broker, ntpserv, pgserver, vdms)
