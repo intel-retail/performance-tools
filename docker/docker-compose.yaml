@@ -8,8 +8,8 @@ version: '3'
 services:
   benchmark:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: benchmark:latest
     container_name: metrics-collector
     privileged: true
@@ -17,6 +17,8 @@ services:
     network_mode: "host"
     environment:
       - NPU_LOG=/tmp/results/npu_usage.csv
+      - RESULTS_DIR=/tmp/results
+      - METRICS_HTTP_PORT=9000
     volumes:
       - ${log_dir}:/tmp/results
       - /tmp/.X11-unix:/tmp/.X11-unix
