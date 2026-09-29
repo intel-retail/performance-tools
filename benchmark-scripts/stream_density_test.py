@@ -19,6 +19,8 @@ from stream_density import (
     DEFAULT_TARGET_FPS
 )
 import os
+import io
+from contextlib import redirect_stdout
 
 
 class Testing(unittest.TestCase):
@@ -165,23 +167,96 @@ class Testing(unittest.TestCase):
                 os.rmdir(test_results_dir)
 
     def test_calculate_multi_stream_fps_success(self):
+        samples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         with tempfile.TemporaryDirectory() as test_results_dir:
             log_file = os.path.join(
                 test_results_dir, 'pipeline_stream0_123_gst.log')
             with open(log_file, 'w') as file:
-                file.write('10\n20\n30\n40\n50\n')
+                file.write(''.join(f'{s}\n' for s in samples))
 
             with patch('stream_density.get_pipeline_stream_count',
                        return_value=1):
-                total_fps, min_p90, stream_fps = (
+                total_fps, min_p90, stream_fps, stream_samples = (
                     stream_density.calculate_multi_stream_fps(
                         1, test_results_dir, 'gst'))
 
-            self.assertEqual(total_fps, 30.0)
-            self.assertEqual(min_p90, 50)
-            self.assertEqual(stream_fps, {'pipeline_stream0': 50})
+            self.assertEqual(total_fps, 5.5)
+            # Nearest-rank p90 of 10 samples is the 9th value, not the top sample.
+            self.assertEqual(min_p90, 9)
+            self.assertEqual(stream_fps, {'pipeline_stream0': 9})
+            self.assertEqual(stream_samples, {'pipeline_stream0': samples})
 
-    def test_count_pipeline_scaled_streams(self):
+    def test_calculate_multi_stream_fps_measurement_window(self):
+        with tempfile.TemporaryDirectory() as test_results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}), \
+                patch('stream_density.get_pipeline_stream_count',
+                      return_value=1):
+            log_file = os.path.join(
+                test_results_dir, 'pipeline_stream0_123_gst.log')
+            with open(log_file, 'w') as file:
+                file.write('1\n2\n3\n')
+            start_offsets = stream_density.snapshot_stream_log_offsets(
+                test_results_dir, 'gst')
+            with open(log_file, 'a') as file:
+                file.write('14\n15\n16\n')
+            end_offsets = stream_density.snapshot_stream_log_offsets(
+                test_results_dir, 'gst')
+            with open(log_file, 'a') as file:
+                file.write('99\n100\n')
+
+            total_fps, min_p90, stream_fps, stream_samples = (
+                stream_density.calculate_multi_stream_fps(
+                    1, test_results_dir, 'gst',
+                    start_offsets=start_offsets,
+                    end_offsets=end_offsets))
+
+        self.assertEqual(stream_samples, {'pipeline_stream0': [14, 15, 16]})
+        self.assertEqual(total_fps, 15.0)
+        self.assertEqual(stream_fps, {'pipeline_stream0': 16})
+        self.assertEqual(min_p90, 16)
+
+    def test_print_stream_density_report_summary(self):
+        stream_fps = {'pipeline_stream0': 16.0, 'pipeline_stream1': 15.0}
+        targets = {'pipeline_stream0': 15.0, 'pipeline_stream1': 15.0}
+        pass_marks = {'pipeline_stream0': 14.25, 'pipeline_stream1': 14.25}
+        samples = {
+            'pipeline_stream0': [16, 14, 15, 13, 17, 14, 16, 12, 15, 14],
+            'pipeline_stream1': [15] * 10,
+        }
+        meta = {
+            'pipeline_stream0': {'camera': 'cam1', 'workload': 'wl'},
+            'pipeline_stream1': {'camera': 'cam2', 'workload': 'wl'},
+        }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_stream_density_report(
+                18, stream_fps, targets, pass_marks, 100, 2, 2, 0.95,
+                meta, 10, samples)
+        report = output.getvalue()
+
+        self.assertIn('Lanes sustained          18', report)
+        self.assertIn('Streams sustained        2', report)
+        header = next(line for line in report.splitlines()
+                      if line.startswith('stream'))
+        for column in ('target', 'pass mark', 'p90',
+                       'seconds below pass mark', 'result'):
+            self.assertIn(column, header)
+        rows = {line.split()[0]: line.split() for line in report.splitlines()
+                if line.startswith('pipeline_stream')}
+        self.assertEqual(
+            rows['pipeline_stream0'][3:],
+            ['15.00', '14.25', '16.00', '5/10', '(50%)', 'pass'])
+        self.assertEqual(
+            rows['pipeline_stream1'][3:],
+            ['15.00', '14.25', '15.00', '0/10', '(0%)', 'pass'])
+        self.assertIn(
+            'The lowest-throughput stream was pipeline_stream1', report)
+        self.assertIn('targeting 15.00 FPS', report)
+        self.assertIn('p90 of 15.00 FPS', report)
+        self.assertIn('against its 14.25 FPS minimum', report)
+
+    def test_count_valid_streams(self):
         stream_fps_dict = {
             'pipeline_stream0': 15.0,
             'pipeline_stream1': 12.5,
@@ -189,9 +264,7 @@ class Testing(unittest.TestCase):
         }
 
         self.assertEqual(
-            stream_density.count_pipeline_scaled_streams(36, stream_fps_dict),
-            72
-        )
+            stream_density.count_valid_streams(stream_fps_dict), 2)
 
     def test_clean_up_pipeline_logs(self):
         test_results_dir = './test_results_clean'
@@ -347,9 +420,9 @@ class Testing(unittest.TestCase):
                 "expected_meet_target_fps": True,
                 "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
-                    (15.0, 15.0, {"pipeline_stream0": 15.0}),
-                    (10.0, 10.0, {"pipeline_stream0": 10.0}),
-                    (15.0, 15.0, {"pipeline_stream0": 15.0}),
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
                 ]
             },
             # Test case 2: fail at the minimum pipeline count.
@@ -366,8 +439,8 @@ class Testing(unittest.TestCase):
                 "expected_meet_target_fps": False,
                 "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
-                    (10.0, 10.0, {"pipeline_stream0": 10.0}),
-                    (10.0, 10.0, {"pipeline_stream0": 10.0}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                 ]
             },
         ]

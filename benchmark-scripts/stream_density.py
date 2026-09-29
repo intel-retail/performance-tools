@@ -684,18 +684,12 @@ def validate_and_setup_env(env_vars, target_fps_list):
         env_vars[INIT_DURATION_KEY] = "120"
 
 
-def count_pipeline_scaled_streams(num_pipelines, stream_fps_dict):
-    """Return the number of concurrent streams actually in flight.
-
-    The FPS map is keyed by stream index, and each index aggregates the latest
-    num_pipelines log files. The report must therefore scale the number of valid
-    stream indices by the active pipeline count so it matches the returned
-    pipeline-scaled result.
-    """
-    valid_streams = sum(
+def count_valid_streams(stream_fps_dict):
+    """Return the number of concurrent streams with valid FPS data."""
+    # pipeline.sh is generated with every lane's sources, so indices already span all lanes.
+    return sum(
         1 for measured in stream_fps_dict.values() if float(measured) > 0
     )
-    return int(num_pipelines) * valid_streams
 
 
 def print_stream_density_report(num_pipelines, stream_fps_dict,
@@ -704,9 +698,11 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
                                 consecutive_pass_windows,
                                 consecutive_fail_windows,
                                 pass_tolerance_ratio, stream_meta=None,
-                                init_duration_seconds=None):
+                                init_duration_seconds=None,
+                                stream_samples=None):
     """Print the per-stream stream density result summary."""
     stream_meta = stream_meta or {}
+    stream_samples = stream_samples or {}
     binding_name = None
     binding_headroom = None
     for name in stream_fps_dict:
@@ -726,9 +722,8 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
     print("")
     print("Stream density result")
     print("-" * 47)
-    camera_stream_count = count_pipeline_scaled_streams(
-        num_pipelines, stream_fps_dict
-    )
+    camera_stream_count = count_valid_streams(stream_fps_dict)
+    print(f"Lanes sustained          {num_pipelines}")
     print(f"Streams sustained        {camera_stream_count}")
     if init_duration_seconds is not None:
         print(
@@ -750,7 +745,7 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
     print("")
     print(
         f"{'stream':<18}{'camera':<8}{'workload':<50}{'target':>8}{'pass mark':>11}"
-        f"{'measured':>10}{'result':>8}")
+        f"{'p90':>10}{'seconds below pass mark':>26}{'result':>8}")
     for name in sorted(
             stream_fps_dict,
             key=lambda n: int(re.search(r'(\d+)', n).group(1)) if re.search(r'(\d+)', n) else 0):
@@ -761,9 +756,15 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
         pass_mark = pass_thresholds.get(name, 0.0)
         measured = stream_fps_dict.get(name, 0.0)
         result = "pass" if measured >= pass_mark else "fail"
+        samples = stream_samples.get(name, [])
+        if samples:
+            below = sum(1 for fps in samples if fps < pass_mark)
+            below_text = f"{below}/{len(samples)} ({below / len(samples) * 100:.0f}%)"
+        else:
+            below_text = "-"
         print(
             f"{name:<18}{camera:<8}{workload:<50}{target:>8.2f}{pass_mark:>11.2f}"
-            f"{measured:>10.2f}{result:>8}")
+            f"{measured:>10.2f}{below_text:>26}{result:>8}")
     print("")
     print(
         f"Result: {'Pass' if overall_pass else 'Fail'} - "
@@ -794,7 +795,7 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
             f"seconds each. "
             f"{targets_clause} The {stream_descriptor} was {binding_name} "
             f"({binding_camera}{workload_clause}), targeting {bt:.2f} FPS and "
-            f"measuring {bm:.2f} FPS against its {bp:.2f} FPS minimum, leaving "
+            f"with a p90 of {bm:.2f} FPS against its {bp:.2f} FPS minimum, leaving "
             f"{absolute_headroom:.2f} FPS "
             f"({relative_headroom:.1f}% relative headroom).")
 
@@ -924,13 +925,11 @@ def run_pipeline_iterations(
             f"INFO: SWEEPING-STOP (Measurement Window Stop): "
             f"{time.strftime('%Y-%m-%dT%H:%M:%S')}")
         # --- Calculate FPS and latency metrics ---
-        total_fps, min_p90_across_streams, stream_fps_dict = calculate_multi_stream_fps(
+        total_fps, min_p90_across_streams, stream_fps_dict, stream_samples_dict = calculate_multi_stream_fps(
             num_pipelines, results_dir, container_name, env_vars,
             start_offsets=window_start_offsets,
             end_offsets=window_end_offsets)
-        streams_sustained = count_pipeline_scaled_streams(
-            num_pipelines, stream_fps_dict
-        )
+        streams_sustained = count_valid_streams(stream_fps_dict)
 
         print('container name:', container_name)
         print('Total FPS:', total_fps)
@@ -1037,7 +1036,7 @@ def run_pipeline_iterations(
                         pass_thresholds, measurement_window_seconds,
                         consecutive_pass_windows, consecutive_fail_windows,
                         pass_tolerance_ratio, stream_camera_meta,
-                        INIT_DURATION)
+                        INIT_DURATION, stream_samples_dict)
                 else:
                     increments = 0
                     print(
@@ -1066,7 +1065,7 @@ def run_pipeline_iterations(
                     pass_thresholds, measurement_window_seconds,
                     consecutive_pass_windows, consecutive_fail_windows,
                     pass_tolerance_ratio, stream_camera_meta,
-                    INIT_DURATION)
+                    INIT_DURATION, stream_samples_dict)
                 meet_target_fps = False
                 break
             else:
@@ -1226,6 +1225,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
         total_fps: sum of per-stream average FPS (reporting)
         min_p90_across_streams: minimum p90 across all streams (decision)
         stream_fps_dict: stream -> minimum p90 FPS across matching files
+        stream_samples_dict: stream -> FPS samples from the file that gave that p90
     """
 
     stream_count = get_pipeline_stream_count()
@@ -1233,6 +1233,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
     # --- Initialize accumulators ---
     total_fps = 0.0
     stream_fps_dict = {}
+    stream_samples_dict = {}
 
     # --- Loop over all streams ---
     for idx in range(stream_count):
@@ -1257,6 +1258,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
         stream_fps_sum = 0.0
         stream_sample_count = 0
         stream_min_p90 = None
+        stream_min_p90_samples = []
 
         for pipeline_file in latest_pipeline_logs:
             print(f"DEBUG: Processing file: {pipeline_file}")
@@ -1281,6 +1283,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
                 stream_fps_p90 = sorted_fps[p90_idx]
                 if stream_min_p90 is None or stream_fps_p90 < stream_min_p90:
                     stream_min_p90 = stream_fps_p90
+                    stream_min_p90_samples = measurement_fps
 
                 if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
                     print(f"INFO: P90 FPS for {pipeline_file}: {stream_fps_p90} (samples={len(measurement_fps)})")
@@ -1295,6 +1298,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
             report_stream_avg = stream_fps_sum / stream_sample_count
             total_fps += report_stream_avg
             stream_fps_dict[f'pipeline_stream{idx}'] = round(stream_min_p90, 2)
+            stream_samples_dict[f'pipeline_stream{idx}'] = stream_min_p90_samples
         else:
             stream_fps_dict[f'pipeline_stream{idx}'] = 0.0
             print(f"WARN: No valid FPS data for stream index {idx}")
@@ -1305,7 +1309,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
     ]
     min_p90_across_streams = min(decision_stream_p90) if decision_stream_p90 else 0.0
 
-    return total_fps, min_p90_across_streams, stream_fps_dict
+    return total_fps, min_p90_across_streams, stream_fps_dict, stream_samples_dict
 
 
 def get_pipeline_stream_count(base_dir=None):
