@@ -31,7 +31,7 @@ DEFAULT_CONSECUTIVE_PASS_WINDOWS = 2
 PASS_TOLERANCE_RATIO_KEY = "PASS_TOLERANCE_RATIO"
 DEFAULT_PASS_TOLERANCE_RATIO = 0.95
 MEASUREMENT_WINDOW_SECONDS_KEY = "MEASUREMENT_WINDOW_SECONDS"
-DEFAULT_MEASUREMENT_WINDOW_SECONDS = 30
+DEFAULT_MEASUREMENT_WINDOW_SECONDS = 100
 CAMERA_STREAM_KEY = "CAMERA_STREAM"
 
 
@@ -681,7 +681,7 @@ def validate_and_setup_env(env_vars, target_fps_list):
                 'ERROR: pass tolerance ratio should be in (0, 1]')
 
     if not is_env_non_empty(env_vars, INIT_DURATION_KEY):
-        env_vars[INIT_DURATION_KEY] = "120"
+        env_vars[INIT_DURATION_KEY] = "10"
 
 
 def count_valid_streams(stream_fps_dict):

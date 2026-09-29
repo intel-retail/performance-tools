@@ -306,7 +306,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [20.0],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 2: Missing RESULTS_DIR_KEY in env_vars
@@ -324,7 +324,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [DEFAULT_TARGET_FPS],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 4: Negative target_fps value in target_fps_list
@@ -335,7 +335,7 @@ class Testing(unittest.TestCase):
                 "exception_type": ArgumentError,
             },
             # Test case 5: Missing INIT_DURATION_KEY in env_vars-
-            # should default to "120"
+            # should default to "10"
             {
                 "env_vars": {RESULTS_DIR_KEY: "/some/path"},
                 "target_fps_list": [20.0],
@@ -343,7 +343,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [20.0],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 6: PIPELINE_INCR_KEY <= 0 (should raise exception)
