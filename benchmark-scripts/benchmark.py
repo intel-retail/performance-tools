@@ -73,10 +73,10 @@ def parse_args(print=False):
                             help='time in seconds, not needed when ' +
                                  '--target_fps is specified')  
 
-    parser.add_argument('--init_duration', type=int, default=20,
+    parser.add_argument('--init_duration', type=int, default=10,
                         help='initial time in seconds before ' +
                              'starting metric data collection')
-    parser.add_argument('--measurement_window_seconds', type=int, default=30,
+    parser.add_argument('--measurement_window_seconds', type=int, default=100,
                         help='duration in seconds to collect FPS samples ' +
                              'after INIT_DURATION for the stream density ' +
                              'pass/fail decision')
