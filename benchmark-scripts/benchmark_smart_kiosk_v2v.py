@@ -513,6 +513,17 @@ class SmartKioskV2VBenchmark:
                 explicit_end_mark=explicit_end_mark,
             )
 
+            measured_run_ended_ms = int(time.time() * 1000)
+            # The hardware counters in ./metrics/ cover the collector's whole
+            # lifetime -- image pulls, the health wait, the warmup -- so an
+            # average taken over the raw files describes a mostly-idle stack
+            # rather than the measured turns. Record the window so the
+            # application side can trim them before consolidating
+            # (voice-enabled-interactions PR #112 review, item 18).
+            self.write_measured_window(
+                measured_run_started_ms, measured_run_ended_ms
+            )
+
             vlm = self.collect_vlm_logger_metrics(since_ms=measured_run_started_ms)
             report = self.collect_benchmark_report(label)
 
@@ -544,6 +555,35 @@ class SmartKioskV2VBenchmark:
             # subsequent writes vanishing into an unlinked inode.
             if measured_run_started_ms is not None:
                 self.prune_warmup_from_vlm_logs(measured_run_started_ms)
+
+    def write_measured_window(self, start_ms: int, end_ms: int) -> None:
+        """Record the epoch-ms span the measured turns ran over.
+
+        Consumed by the application's scripts/trim_metrics_to_window.py so the
+        CPU/GPU/NPU counters can be narrowed to the measured turns instead of
+        being averaged over the collector's entire lifetime.
+
+        Args:
+            start_ms: Epoch ms the measured run started.
+            end_ms: Epoch ms the measured run finished.
+        """
+        path = os.path.join(self.results_dir, "measured_window.json")
+        try:
+            with open(path, "w") as f:
+                json.dump(
+                    {
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "duration_s": round((end_ms - start_ms) / 1000, 1),
+                    },
+                    f,
+                    indent=2,
+                )
+            print(f"Wrote {path}")
+        except (IOError, OSError) as e:
+            # Best-effort: without this the counters stay un-trimmed, which is
+            # the old behaviour, not a failed run.
+            print(f"Warning: could not write {path}: {e}")
 
     def prune_warmup_from_vlm_logs(self, since_ms: int) -> None:
         """Drop pre-measurement events from the emitted vlm metrics logs.
