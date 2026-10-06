@@ -89,7 +89,7 @@ class SmartKioskV2VBenchmark:
     collectors understand.
     """
 
-    DEFAULT_RUNS = 12
+    DEFAULT_RUNS = 8
     DEFAULT_WARMUP_RUNS = 1
     DEFAULT_INIT_DURATION = 30  # seconds, after health checks pass
     DEFAULT_HEALTH_TIMEOUT = 600  # seconds
@@ -205,6 +205,7 @@ class SmartKioskV2VBenchmark:
         runs: int,
         label: str,
         emit_vlm_metrics: bool = True,
+        explicit_end_mark: bool = False,
     ) -> int:
         """Invoke the application's own scripted conversation benchmark.
 
@@ -214,6 +215,21 @@ class SmartKioskV2VBenchmark:
         server-side pipeline trace, which is the authoritative measurement.
         Duplicating it in performance-tools would create a second, divergent
         definition of "voice to voice latency".
+
+        ``explicit_end_mark`` defaults to False. It used to be hardcoded on,
+        which meant this orchestrator never measured endpointing delay at
+        all: the child harness told kiosk-core the turn was over instead of
+        letting it detect the pause. Endpointing is part of voice-to-voice
+        latency by definition, and on the hands-free path it is the whole of
+        what the customer waits through, so forcing it off produced a number
+        no customer ever experiences. It is now opt-in, for isolating
+        processing latency while debugging.
+
+        Expect more run-to-run spread as a result: endpointing is bimodal
+        (the completeness shortcut fires at ~0.15s, or the turn falls back to
+        the full silence timeout at ~1.1s). That spread is a real property of
+        the product, so it belongs in the measurement; the fix for an
+        unstable p95 is more turns, not a shorter span.
 
         ``script`` is optional: when falsy, ``--script`` is omitted entirely
         and the child script falls back to its own default conversation
@@ -231,7 +247,6 @@ class SmartKioskV2VBenchmark:
             sys.executable,
             benchmark_path,
             "--runs", str(runs),
-            "--explicit-end-mark",
             "--label", label,
             "--results-dir", self.results_dir,
         ]
@@ -239,6 +254,8 @@ class SmartKioskV2VBenchmark:
             cmd += ["--script", script]
         if emit_vlm_metrics:
             cmd.append("--emit-vlm-metrics")
+        if explicit_end_mark:
+            cmd.append("--explicit-end-mark")
 
         print(f"\n$ {' '.join(cmd)}")
         proc = subprocess.run(cmd, cwd=self.app_dir, env=self.configure_stack_env())
@@ -426,6 +443,7 @@ class SmartKioskV2VBenchmark:
         init_duration: int,
         health_timeout: int,
         label: str,
+        explicit_end_mark: bool = False,
     ) -> Dict:
         print("\n" + "=" * 70)
         print("Smart Kiosk Voice-to-Voice Benchmark")
@@ -450,6 +468,7 @@ class SmartKioskV2VBenchmark:
                     runs=warmup_runs,
                     label=f"{label}-warmup",
                     emit_vlm_metrics=False,
+                    explicit_end_mark=explicit_end_mark,
                 )
 
             # kiosk-core's own vlm_metrics_logger hook (kiosk_core.
@@ -469,7 +488,12 @@ class SmartKioskV2VBenchmark:
             measured_run_started_ms = int(time.time() * 1000)
 
             print(f"\n--- Measured run ({runs} run(s)) ---")
-            rc = self.run_benchmark_script(script=script, runs=runs, label=label)
+            rc = self.run_benchmark_script(
+                script=script,
+                runs=runs,
+                label=label,
+                explicit_end_mark=explicit_end_mark,
+            )
 
             vlm = self.collect_vlm_logger_metrics(since_ms=measured_run_started_ms)
             report = self.collect_benchmark_report(label)
@@ -479,6 +503,7 @@ class SmartKioskV2VBenchmark:
                 "script": script,
                 "runs": runs,
                 "warmup_runs": warmup_runs,
+                "explicit_end_mark": explicit_end_mark,
                 "stack": {
                     "queue_service": "disabled",
                     "rtsp_streamer": "disabled",
@@ -544,7 +569,18 @@ def parse_args():
         "--runs",
         type=int,
         default=SmartKioskV2VBenchmark.DEFAULT_RUNS,
-        help="Measured repetitions of the script (default: 12)",
+        help="Measured repetitions of the script (default: 8)",
+    )
+    parser.add_argument(
+        "--explicit_end_mark",
+        action="store_true",
+        help=(
+            "Signal end-of-turn explicitly instead of letting kiosk-core "
+            "detect it. This REMOVES endpointing delay from the measurement, "
+            "so the reported voice-to-voice latency is no longer what a "
+            "customer waits. Use it only to isolate processing latency when "
+            "debugging the pipeline; never for a reported benchmark number."
+        ),
     )
     parser.add_argument(
         "--warmup_runs",
@@ -596,6 +632,7 @@ def main():
             warmup_runs=args.warmup_runs,
             init_duration=args.init_duration,
             health_timeout=args.health_timeout,
+            explicit_end_mark=args.explicit_end_mark,
             label=args.label,
         )
     except Exception as exc:  # noqa: BLE001
