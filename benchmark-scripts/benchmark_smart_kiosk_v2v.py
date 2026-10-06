@@ -74,6 +74,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from typing import Dict, List, Optional
 
 
@@ -306,8 +307,15 @@ class SmartKioskV2VBenchmark:
             print(f"No vlm_metrics_logger files found in {self.results_dir}")
             return metrics
 
-        start_times: Dict[str, int] = {}
-        end_times: Dict[str, int] = {}
+        # Events per id, paired as a stack rather than stored one-per-id.
+        # kiosk-core stamps every turn with the same stream id (see
+        # kiosk_core.config.VLM_METRICS_STREAM_ID) so that the downstream
+        # consolidator produces one aggregate row instead of one row per turn.
+        # Keying "{id: timestamp}" here would therefore keep only the last
+        # turn and report a single transaction for the whole run. Sorting by
+        # timestamp and popping the most recent unmatched start pairs every
+        # turn correctly, and still works for the older per-turn ids.
+        events: Dict[str, List[Dict]] = defaultdict(list)
 
         for log_file in log_files:
             try:
@@ -318,24 +326,30 @@ class SmartKioskV2VBenchmark:
                         ts_match = re.search(r"timestamp_ms=(\d+)", line)
                         if not (id_match and event_match and ts_match):
                             continue
-                        unique_id = id_match.group(1)
                         event = event_match.group(1)
+                        if event not in ("start", "end"):
+                            continue
                         timestamp = int(ts_match.group(1))
                         if since_ms is not None and timestamp < since_ms:
                             continue
-                        if event == "start":
-                            start_times[unique_id] = timestamp
-                        elif event == "end":
-                            end_times[unique_id] = timestamp
+                        events[id_match.group(1)].append(
+                            {"event": event, "timestamp_ms": timestamp}
+                        )
             except (IOError, OSError) as e:
                 print(f"Warning: could not read {log_file}: {e}")
 
         latencies: List[int] = []
-        for unique_id, start in start_times.items():
-            if unique_id in end_times:
-                latency_ms = end_times[unique_id] - start
-                latencies.append(latency_ms)
-                metrics["transactions"].append({"id": unique_id, "latency_ms": latency_ms})
+        for unique_id, entries in events.items():
+            open_starts: List[int] = []
+            for entry in sorted(entries, key=lambda e: e["timestamp_ms"]):
+                if entry["event"] == "start":
+                    open_starts.append(entry["timestamp_ms"])
+                elif open_starts:
+                    latency_ms = entry["timestamp_ms"] - open_starts.pop()
+                    latencies.append(latency_ms)
+                    metrics["transactions"].append(
+                        {"id": unique_id, "latency_ms": latency_ms}
+                    )
 
         metrics["total_transactions"] = len(latencies)
         if latencies:
@@ -453,6 +467,10 @@ class SmartKioskV2VBenchmark:
         print("=" * 70)
 
         self._clean_previous_metrics()
+        # Bound before start_stack() so the `finally` below can tell "the run
+        # never reached the measured phase" from "it did", without raising a
+        # NameError on top of whatever actually went wrong.
+        measured_run_started_ms = None
         self.start_stack()
 
         try:
@@ -520,6 +538,64 @@ class SmartKioskV2VBenchmark:
             return results
         finally:
             self.stop_stack()
+            # Only safe once the stack is down. kiosk-core holds these files
+            # open through a RotatingFileHandler for the whole run, so they
+            # cannot be rewritten (or removed) while it is alive without its
+            # subsequent writes vanishing into an unlinked inode.
+            if measured_run_started_ms is not None:
+                self.prune_warmup_from_vlm_logs(measured_run_started_ms)
+
+    def prune_warmup_from_vlm_logs(self, since_ms: int) -> None:
+        """Drop pre-measurement events from the emitted vlm metrics logs.
+
+        kiosk-core emits a start/end pair for *every* completed turn --
+        production instrumentation has no concept of a warmup -- so the
+        discarded warmup turns land in the same log file as the measured ones.
+        This script filters them out of its own summary via ``since_ms``, but
+        the downstream ``make consolidate-metrics`` step reads these files
+        directly and had no way to tell the two apart, so warmup turns were
+        averaged into consolidated_metrics.csv (PR #112 review, item 13).
+
+        The unfiltered original is kept alongside with a ``.with-warmup``
+        suffix -- deliberately not ``.txt``, so the consolidator's
+        ``vlm_application_metrics_*.txt`` glob does not pick it back up.
+
+        Args:
+            since_ms: Epoch-ms instant the measured run started. Events
+                stamped before this belong to the warmup.
+        """
+        for log_file in glob.glob(
+            os.path.join(self.results_dir, "vlm_application_metrics_*.txt")
+        ):
+            try:
+                with open(log_file, "r") as f:
+                    lines = f.readlines()
+
+                kept = []
+                dropped = 0
+                for line in lines:
+                    ts_match = re.search(r"timestamp_ms=(\d+)", line)
+                    # Lines without a timestamp are not measurements; keep
+                    # them rather than silently discarding unknown content.
+                    if ts_match and int(ts_match.group(1)) < since_ms:
+                        dropped += 1
+                        continue
+                    kept.append(line)
+
+                if not dropped:
+                    continue
+
+                os.replace(log_file, log_file + ".with-warmup")
+                with open(log_file, "w") as f:
+                    f.writelines(kept)
+                print(
+                    f"Pruned {dropped} warmup event(s) from "
+                    f"{os.path.basename(log_file)} "
+                    f"(original kept as *.txt.with-warmup)"
+                )
+            except (IOError, OSError) as e:
+                # Never fail a completed run over a metrics-tidying step.
+                print(f"Warning: could not prune {log_file}: {e}")
 
     @staticmethod
     def _print_summary(results: Dict) -> None:
