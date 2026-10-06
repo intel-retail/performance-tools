@@ -607,8 +607,9 @@ class PIPELINEFPSExtractor(KPIExtractor):
         cam = re.findall(r'\d+', os.path.basename(log_file_path))
         camera_key = "Camera_{} {}".format(cam[0], AVG_FPS_CONSTANT)
         with open(log_file_path) as f:
-            for line in f:
-              average_fps_list.append(float(line))
+            for row in csv.reader(f):
+                if row and row != ['fps', 'duration_seconds']:
+                    average_fps_list.append(float(row[0]))
 
         if len(average_fps_list) > 0:
             camera_fps[camera_key] = round(mean(average_fps_list), 2)
