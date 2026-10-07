@@ -504,10 +504,10 @@ def extract_fps_samples(file_path, start_offset=0, end_offset=None):
         if not row or row == ['fps', 'duration_seconds']:
             continue
         try:
-            if len(row) not in (1, 2):
+            if len(row) != 2:
                 continue
             fps = float(row[0])
-            seconds = float(row[1]) if len(row) == 2 else 1.0
+            seconds = float(row[1])
             if not math.isfinite(fps) or not math.isfinite(seconds) or fps < 0 or seconds <= 0:
                 continue
             samples.append((fps, seconds))
@@ -518,7 +518,7 @@ def extract_fps_samples(file_path, start_offset=0, end_offset=None):
 
 
 def extract_numeric_fps(file_path, start_offset=0, end_offset=None):
-    """Extract FPS values from legacy logs or FPS/duration rows."""
+    """Extract FPS values from FPS/duration rows."""
     return [fps for fps, _ in extract_fps_samples(file_path, start_offset, end_offset)]
 
 
@@ -795,7 +795,6 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
         if samples:
             sample_pairs = [
                 (float(sample[0]), float(sample[1]))
-                if isinstance(sample, (tuple, list)) else (float(sample), 1.0)
                 for sample in samples
             ]
             fps_values = [fps for fps, _ in sample_pairs]
