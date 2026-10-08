@@ -95,7 +95,7 @@ class WindowsMetricsTesting(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'windows_pcm_raw.log'
             source.write_text(
-                'System,System,Socket 0,Socket 0,Proc Energy (Joules)\n'
+                'System,,Socket 0,,Proc Energy (Joules)\n'
                 'Date,Time,READ,WRITE,SKT0\n'
                 '2026-09-21,10:00:00,1,2,20\n'
                 '2026-09-21,10:00:02,2,3,40\n')
@@ -119,7 +119,6 @@ class WindowsMetricsTesting(unittest.TestCase):
 
     def test_worker_missing_pcm_and_invalid_gpu_sample(self):
         pdh = mock.MagicMock(PDH_FMT_DOUBLE=512)
-        pdh.GetCounterInfo.return_value = (None,) * 6 + ('localized wildcard',)
         pdh.ExpandCounterPath.return_value = [
             r'\GPU Engine(pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D)\Utilization Percentage']
         pdh.GetFormattedCounterValue.side_effect = [RuntimeError('invalid'), (0, 25)]
@@ -134,6 +133,24 @@ class WindowsMetricsTesting(unittest.TestCase):
         self.assertEqual(metrics['GPU_1 GPU Power (W)'], 'NA')
         self.assertEqual(metrics['S0 Power Draw W'], 'NA')
         self.assertEqual(pdh.GetFormattedCounterValue.call_count, 2)
+        pdh.ExpandCounterPath.assert_called_with(
+            r'\GPU Engine(*)\Utilization Percentage')
+        pdh.GetCounterInfo.assert_not_called()
+
+    def test_vanished_gpu_instances_sample_as_idle(self):
+        path = (r'\GPU Engine(pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D)'
+                r'\Utilization Percentage')
+        pdh = mock.MagicMock(PDH_FMT_DOUBLE=512)
+        pdh.ExpandCounterPath.side_effect = [[path], [path], []]
+        pdh.GetFormattedCounterValue.return_value = (0, 40)
+        stop = mock.MagicMock()
+        stop.wait.side_effect = [False, False, False, False, True]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict('sys.modules', {'win32pdh': pdh}), \
+                mock.patch.object(windows_metrics.shutil, 'which', return_value=None):
+            windows_metrics.collect(directory, stop)
+            metrics = json.loads((Path(directory) / 'windows_metrics.json').read_text())['metrics']
+        self.assertEqual(metrics['GPU_1 Render/3D[RCS] Utilization %'], 20)
 
     def test_compose_lifecycle(self):
         with mock.patch.object(benchmark, 'windows_collector') as collector, \

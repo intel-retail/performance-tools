@@ -98,6 +98,12 @@ def read_pcm(path):
     with Path(path).open(encoding='utf-8-sig', newline='') as source:
         rows = csv.reader(source)
         groups = next(rows, [])
+        # PCM labels a group once and leaves the remaining cells of it blank.
+        current_group = ''
+        for index, group in enumerate(groups):
+            if group.strip():
+                current_group = group.strip()
+            groups[index] = current_group
         headers = next(rows, [])
         if headers[:2] != ['Date', 'Time']:
             return {}
@@ -144,6 +150,7 @@ def collect(directory, stop, init_duration=0, pcm_exe=None,
     directory = Path(directory)
     metrics = blank_metrics()
     adapters, samples = {}, defaultdict(list)
+    observed = set()
     query, pcm, pcm_log = None, None, None
     power_reader = None
     try:
@@ -166,7 +173,7 @@ def collect(directory, stop, init_duration=0, pcm_exe=None,
             query = win32pdh.OpenQuery()
             counter = win32pdh.AddEnglishCounter(
                 query, r'\GPU Engine(*)\Utilization Percentage')
-            counter_path = win32pdh.GetCounterInfo(counter, False)[6]
+            counter_path = r'\GPU Engine(*)\Utilization Percentage'
             win32pdh.RemoveCounter(counter)
             counters = {}
         except Exception as error:
@@ -210,9 +217,13 @@ def collect(directory, stop, init_duration=0, pcm_exe=None,
                     except Exception:
                         continue
                 current = gpu_sample(instances)
+                # Vanished instances mean the engine went idle, not missing data.
+                for adapter, field in observed - current.keys():
+                    samples[f'GPU_{adapters[adapter]} {field}'].append(0.0)
                 for (adapter, field), value in current.items():
                     if adapter not in adapters:
                         adapters[adapter] = len(adapters) + 1
+                    observed.add((adapter, field))
                     samples[f'GPU_{adapters[adapter]} {field}'].append(value)
             except Exception as error:
                 print(f'WARN: GPU sample unavailable: {error}', flush=True)
