@@ -869,6 +869,7 @@ if __name__ == '__main__':
 
     root_directory = args['root_directory'][0]
     output = args['output'][0]
+    wsl2 = os.environ.get('WSL2', '').lower() == 'true'
 
     n = 0
     df = pd.DataFrame()
@@ -876,6 +877,10 @@ if __name__ == '__main__':
     all_channel_medians = []  # Collect all channel medians from all files
     
     for kpiExtractor in KPIExtractor_OPTION:
+        if wsl2 and KPIExtractor_OPTION[kpiExtractor] in (
+                NPUUsageExtractor, PCMExtractor, MemBandwidthExtractor,
+                PowerUsageExtractor, QMASSAGPUUsageExtractor, XPUMUsageExtractor):
+            continue
         fileFound = False
         for dirpath, dirname, filename in os.walk(root_directory):
             for file in filename:
@@ -900,6 +905,32 @@ if __name__ == '__main__':
         
         full_kpi_dict["Overall Latency (ms)"] = round(overall_median, 3)
        
+    if wsl2:
+        from windows_metrics import blank_metrics
+        full_kpi_dict.update(blank_metrics())
+        full_kpi_dict[AVG_NPU_USAGE_CONSTANT] = 'NA'
+        windows_metrics_path = pathlib.Path(root_directory) / 'windows_metrics.json'
+        if windows_metrics_path.is_file():
+            try:
+                with windows_metrics_path.open(encoding='utf-8-sig') as windows_file:
+                    windows_metrics = json.load(windows_file)['metrics']
+                if not isinstance(windows_metrics, dict):
+                    raise ValueError('metrics must be an object')
+                allowed_metric = re.compile(
+                    r'(?:GPU_\d+ (?:Compute\[CCS\] Utilization %|'
+                    r'Render/3D\[RCS\] Utilization %|Video\[VCS\] Utilization %|'
+                    r'VideoEnhance\[VECS\] Utilization %|Blitter Copy Engine %|'
+                    r'GPU Power \(W\))|S\d+ (?:Power Draw W|Memory Bandwidth Usage MB/s))')
+                for key, value in windows_metrics.items():
+                    if not allowed_metric.fullmatch(key):
+                        continue
+                    if value == 'NA':
+                        full_kpi_dict[key] = value
+                    elif type(value) in (int, float) and np.isfinite(value) and value >= 0:
+                        full_kpi_dict[key] = round(value, 2)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f'WARN: Windows hardware metrics unavailable: {error}')
+
     # Write out summary csv file from dictionary
     with open(output, 'w') as csv_file:
         writer = csv.writer(csv_file)
