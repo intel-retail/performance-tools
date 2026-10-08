@@ -908,7 +908,7 @@ if __name__ == '__main__':
     if wsl2:
         from windows_metrics import blank_metrics
         full_kpi_dict.update(blank_metrics())
-        full_kpi_dict[AVG_NPU_USAGE_CONSTANT] = '0.00'
+        full_kpi_dict[AVG_NPU_USAGE_CONSTANT] = 'NA'
         windows_metrics_path = pathlib.Path(root_directory) / 'windows_metrics.json'
         if windows_metrics_path.is_file():
             try:
