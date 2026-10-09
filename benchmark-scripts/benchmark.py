@@ -79,7 +79,10 @@ def parse_args(print=False):
     parser.add_argument('--measurement_window_seconds', type=int, default=100,
                         help='duration in seconds to collect FPS samples ' +
                              'after INIT_DURATION for the stream density ' +
-                             'pass/fail decision')
+                             'pass/fail decision; minimum 100, because ' +
+                             'each pipeline log needs 100 samples at about ' +
+                             'one per second and collection extends to at ' +
+                             'most twice this duration')
     # TODO: change target_device to an env variable in docker compose
     try:
         default_target_device = resolve_target_device_default('CPU')
@@ -158,6 +161,37 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
 
 
 
+def print_stream_density_result(status, num_pipelines, streams_sustained,
+                                results_dir):
+    if status == stream_density.STATUS_PASS:
+        print("Result: Pass")
+        print(
+            f"Stream density completed: use case density {num_pipelines} lanes, "
+            f"stream density {streams_sustained} streams. "
+            f"For the detailed report, see {results_dir}/stream_density.log")
+    elif status == stream_density.STATUS_INCONCLUSIVE:
+        print("Result: Inconclusive")
+        print(
+            f"Measurement intervals did not collect "
+            f"{stream_density.MIN_SAMPLES_PER_STREAM} samples from every "
+            f"pipeline log, so they were not used for a pass/fail decision.")
+        if num_pipelines:
+            print(
+                f"Last passing density: use case density {num_pipelines} lanes, "
+                f"stream density {streams_sustained} streams, not confirmed by "
+                f"the run acceptance criterion.")
+        else:
+            print("No measurement interval had passed.")
+        print(
+            f"Per-log sample counts are in {results_dir}/stream_density.log")
+    else:
+        print("Result: Fail")
+        print(
+            "Stream density did not meet the target. Check "
+            f"{results_dir}/stream_density.log and "
+            f"{results_dir}/gst-launch*.log for further analysis.")
+
+
 def main():
     '''
     runs benchmarking using docker compose for the specified pipeline
@@ -232,18 +266,9 @@ def main():
                                                     container_names_list,
                                                     explicit_target_fps)
         for result in results:
-            target_fps, container_name, num_pipelines, met_fps, streams_sustained = result
-            print(f"Result: {'Pass' if met_fps else 'Fail'}")
-            if met_fps:
-                print(
-                    f"Stream density completed: {num_pipelines} pipelines, "
-                    f"{streams_sustained} streams sustained. "
-                    f"For the detailed report, see {results_dir}/stream_density.log")
-            else:
-                print(
-                    f"Stream density did not meet the target. Check "
-                    f"{results_dir}/stream_density.log and "
-                    f"{results_dir}/gst-launch*.log for further analysis.")
+            target_fps, container_name, num_pipelines, status, streams_sustained = result
+            print_stream_density_result(
+                status, num_pipelines, streams_sustained, results_dir)
     elif len(target_fps_list) == 1:
         # single target_fps stream density mode:
         print('starting stream density...')
@@ -258,18 +283,9 @@ def main():
         results = stream_density.run_stream_density(
             env_vars, compose_files, [target_fps_list[0]], [container_name],
             explicit_target_fps)
-        target_fps, container_name, num_pipelines, met_fps, streams_sustained = results[0]
-        print(f"Result: {'Pass' if met_fps else 'Fail'}")
-        if met_fps:
-            print(
-                f"Stream density completed: {num_pipelines} pipelines, "
-                f"{streams_sustained} streams sustained. "
-                f"For the detailed report, see {results_dir}/stream_density.log")
-        else:
-            print(
-                "Stream density did not meet the target. Check "
-                f"{results_dir}/stream_density.log and "
-                f"{results_dir}/gst-launch*.log for further analysis.")
+        target_fps, container_name, num_pipelines, status, streams_sustained = results[0]
+        print_stream_density_result(
+            status, num_pipelines, streams_sustained, results_dir)
     else:
         # regular --pipelines mode:
         stream_density.clean_up_pipeline_logs(results_dir)

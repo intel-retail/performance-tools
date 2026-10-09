@@ -842,7 +842,7 @@ class PCMExtractor(KPIExtractor):
 
 KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "camera":FPSExtractor,
-                       "pipeline":PIPELINEFPSExtractor,
+                       r"^pipeline.*\.log$":PIPELINEFPSExtractor,
                        r"(?:^r).*\.jsonl$": PIPELINLastModifiedExtractor,
                        "gst-launch":PipelineLatencyExtractor,
                        "cpu_usage.log":CPUUsageExtractor,
