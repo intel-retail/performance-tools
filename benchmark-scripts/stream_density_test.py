@@ -94,7 +94,10 @@ class Testing(unittest.TestCase):
             config_path = os.path.join(tmpdir, 'cameras.json')
             manifest_path = os.path.join(tmpdir, 'pipeline_streams.json')
             with open(config_path, 'w') as f:
-                json.dump({'lane_config': {'cameras': cameras}}, f)
+                json.dump({
+                    '_about': {'name': 'Test scenario'},
+                    'lane_config': {'cameras': cameras},
+                }, f)
             with open(manifest_path, 'w') as f:
                 json.dump({'streams': manifest_streams}, f)
             stream_fps_dict = {f'pipeline_stream{i}': 10.0 for i in range(stream_count)}
@@ -141,6 +144,44 @@ class Testing(unittest.TestCase):
             lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
         self.assertEqual([targets[f'pipeline_stream{i}'] for i in range(6)],
                          [15.0, 5.0, 5.0, 15.0, 5.0, 5.0])
+
+    def test_get_camera_config_about_reads_selected_config(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump({'_about': about, 'lane_config': {'cameras': []}}, temp_file)
+            temp_file.flush()
+            config_path = temp_file.name
+
+        try:
+            self.assertEqual(
+                stream_density.get_camera_config_about({'CAMERA_STREAM': config_path}),
+                about)
+        finally:
+            os.remove(config_path)
+
+    def test_print_camera_config_about_shows_selected_config_and_fields(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with patch('stream_density.get_camera_config_about', return_value=about), \
+                patch('builtins.print') as print_line:
+            stream_density.print_camera_config_about(
+                {'CAMERA_STREAM': 'camera_to_workload_test.json'})
+
+        self.assertEqual(print_line.call_args_list[0].args[0],
+                         'Camera config _about (camera_to_workload_test.json):')
+        self.assertEqual(
+            [call.args[0] for call in print_line.call_args_list[1:]],
+            ['Scenario: Test scenario', 'Summary: Test summary',
+             'Cameras: One camera at 15 fps', 'Why run it: Test purpose'])
 
     def test_manifest_log_count_mismatch_raises(self):
         cameras = [{'camera_id': 'cam1', 'fps': 15}]
@@ -479,9 +520,20 @@ class Testing(unittest.TestCase):
                 18, stream_fps, targets, pass_marks, 100, 2, 2, 0.95,
                 meta, 10, samples, 103.4,
                 {'pipeline_stream0_lane1_gst.log': 100,
-                 'pipeline_stream1_lane1_gst.log': 103})
+                 'pipeline_stream1_lane1_gst.log': 103},
+                {
+                    'name': 'Example lane',
+                    'summary': 'Detects and classifies products',
+                    'cameras': 'One camera at 15 fps',
+                    'why_run_it': 'Compares complete product scanning performance',
+                })
         report = output.getvalue()
 
+        self.assertLess(report.index('Scenario: Example lane'),
+                        report.index('Stream density result'))
+        self.assertIn('Summary: Detects and classifies products', report)
+        self.assertIn('Cameras: One camera at 15 fps', report)
+        self.assertIn('Why run it: Compares complete product scanning performance', report)
         self.assertIn('Use case density (lanes) 18', report)
         self.assertIn('Stream density (streams) 2', report)
         self.assertIn('Warmup period            10 s', report)
