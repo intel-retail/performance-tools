@@ -775,6 +775,7 @@ class Testing(unittest.TestCase):
             {
                 "env_vars": {
                     "INIT_DURATION": "10",
+                    "PIPELINE_INC": "1",
                     "CONSECUTIVE_FAIL_WINDOWS": "1",
                 },
                 "compose_files": ["docker-compose.yml"],
@@ -785,6 +786,7 @@ class Testing(unittest.TestCase):
                 "expected_status": stream_density.STATUS_FAIL,
                 "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
                     (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                     (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                 ]
@@ -826,11 +828,18 @@ class Testing(unittest.TestCase):
                     "measurement_window_result",
                     ({}, {}, 100.0,
                      {'pipeline_stream0_lane_gst.log': 100}, True))
-                num_pipelines, status, streams_sustained = (
-                    stream_density.run_pipeline_iterations(
-                        env_vars, compose_files, results_dir,
-                        container_name, target_fps)
-                )
+                about = {
+                    'name': 'Test lane',
+                    'summary': 'Runs a test workload',
+                }
+                with patch('stream_density.get_camera_config_about',
+                           return_value=about), \
+                        patch('stream_density.print_stream_density_report') as report:
+                    num_pipelines, status, streams_sustained = (
+                        stream_density.run_pipeline_iterations(
+                            env_vars, compose_files, results_dir,
+                            container_name, target_fps)
+                    )
 
                 self.assertEqual(
                     num_pipelines, test_case["expected_num_pipelines"])
@@ -842,6 +851,9 @@ class Testing(unittest.TestCase):
                 if "expected_window_calls" in test_case:
                     self.assertEqual(mock_collect_window.call_count,
                                      test_case["expected_window_calls"])
+                if i < 2:
+                    report.assert_called_once()
+                    self.assertEqual(report.call_args.kwargs['about'], about)
 
     def _run_iterations_with_windows(self, window_results, fps_responses):
         env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',

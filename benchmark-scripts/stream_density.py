@@ -1219,7 +1219,8 @@ def run_pipeline_iterations(
                         consecutive_pass_windows, consecutive_fail_windows,
                         pass_tolerance_ratio, stream_camera_meta,
                         INIT_DURATION, stream_samples_dict,
-                        actual_measurement_seconds, sample_counts)
+                        actual_measurement_seconds, sample_counts,
+                        about=get_camera_config_about(env_vars))
                 else:
                     increments = 0
                     print(
@@ -1249,7 +1250,8 @@ def run_pipeline_iterations(
                     consecutive_pass_windows, consecutive_fail_windows,
                     pass_tolerance_ratio, stream_camera_meta,
                     INIT_DURATION, stream_samples_dict,
-                    actual_measurement_seconds, sample_counts)
+                    actual_measurement_seconds, sample_counts,
+                    about=get_camera_config_about(env_vars))
                 meet_target_fps = False
                 break
             else:
