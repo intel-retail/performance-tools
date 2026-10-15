@@ -16,6 +16,7 @@ import psutil
 import json
 import math
 import csv
+from datetime import datetime
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -36,6 +37,7 @@ DEFAULT_MEASUREMENT_WINDOW_SECONDS = 100
 MIN_SAMPLES_PER_STREAM = 100
 MEASUREMENT_SAMPLE_POLL_SECONDS = 1
 MAX_INCONCLUSIVE_RETRIES = 1
+LATENCY_SAMPLES_FILENAME = "stream_density_latency_samples.jsonl"
 STATUS_PASS = "pass"
 STATUS_FAIL = "fail"
 STATUS_INCONCLUSIVE = "inconclusive"
@@ -290,7 +292,7 @@ def get_mean_target_fps(stream_target_fps, fallback_target_fps):
 def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name):
     
     if env_vars.get("OOM_PROTECTION", "1")== "0":
-        print("OOM protection is disabled. Skipping memory measurement.")
+        print("WARN: OOM protection is disabled. Skipping memory measurement.")
         return 0
 
     """
@@ -312,7 +314,7 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
     env_vars["PIPELINE_COUNT"] = "1"
     benchmark.docker_compose_containers(
         "up", compose_files=compose_files, compose_post_args="-d", env_vars=env_vars)
-    print("Waiting for pipeline to stabilize...")
+    print("INFO: Waiting for pipeline to stabilize...")
     time.sleep(10)  # Let it stabilize
 
     # Measure available memory after starting the pipeline
@@ -327,13 +329,13 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
     # Calculate usage in MB
     usage_bytes = before_mem - after_mem
     usage_mb = usage_bytes // (1024 * 1024)
-    print(f"Measured memory usage for one pipeline: {usage_mb} MB")
+    print(f"INFO: Measured memory usage for one pipeline: {usage_mb} MB")
     return usage_mb
 
 def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, env_vars=None):
     
     if env_vars and env_vars.get("OOM_PROTECTION", "1") == "0":
-        print("OOM protection is disabled. Skipping memory check.")
+        print("WARN: OOM protection is disabled. Skipping memory check.")
         return True
 
     """
@@ -369,7 +371,7 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, e
 def monitor_memory_pressure(env_vars=None):
 
     if env_vars and env_vars.get("OOM_PROTECTION", "1") == "0":
-        print("OOM protection is disabled. Skipping memory pressure monitoring.")
+        print("WARN: OOM protection is disabled. Skipping memory pressure monitoring.")
         return False
 
     """
@@ -462,7 +464,7 @@ def clean_up_pipeline_logs(results_dir):
     Args:
         results_dir: directory holding the benchmark results
     '''
-    print('Cleaning logs')
+    print('INFO: Cleaning logs')
     matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log')) \
         + glob.glob(os.path.join(results_dir, 'gst*_*.log')) \
         + glob.glob(os.path.join(results_dir, 'rs*_*.jsonl')) \
@@ -504,12 +506,12 @@ def check_non_empty_result_logs(num_pipelines, results_dir,
               os.path.isfile(file) and os.path.getsize(file) > 0
               for file in matching_files]):
             print(
-                f'found all non-empty log files for container name '
+                f'INFO: found all non-empty log files for container name '
                 f'{container_name}')
             break
         else:
             # some log files still empty or not found, retry it
-            print('still having some missing or empty log files')
+            print('INFO: still having some missing or empty log files')
             retry += 1
             time.sleep(1)
 
@@ -980,7 +982,7 @@ def run_pipeline_iterations(
         
         if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb, env_vars=env_vars):
             print(
-                f"Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
+                f"INFO: Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
                 f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
             )
             num_pipelines = num_pipelines - increments
@@ -989,18 +991,18 @@ def run_pipeline_iterations(
             return num_pipelines, STATUS_FAIL, streams_sustained
 
         # Bring down previous iteration's containers before starting new ones
-        print("Stopping previous containers before scaling...")
+        print("INFO: Stopping previous containers before scaling...")
         benchmark.docker_compose_containers(
             "down", compose_files=compose_files,
             compose_post_args="-t 30 --volumes --remove-orphans", env_vars=env_vars)
         time.sleep(15)  # Allow kernel to reclaim cgroup memory and shared memory
 
         env_vars["PIPELINE_COUNT"] = str(num_pipelines)
-        print(f"Starting num. of pipelines: {num_pipelines}")
+        print(f"INFO: Starting num. of pipelines: {num_pipelines}")
         benchmark.docker_compose_containers(
             "up", compose_files=compose_files,
             compose_post_args="-d", env_vars=env_vars)
-        print(f"waiting for warmup period ({INIT_DURATION} s)...")
+        print(f"INFO: waiting for warmup period ({INIT_DURATION} s)...")
         time.sleep(INIT_DURATION)
         
         # note: before reading the pipeline log files
@@ -1031,7 +1033,7 @@ def run_pipeline_iterations(
             if enough_samples:
                 break
             print(
-                "INCONCLUSIVE: Measurement interval did not collect "
+                "INFO: INCONCLUSIVE: Measurement interval did not collect "
                 f"{MIN_SAMPLES_PER_STREAM} samples from every pipeline log "
                 f"after {actual_measurement_seconds:.1f} s "
                 f"(limit {measurement_window_seconds * 2} s).")
@@ -1039,12 +1041,12 @@ def run_pipeline_iterations(
                 print(f"  {os.path.basename(log_file)}: {count} samples")
             if inconclusive_retries >= MAX_INCONCLUSIVE_RETRIES:
                 last_passing_text = (
-                    f"Last passing density: {last_passing_pipelines} lane(s) "
+                    f"INFO: Last passing density: {last_passing_pipelines} lane(s) "
                     f"({last_passing_streams} streams), not confirmed by the run "
                     f"acceptance criterion."
                     if last_passing_pipelines else "No measurement interval had passed.")
                 print(
-                    f"Result: Inconclusive - {inconclusive_retries + 1} consecutive "
+                    f"INFO: Result: Inconclusive - {inconclusive_retries + 1} consecutive "
                     f"measurement intervals at {num_pipelines} lane(s) were inconclusive "
                     f"and were not used for a pass/fail decision. {last_passing_text}")
                 return last_passing_pipelines, STATUS_INCONCLUSIVE, last_passing_streams
@@ -1060,20 +1062,11 @@ def run_pipeline_iterations(
             end_offsets=window_end_offsets)
         streams_sustained = count_valid_streams(stream_fps_dict)
 
-        print('container name:', container_name)
-        print('Total FPS:', total_fps)
-        print('stream_fps_dict:', stream_fps_dict)
+        print('INFO: container name:', container_name)
+        print('INFO: Total FPS:', total_fps)
         avg_fps_per_stream = statistics.mean(stream_fps_dict.values()) if stream_fps_dict else 0.0
-        print(f"Averaged FPS per stream (time-weighted): {avg_fps_per_stream} "
+        print(f"INFO: Averaged FPS per stream (time-weighted): {avg_fps_per_stream} "
               f"for {num_pipelines} pipeline(s)")
-        
-        total_pipeline_latency, total_pipeline_latency_per_stream = calculate_pipeline_latency(
-            num_pipelines, results_dir, container_name)
-        print(f"Total Pipeline Latency: {total_pipeline_latency} "
-        f"for {num_pipelines} pipeline(s)")
-        print(f"Total Pipeline Latency per stream: "
-        f"{total_pipeline_latency_per_stream} "
-        f"for {num_pipelines} pipeline(s)")
 
         # --- Decide scaling logic (per-stream thresholds) ---
         stream_target_fps = build_per_stream_target_fps(
@@ -1094,8 +1087,8 @@ def run_pipeline_iterations(
             last_passing_pipelines = num_pipelines
             last_passing_streams = streams_sustained
         if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
-            print('pass_thresholds:', pass_thresholds)
-            print('passing_streams:', passing_streams)
+            print('DEBUG: pass_thresholds:', pass_thresholds)
+            print('DEBUG: passing_streams:', passing_streams)
         if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
             print("INFO: All streams meet target" if all_streams_meet_target else "INFO: Not all streams meet target")
 
@@ -1111,7 +1104,7 @@ def run_pipeline_iterations(
                     conservative_per_stream = min(min_stream_fps, robust_per_stream)
                     average_target_fps = get_mean_target_fps(stream_target_fps, target_fps)
                     if os.getenv("STREAM_DENSITY_DEBUG", "0") == "1":
-                        print('mean target fps:', average_target_fps)
+                        print('DEBUG: mean target fps:', average_target_fps)
                     increments = int(conservative_per_stream / average_target_fps)
                     min_increment = 1
                     max_increment = MAX_GUESS_INCREMENTS
@@ -1120,8 +1113,12 @@ def run_pipeline_iterations(
                     else:
                         increments = min(increments, max_increment)
                 print(
-                    f"✅ All streams meet throughput thresholds {pass_thresholds} "
-                    f"for target FPS map {stream_target_fps}. "
+                    f"DEBUG: "
+                    f"Measured FPS by stream: {stream_fps_dict}; "
+                    f"target FPS map: {stream_target_fps}. "
+                )
+                print(
+                    f"INFO: All streams meet throughput thresholds. "
                     f"Incrementing pipeline no. by {increments}"
                 )
             else:
@@ -1132,15 +1129,22 @@ def run_pipeline_iterations(
                     in_decrement = True
                     fail_window_count = 0
                     print(
-                        f"⚠️ throughput thresholds not met in streams: observed={stream_fps_dict}, "
-                        f"throughput thresholds={pass_thresholds}. "
+                        f"DEBUG: observed={stream_fps_dict}, "
+                        f"target FPS map: {stream_target_fps}. "                        
+                    )
+                    print(
+                        f"INFO: throughput thresholds not met in streams. "
                         f"Observed {consecutive_fail_windows} consecutive "
                         f"below throughput threshold intervals; starting to decrement pipelines by 1..."
                     )
                 else:
                     increments = 0
                     print(
-                        f"INFO: Streams are below throughput threshold ({pass_thresholds}). "
+                        f"DEBUG: Streams are below throughput threshold ({stream_fps_dict}). "
+                        f"target FPS map: {stream_target_fps}. "
+                    )
+                    print(
+                        f"INFO: "
                         f"Fail interval {fail_window_count}/{consecutive_fail_windows}; "
                         f"holding pipeline count at {num_pipelines} for confirmation."
                     )
@@ -1151,15 +1155,32 @@ def run_pipeline_iterations(
                 fail_window_count = 0
                 if pass_window_count >= consecutive_pass_windows:
                     print(
-                        f"✅ Found maximum number of pipelines to reach "
+                        f"DEBUG: Found maximum number of pipelines to reach "
+                        f"Measured FPS by stream: {stream_fps_dict}; "
                         f"target FPS map {stream_target_fps}"
                     )
                     meet_target_fps = True
                     print(
-                        f"🎯 Max stream density achieved for target FPS map "
-                        f"{stream_target_fps} is {num_pipelines}"
+                        f"INFO: Max stream density achieved "
+                        f"is {num_pipelines}"
                     )
                     increments = 0
+                    # Latency uses the same window as the final FPS report.
+                    latency_samples_by_stream = extract_window_latency_samples(
+                        results_dir, container_name,
+                        window_start_offsets, window_end_offsets)
+                    save_window_latency_samples(
+                        results_dir, container_name, num_pipelines,
+                        latency_samples_by_stream,
+                        stream_fps=stream_fps_dict)
+                    latency_sample_count = sum(
+                        len(samples)
+                        for samples in latency_samples_by_stream.values())
+                    print(
+                        f"INFO: Captured {latency_sample_count} per-frame "
+                        f"latency samples across "
+                        f"{len(latency_samples_by_stream)} stream(s) in the "
+                        f"final confirming measurement window.")
                     stream_camera_meta = build_per_stream_camera_meta(
                         stream_fps_dict, env_vars=env_vars)
                     print_stream_density_report(
@@ -1172,7 +1193,7 @@ def run_pipeline_iterations(
                 else:
                     increments = 0
                     print(
-                        f"✅ Target FPS met again. Pass interval "
+                        f"DEBUG: Target FPS met again. Pass interval "
                         f"{pass_window_count}/{consecutive_pass_windows}; "
                         f"holding pipeline count at {num_pipelines} for confirmation."
                     )
@@ -1210,12 +1231,12 @@ def run_pipeline_iterations(
                     print(
                         f"decrementing number of pipelines {num_pipelines} by 1 "
                         f"because streams stayed below throughput thresholds "
-                        f"({pass_thresholds}) for {consecutive_fail_windows} intervals."
+                        f"for {consecutive_fail_windows} intervals."
                     )
                 else:
                     increments = 0
                     print(
-                        f"INFO: Below throughput thresholds ({pass_thresholds}). "
+                        f"INFO: Below throughput thresholds. "
                         f"Fail interval {fail_window_count}/{consecutive_fail_windows}; "
                         f"holding pipeline count at {num_pipelines} for confirmation."
                     )
@@ -1224,18 +1245,12 @@ def run_pipeline_iterations(
         num_pipelines += increments
         if num_pipelines <= 0:
             num_pipelines = 1
-            print(f"already reached min. pipeline number, stopping...")
+            print(f"INFO: already reached min. pipeline number, stopping...")
             break
 
         
         
-    # end of while
-    #print(
-    #    f"pipeline iterations done for "
-    #    f"container_name: {container_name} "
-    #    f"with input target_fps = {target_fps}"
-    #)
-
+    
     status = STATUS_PASS if meet_target_fps else STATUS_FAIL
     return num_pipelines, status, streams_sustained
 
@@ -1265,6 +1280,11 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     results = []
     validate_and_setup_env(env_vars, target_fps_list)
     results_dir = env_vars[RESULTS_DIR_KEY]
+    if os.path.isdir(results_dir):
+        latency_samples_path = os.path.join(
+            results_dir, LATENCY_SAMPLES_FILENAME)
+        with open(latency_samples_path, "w", encoding="utf-8"):
+            pass
     log_file_path = os.path.join(results_dir, 'stream_density.log')
     orig_stdout = sys.stdout
     orig_stderr = sys.stderr
@@ -1311,7 +1331,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                     time.sleep(15)
 
             # end of for-loop
-            print("stream_density done!")
+            print("INFO: stream_density done!")
     except Exception as ex:
         # Restore default streams before logging the exception, otherwise
         # writing to redirected logger can fail if the file handle is closed.
@@ -1328,7 +1348,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
 
 
 def snapshot_stream_log_offsets(results_dir, container_name):
-    """Record current end-of-file byte offsets for the run's stream logs."""
+    """Record offsets for FPS and latency logs at a measurement boundary."""
     offsets = {}
     stream_count = get_pipeline_stream_count()
     for idx in range(stream_count):
@@ -1340,7 +1360,111 @@ def snapshot_stream_log_offsets(results_dir, container_name):
                 offsets[log_file] = os.path.getsize(log_file)
             except OSError:
                 offsets[log_file] = 0
+    latency_pattern = os.path.join(
+        results_dir, f'gst-launch*_{container_name}*.log')
+    for log_file in filter_logs_for_current_timestamp(
+            glob.glob(latency_pattern)):
+        try:
+            offsets[log_file] = os.path.getsize(log_file)
+        except OSError:
+            offsets[log_file] = 0
     return offsets
+
+
+def _read_complete_log_lines(log_file, start_offset, end_offset):
+    """Read complete newline-terminated records from a byte-offset window."""
+    if end_offset <= start_offset:
+        return []
+
+    with open(log_file, "rb") as fh:
+        if start_offset:
+            fh.seek(start_offset - 1)
+            starts_at_line_boundary = fh.read(1) == b"\n"
+        else:
+            starts_at_line_boundary = True
+        fh.seek(start_offset)
+        data = fh.read(end_offset - start_offset)
+
+    lines = data.splitlines(keepends=True)
+    if not starts_at_line_boundary and lines:
+        lines = lines[1:]
+    return [
+        line.decode("utf-8", errors="replace")
+        for line in lines if line.endswith(b"\n")
+    ]
+
+
+def extract_window_latency_samples(results_dir, container_name,
+                                   start_offsets, end_offsets):
+    """Collect deduplicated per-frame latency samples from the FPS interval."""
+    pattern = os.path.join(
+        results_dir, f'gst-launch*_{container_name}*.log')
+    matching_files = filter_logs_for_current_timestamp(glob.glob(pattern))
+    samples_by_stream = {}
+
+    for log_file in matching_files:
+        end_offset = end_offsets.get(log_file)
+        if end_offset is None:
+            continue
+        start_offset = start_offsets.get(log_file, 0)
+        if end_offset < start_offset:
+            print(
+                f"WARN: Latency log was truncated during the measurement "
+                f"window: {log_file}")
+            continue
+
+        samples_by_channel = {}
+        try:
+            lines = _read_complete_log_lines(
+                log_file, start_offset, end_offset)
+        except OSError as error:
+            print(f"WARN: Could not read latency samples from {log_file}: {error}")
+            continue
+
+        for line in lines:
+            if "latency_tracer_pipeline" not in line:
+                continue
+            latency_match = re.search(
+                r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
+            source_match = re.search(
+                r'source_name=\(string\)([^,\s]+)', line)
+            sink_match = re.search(
+                r'sink_name=\(string\)([^,\s]+)', line)
+            frame_match = re.search(r'frame_num=\(uint\)(\d+)', line)
+            if not (latency_match and source_match and sink_match and frame_match):
+                continue
+
+            latency_value = float(latency_match.group(1))
+            if not math.isfinite(latency_value) or latency_value < 0:
+                continue
+
+            channel = f"{source_match.group(1)} -> {sink_match.group(1)}"
+            frame_number = int(frame_match.group(1))
+            samples_by_channel.setdefault(channel, {})[frame_number] = latency_value
+
+        for channel, frame_values in samples_by_channel.items():
+            samples_by_stream.setdefault(channel, []).extend(
+                frame_values.values())
+
+    return samples_by_stream
+
+
+def save_window_latency_samples(results_dir, container_name, num_pipelines,
+                                samples_by_stream, stream_fps):
+    """Append raw latency samples and time-weighted per-stream FPS from the
+    final confirming FPS window."""
+    os.makedirs(results_dir, exist_ok=True)
+    output_path = os.path.join(results_dir, LATENCY_SAMPLES_FILENAME)
+    record = {
+        "container_name": container_name,
+        "pipeline_count": num_pipelines,
+        "window_id": datetime.now().astimezone().isoformat(),
+        "stream_fps": dict(stream_fps),
+        "samples_by_stream": samples_by_stream,
+    }
+    with open(output_path, "a", encoding="utf-8") as output_file:
+        json.dump(record, output_file, separators=(",", ":"))
+        output_file.write("\n")
 
 
 def count_measurement_samples(num_pipelines, results_dir, container_name,
@@ -1383,8 +1507,8 @@ def collect_measurement_window(num_pipelines, results_dir, container_name,
     max_extension_seconds = minimum_duration_seconds
     deadline = start_time + minimum_duration_seconds + max_extension_seconds
     print(
-        f"INFO: SWEEPING-START (Measurement Interval Start): "
-        f"{time.strftime('%Y-%m-%dT%H:%M:%S')}")
+        f"INFO: SWEEPING-START: "
+        f"{datetime.now().astimezone().isoformat()}")
 
     while True:
         elapsed = time.monotonic() - start_time
@@ -1406,8 +1530,8 @@ def collect_measurement_window(num_pipelines, results_dir, container_name,
         )
         if enough_samples or elapsed >= deadline - start_time:
             print(
-                f"INFO: SWEEPING-STOP (Measurement Interval Stop): "
-                f"{time.strftime('%Y-%m-%dT%H:%M:%S')}")
+                f"INFO: SWEEPING-STOP: "
+                f"{datetime.now().astimezone().isoformat()}")
             return (start_offsets, end_offsets, elapsed,
                     sample_counts, enough_samples)
 
@@ -1480,7 +1604,7 @@ def calculate_multi_stream_fps(num_pipelines, results_dir, container_name, env_v
                 weighted_frames = sum(fps * seconds for fps, seconds in samples)
                 rate = round(weighted_frames / duration, 6)
                 print(
-                    f"RATE-CALC {os.path.basename(pipeline_file)}: "
+                    f"DEBUG: RATE-CALC {os.path.basename(pipeline_file)}: "
                     f"weighted_frames_estimate={weighted_frames:.6f} "
                     f"total_duration_seconds={duration:.6f} "
                     f"samples={len(samples)} measured_fps={rate:.6f}")

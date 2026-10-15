@@ -19,6 +19,7 @@ from stream_density import (
 import os
 import io
 from contextlib import redirect_stdout
+from datetime import datetime
 
 
 class Testing(unittest.TestCase):
@@ -380,18 +381,31 @@ class Testing(unittest.TestCase):
                 patch('stream_density.collect_measurement_window',
                       return_value=({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)), \
                 patch('stream_density.calculate_multi_stream_fps', side_effect=responses) as calculate, \
-                patch('stream_density.calculate_pipeline_latency', return_value=(0.0, 0.0)), \
+                patch('stream_density.extract_window_latency_samples',
+                      return_value={'cam1 -> sink0': [10.0]}) as extract_latency, \
+                patch('stream_density.save_window_latency_samples') as save_latency, \
                 patch('stream_density.build_per_stream_target_fps',
                       return_value={'pipeline_stream0': 15.0}), \
                 patch('stream_density.build_per_stream_camera_meta', return_value={}), \
                 patch('stream_density.print_stream_density_report') as report:
-            with redirect_stdout(io.StringIO()):
+            output = io.StringIO()
+            with redirect_stdout(output):
                 num_pipelines, passed, _ = stream_density.run_pipeline_iterations(
                     env_vars, ['docker-compose.yml'], '/tmp/results', 'gst', 15.0)
 
         self.assertEqual((num_pipelines, passed), (1, stream_density.STATUS_PASS))
         self.assertEqual(calculate.call_count, 3)
+        # Three windows ran (1 pass, 2 fail, 1 confirm); only the last is used.
+        extract_latency.assert_called_once()
+        save_latency.assert_called_once_with(
+            '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
+            stream_fps={'pipeline_stream0': 15.0})
         self.assertEqual(report.call_args.args[1], {'pipeline_stream0': 15.0})
+        self.assertIn(
+            "Measured FPS by stream: {'pipeline_stream0': 15.0}",
+            output.getvalue())
+        self.assertNotIn("throughput thresholds {'pipeline_stream0': 14.25}",
+                         output.getvalue())
 
     def test_count_measurement_samples_counts_generated_stream_logs_once(self):
         with tempfile.TemporaryDirectory() as test_results_dir, \
@@ -417,8 +431,53 @@ class Testing(unittest.TestCase):
         self.assertEqual(expected_count, 2)
         self.assertEqual(sorted(counts.values()), [99, 100])
 
+    def test_latency_samples_use_the_same_log_offset_window(self):
+        first_line = (
+            "latency_tracer_pipeline, source_name=(string)source0, "
+            "sink_name=(string)sink0, frame_num=(uint)1, "
+            "frame_latency=(double)10.5\n")
+        second_line = (
+            "latency_tracer_pipeline, source_name=(string)source0, "
+            "sink_name=(string)sink0, frame_num=(uint)2, "
+            "frame_latency=(double)20.5\n")
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}):
+            latency_log = os.path.join(
+                results_dir, 'gst-launch_123_gst.log')
+            with open(latency_log, 'w', encoding='utf-8') as file:
+                file.write(first_line + second_line)
+            start_offset = len(first_line.encode("utf-8"))
+            end_offset = os.path.getsize(latency_log)
+
+            samples = stream_density.extract_window_latency_samples(
+                results_dir, 'gst',
+                {latency_log: start_offset},
+                {latency_log: end_offset})
+
+        self.assertEqual(samples, {'source0 -> sink0': [20.5]})
+
+    def test_snapshot_offsets_include_latency_logs(self):
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch('stream_density.get_pipeline_stream_count',
+                      return_value=1), \
+                patch('stream_density.filter_logs_for_current_timestamp',
+                      side_effect=lambda paths: paths):
+            fps_log = os.path.join(
+                results_dir, 'pipeline_stream0_lane_gst.log')
+            latency_log = os.path.join(
+                results_dir, 'gst-launch_123_gst.log')
+            for log_path in (fps_log, latency_log):
+                with open(log_path, 'w', encoding='utf-8') as file:
+                    file.write('sample\n')
+
+            offsets = stream_density.snapshot_stream_log_offsets(
+                results_dir, 'gst')
+
+        self.assertEqual(set(offsets), {fps_log, latency_log})
+
     def test_collect_measurement_window_extends_to_sample_floor(self):
         elapsed = [0.0]
+        output = io.StringIO()
 
         def advance_time(seconds):
             elapsed[0] += seconds
@@ -429,9 +488,18 @@ class Testing(unittest.TestCase):
                 patch('stream_density.snapshot_stream_log_offsets',
                       side_effect=[{}, {'log': 99}, {'log': 100}]), \
                 patch('stream_density.count_measurement_samples',
-                      side_effect=[({'log': 99}, 1), ({'log': 100}, 1)]):
+                      side_effect=[({'log': 99}, 1), ({'log': 100}, 1)]), \
+                redirect_stdout(output):
             result = stream_density.collect_measurement_window(
                 1, '/results', 'gst', minimum_duration_seconds=2)
+
+        for marker in ('SWEEPING-START', 'SWEEPING-STOP'):
+            message = next(line for line in output.getvalue().splitlines()
+                           if marker in line)
+            timestamp = message.rsplit(': ', 1)[1]
+            parsed = datetime.fromisoformat(timestamp)
+            self.assertIsNotNone(parsed.utcoffset())
+            self.assertEqual(parsed.isoformat(), timestamp)
 
         start_offsets, end_offsets, duration, counts, enough_samples = result
         self.assertEqual(start_offsets, {})
@@ -677,8 +745,8 @@ class Testing(unittest.TestCase):
                          {'pipeline_stream0_lane_gst.log': 100}, True))
     @patch('benchmark.docker_compose_containers')
     @patch('stream_density.calculate_multi_stream_fps')
-    @patch('stream_density.calculate_pipeline_latency',
-           return_value=(0.0, 0.0))
+    @patch('stream_density.extract_window_latency_samples', return_value={})
+    @patch('stream_density.save_window_latency_samples')
     @patch('stream_density.snapshot_stream_log_offsets', return_value={})
     @patch('stream_density.check_can_add_pipelines', return_value=True)
     @patch('stream_density.measure_pipeline_memory', return_value=100.0)
@@ -691,7 +759,8 @@ class Testing(unittest.TestCase):
         mock_measure_memory,
         mock_check_can_add,
         mock_snapshot_offsets,
-        mock_calculate_latency,
+        mock_save_latency_samples,
+        mock_extract_latency_samples,
         mock_calculate_fps,
         mock_docker_compose,
         mock_collect_window,
