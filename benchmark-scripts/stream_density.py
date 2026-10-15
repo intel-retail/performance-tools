@@ -283,6 +283,43 @@ def build_per_stream_camera_meta(stream_fps_dict, env_vars=None):
         per_stream_meta[stream_name] = meta
     return per_stream_meta
 
+
+def get_camera_config_about(env_vars=None):
+    """Load the optional scenario description from the selected camera config."""
+    env_vars = env_vars if env_vars is not None else os.environ
+    camera_stream = env_vars.get(CAMERA_STREAM_KEY, "camera_to_workload.json")
+    config_path = camera_stream if os.path.isabs(camera_stream) else os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "configs", camera_stream)
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            about = json.load(f).get("_about", {})
+        return about if isinstance(about, dict) else {}
+    except (IOError, ValueError):
+        return {}
+
+
+def print_camera_config_about(env_vars=None):
+    """Print the selected camera config's scenario description, if present."""
+    env_vars = env_vars if env_vars is not None else os.environ
+    about = get_camera_config_about(env_vars)
+    about_fields = (
+        ("name", "Scenario"),
+        ("summary", "Summary"),
+        ("cameras", "Cameras"),
+        ("why_run_it", "Why run it"),
+    )
+    if not any(about.get(key) for key, _ in about_fields):
+        return
+
+    camera_stream = env_vars.get(CAMERA_STREAM_KEY, "camera_to_workload.json")
+    print(f"Camera config _about ({camera_stream}):")
+    for key, label in about_fields:
+        value = about.get(key)
+        if value:
+            print(f"{label}: {value}")
+
+
 def get_mean_target_fps(stream_target_fps, fallback_target_fps):
     target_fps_values = [float(v) for v in stream_target_fps.values() if float(v) > 0]
     return statistics.mean(target_fps_values) if target_fps_values else float(fallback_target_fps)
@@ -771,7 +808,8 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
                                 init_duration_seconds=None,
                                 stream_samples=None,
                                 actual_measurement_seconds=None,
-                                sample_counts=None):
+                                sample_counts=None,
+                                about=None):
     """Print the per-stream stream density result summary."""
     stream_meta = stream_meta or {}
     stream_samples = stream_samples or {}
@@ -791,6 +829,19 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
         for name in stream_fps_dict
     )
 
+    about = about or {}
+    about_fields = (
+        ("name", "Scenario"),
+        ("summary", "Summary"),
+        ("cameras", "Cameras"),
+        ("why_run_it", "Why run it"),
+    )
+    if any(about.get(key) for key, _ in about_fields):
+        print("")
+        for key, label in about_fields:
+            value = about.get(key)
+            if value:
+                print(f"{label}: {value}")
     print("")
     print("Stream density result")
     print("-" * 47)
@@ -1168,7 +1219,8 @@ def run_pipeline_iterations(
                         consecutive_pass_windows, consecutive_fail_windows,
                         pass_tolerance_ratio, stream_camera_meta,
                         INIT_DURATION, stream_samples_dict,
-                        actual_measurement_seconds, sample_counts)
+                        actual_measurement_seconds, sample_counts,
+                        about=get_camera_config_about(env_vars))
                 else:
                     increments = 0
                     print(
@@ -1198,7 +1250,8 @@ def run_pipeline_iterations(
                     consecutive_pass_windows, consecutive_fail_windows,
                     pass_tolerance_ratio, stream_camera_meta,
                     INIT_DURATION, stream_samples_dict,
-                    actual_measurement_seconds, sample_counts)
+                    actual_measurement_seconds, sample_counts,
+                    about=get_camera_config_about(env_vars))
                 meet_target_fps = False
                 break
             else:
@@ -1266,6 +1319,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     validate_and_setup_env(env_vars, target_fps_list)
     results_dir = env_vars[RESULTS_DIR_KEY]
     log_file_path = os.path.join(results_dir, 'stream_density.log')
+    print_camera_config_about(env_vars)
     orig_stdout = sys.stdout
     orig_stderr = sys.stderr
     try:
@@ -1273,6 +1327,7 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
             logger.reconfigure(line_buffering=True, write_through=True)
             sys.stdout = logger
             sys.stderr = logger
+            print_camera_config_about(env_vars)
 
             # loop through the target_fps list and find out the stream density:
             for target_fps, container_name in zip(
