@@ -15,15 +15,22 @@ from statistics import mean
 
 CALLBACK_MARKER = "WEB_UI_SELECTION "
 SELECTOR_MARKER = "WEB_UI_PRODUCT_SELECTION "
+AD_TRACE_MARKER = "WEB_UI_AD_TRACE "
+AD_SERVED_MARKER = "WEB_UI_AD_SERVED "
+AD_RENDERED_MARKER = "WEB_UI_AD_RENDERED "
+MARKERS = (CALLBACK_MARKER, SELECTOR_MARKER, AD_TRACE_MARKER, AD_SERVED_MARKER, AD_RENDERED_MARKER)
 FIELDS = ("timestamp", "frame_id", "recency_frames", "confidence_threshold",
-          "label_normalization_ms", "recency_filtering_ms", "confidence_gating_ms",
+          "mqtt_to_web_ui_ms", "label_normalization_ms", "recency_filtering_ms", "confidence_gating_ms",
           "callback_total_ms", "product_key_normalization_ms", "csv_lookup_ms",
           "product_deduplication_ms", "selector_total_ms", "candidate_count",
           "total_selection_logic_ms")
+AD_FIELDS = ("timestamp", "ad_id", "frame_id", "item", "path", "queue_wait_ms", "ase_query_ms",
+             "aig_generation_ms", "ad_generation_total_ms", "response_size_kb", "frame_to_ad_ready_ms",
+             "ready_to_served_ms", "browser_fetch_ms", "browser_render_ms", "frame_to_render_ms")
 
 
 def parse_log_line(line):
-    for marker in (CALLBACK_MARKER, SELECTOR_MARKER):
+    for marker in MARKERS:
         if marker in line:
             try:
                 payload = json.loads(line.split(marker, 1)[1])
@@ -42,7 +49,7 @@ def combine_events(events):
             row = {field: payload.get(field) for field in FIELDS}
             row["timestamp"] = timestamp
             frames.append(row)
-        elif frame_id is not None:
+        elif marker == SELECTOR_MARKER and frame_id is not None:
             selections[frame_id] = payload
     for row in frames:
         payload = selections.get(row["frame_id"])
@@ -54,6 +61,28 @@ def combine_events(events):
                 row["callback_total_ms"] + row["selector_total_ms"], 6)
     return frames
 
+
+def combine_ad_events(events):
+    ads = {}
+    served = {}
+    rendered = {}
+    for marker, timestamp, payload in events:
+        ad_id = payload.get("ad_id")
+        if marker == AD_TRACE_MARKER:
+            ads[ad_id] = {field: payload.get(field) for field in AD_FIELDS}
+            ads[ad_id]["timestamp"] = timestamp
+        elif marker == AD_SERVED_MARKER:
+            served.setdefault(ad_id, payload)
+        elif marker == AD_RENDERED_MARKER:
+            rendered.setdefault(ad_id, payload)
+    for ad_id, row in ads.items():
+        row.update({key: value for key, value in served.get(ad_id, {}).items() if key in AD_FIELDS})
+        row.update({key: value for key, value in rendered.get(ad_id, {}).items() if key in AD_FIELDS})
+        parts = [row[key] for key in ("frame_to_ad_ready_ms", "ready_to_served_ms",
+                                      "browser_fetch_ms", "browser_render_ms")]
+        if all(isinstance(part, (int, float)) for part in parts):
+            row["frame_to_render_ms"] = round(sum(parts), 3)
+    return list(ads.values())
 
 def run(duration, output):
     if subprocess.check_output(
@@ -90,6 +119,7 @@ def run(duration, output):
             process.communicate()
 
     frames = combine_events(events)
+    ads = combine_ad_events(events)
     if not frames:
         raise RuntimeError("No WEB_UI_SELECTION frames found; restart Web UI with instrumented code")
     summary = {"timestamp": datetime.now(timezone.utc).isoformat(),
@@ -102,6 +132,11 @@ def run(duration, output):
         if field.endswith("_ms"):
             values = [row[field] for row in frames if isinstance(row[field], (int, float))]
             summary[f"avg_{field}"] = round(mean(values), 6) if values else None
+    summary["ads"] = len(ads)
+    for field in AD_FIELDS:
+        if field.endswith("_ms"):
+            values = [row[field] for row in ads if isinstance(row[field], (int, float))]
+            summary[f"avg_ad_{field}"] = round(mean(values), 3) if values else None
 
     output.mkdir(parents=True, exist_ok=True)
     name = f"web_ui_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -115,13 +150,18 @@ def run(duration, output):
         writer = csv.DictWriter(destination, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(frames)
+    (output / f"{name}_ads.json").write_text(json.dumps(ads, indent=2) + "\n")
+    with (output / f"{name}_ads.csv").open("w", newline="") as destination:
+        writer = csv.DictWriter(destination, fieldnames=AD_FIELDS)
+        writer.writeheader()
+        writer.writerows(ads)
     print(json.dumps(summary, indent=2))
-    print(f"Saved {output / name}.json, .csv, _frames.json and _frames.csv")
+    print(f"Saved {output / name}.json, .csv, _frames.json/.csv and _ads.json/.csv")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--duration", type=int, default=180)
+    parser.add_argument("--duration", type=int, default=300)
     parser.add_argument("--output", type=Path, default=Path("results"))
     options = parser.parse_args()
     if options.duration < 1:

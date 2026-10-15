@@ -5,6 +5,7 @@ import base64
 import csv
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -121,11 +122,12 @@ def run(args):
         time.sleep(benchmark_start + args.duration - time.perf_counter())
     capture_elapsed_ms = round((time.perf_counter() - benchmark_start) * 1000, 3)
     for row in rows:
+        row["device"] = args.device
         row["capture_elapsed_ms"] = capture_elapsed_ms
 
     args.output.mkdir(parents=True, exist_ok=True)
     name = f"aig_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    fields = ("timestamp", "kind", "call", "http_elapsed_ms", "sla_ms", "sla_met",
+    fields = ("timestamp", "kind", "call", "device", "http_elapsed_ms", "sla_ms", "sla_met",
               "response_size_kb", "image_size_kb", "result_count", "workflow_elapsed_ms",
               "capture_elapsed_ms",
               *(f"{stage}_ms" for stage in SEARCH_STAGES + GENERATION_STAGES))
@@ -145,9 +147,9 @@ if __name__ == "__main__":
     parser.add_argument("--query", default="broccoli and carrot")
     parser.add_argument("--description", default="A studio photograph of a freshly brewed cup of coffee on a clean table")
     parser.add_argument("--slogan", default="Fresh coffee")
-    parser.add_argument("--device", choices=("CPU", "GPU", "NPU"), default="GPU")
+    parser.add_argument("--device", choices=("CPU", "GPU"), default="GPU")
     parser.add_argument("--iterations", type=int, default=10)
-    parser.add_argument("--duration", type=int, default=180, help="minimum capture duration in seconds")
+    parser.add_argument("--duration", type=int, default=300, help="minimum capture duration in seconds")
     parser.add_argument("--timeout", type=int, default=400)
     parser.add_argument("--cold-start", action="store_true", help="restart only aig-server before measuring")
     parser.add_argument("--output", type=Path, default=Path("results"))
@@ -156,6 +158,6 @@ if __name__ == "__main__":
         parser.error("iterations and timeout must be positive; duration cannot be negative")
     try:
         run(options)
-    except (requests.RequestException, ValueError, OSError, RuntimeError) as error:
+    except (requests.RequestException, subprocess.CalledProcessError, ValueError, OSError, RuntimeError) as error:
         print(f"AIG benchmark failed: {error}", file=sys.stderr)
         sys.exit(1)

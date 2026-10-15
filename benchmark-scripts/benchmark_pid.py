@@ -72,7 +72,7 @@ def gpu_compute_usage(path):
     return average(samples)
 
 
-def run(duration, output, restart, gpu_metrics=None):
+def run(duration, output, restart, gpu_metrics=None, device="CPU"):
     for container in (SERVICE, BROKER):
         if docker("inspect", "--format", "{{.State.Running}}", container) != "true":
             raise RuntimeError(f"{container} is not running; start the stack with make up")
@@ -151,6 +151,7 @@ def run(duration, output, restart, gpu_metrics=None):
                if isinstance(frame["pipeline_latency_reported"], (int, float))]
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "device": device,
         "duration_seconds": duration,
         "frames": len(frames),
         "fps_dlstreamer": average(log_fps),
@@ -184,15 +185,17 @@ def run(duration, output, restart, gpu_metrics=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--duration", type=int, default=180)
+    parser.add_argument("--duration", type=int, default=300)
     parser.add_argument("--output", type=Path, default=Path("results"))
-    parser.add_argument("--no-restart", action="store_true", help="sample without restarting PID (no startup metric)")
+    parser.add_argument("--device", choices=("CPU", "GPU", "NPU"), default="CPU")
+    parser.add_argument("--no-restart", action="store_true",
+                        help="sample without restarting PID (no startup metric)")
     parser.add_argument("--gpu-metrics", type=Path, help="qmassa parsed JSON from the same measurement window")
     args = parser.parse_args()
     if args.duration < 1:
         parser.error("--duration must be positive")
     try:
-        run(args.duration, args.output, not args.no_restart, args.gpu_metrics)
-    except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError, TypeError) as error:
+        run(args.duration, args.output, not args.no_restart, args.gpu_metrics, args.device)
+    except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
         print(f"PID benchmark failed: {error}", file=sys.stderr)
         sys.exit(1)

@@ -20,7 +20,7 @@ import requests
 
 
 DEFAULT_ASE_URL = "https://localhost:5000/aig-api"
-IMAGE_PATH = Path(__file__).resolve().parents[1] / "web-ui/pre-defined-ads/brocoli_carrot.jpg"
+IMAGE_PATH = Path(__file__).resolve().parents[1] / "../web-ui/pre-defined-ads/brocoli_carrot.jpg"
 
 
 def memory_mib():
