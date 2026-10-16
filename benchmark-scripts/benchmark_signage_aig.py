@@ -1,3 +1,10 @@
+'''
+* Copyright (C) 2026 Intel Corporation.
+*
+* SPDX-License-Identifier: Apache-2.0
+'''
+
+
 """Benchmark ASe search and AIG image generation through the HTTP API."""
 
 import argparse
@@ -103,7 +110,8 @@ def run(args):
               else "TLS verification disabled by --insecure", file=sys.stderr)
     if args.cold_start:
         import subprocess
-        subprocess.run(["docker", "compose", "restart", "aig-server"], check=True)
+        # Restart by container name, not `compose restart`, so the script does not depend on the caller's Compose project.
+        subprocess.run(["docker", "restart", "aig-server"], check=True)
     deadline = time.monotonic() + min(args.timeout, 120)
     while True:
         try:

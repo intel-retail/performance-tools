@@ -1,3 +1,10 @@
+'''
+* Copyright (C) 2026 Intel Corporation.
+*
+* SPDX-License-Identifier: Apache-2.0
+'''
+
+
 """Sample the running PID pipeline through its MQTT output and Docker metrics."""
 
 import argparse
@@ -82,7 +89,8 @@ def run(duration, output, restart, gpu_metrics=None, device="CPU"):
     memory = []
     started_at = None
     if restart:
-        subprocess.run(["docker", "compose", "restart", SERVICE], check=True)
+        # Restart by container name, not `compose restart`, so the script does not depend on the caller's Compose project.
+        subprocess.run(["docker", "restart", SERVICE], check=True)
         started_at = datetime.fromisoformat(
             docker("inspect", "--format", "{{.State.StartedAt}}", SERVICE).replace("Z", "+00:00")
         ).timestamp()
@@ -149,6 +157,8 @@ def run(duration, output, restart, gpu_metrics=None, device="CPU"):
     log_fps = [float(match.group(1)) for line in log_lines if (match := FPS_PATTERN.search(line))]
     latency = [float(frame["pipeline_latency_reported"]) for frame in frames
                if isinstance(frame["pipeline_latency_reported"], (int, float))]
+    # Frame 0 proves the subscription beat the restarted pipeline; without it the startup number would be inflated.
+    captured_opening_frame = frames[0]["frame_id"] == 0
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "device": device,
@@ -164,7 +174,8 @@ def run(duration, output, restart, gpu_metrics=None, device="CPU"):
         "pipeline_latency_reported": average(latency),
         "mqtt_arrival_delay_ms": average([frame["mqtt_arrival_delay_ms"] for frame in frames
                           if frame["mqtt_arrival_delay_ms"] is not None]),
-        "startup_to_first_frame_ms": round((first_frame_at - started_at) * 1000, 3) if started_at else None,
+        "startup_to_first_frame_ms": round((first_frame_at - started_at) * 1000, 3)
+                                     if started_at and captured_opening_frame else None,
         "gpu_compute_percent": gpu_compute_usage(gpu_metrics),
     }
     output.mkdir(parents=True, exist_ok=True)
