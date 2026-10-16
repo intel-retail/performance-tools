@@ -144,8 +144,33 @@ def benchmark(args):
         writer = csv.DictWriter(destination, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    print(json.dumps(rows, indent=2))
-    print(f"Saved {args.output / name}.json and .csv")
+    summary = summarize(rows)
+    (args.output / f"{name}_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    with (args.output / f"{name}_summary.csv").open("w", newline="") as destination:
+        writer = csv.DictWriter(destination, fieldnames=summary.keys())
+        writer.writeheader()
+        writer.writerow(summary)
+    print(json.dumps(summary, indent=2))
+    print(f"Saved {args.output / name}.json, .csv and _summary.json/.csv")
+
+
+def summarize(rows):
+    """Flatten per-size search results into one row; search cost scales with collection size,
+    so sizes stay separate instead of being averaged together."""
+    summary = {"timestamp": datetime.now(timezone.utc).isoformat()}
+    searches = [row for row in rows if row["kind"] == "vector_search"]
+    summary["sizes"] = " ".join(str(row["points"]) for row in searches)
+    summary["queries_per_size"] = searches[0]["queries"] if searches else None
+    for row in searches:
+        for field in ("avg_query_ms", "p95_query_ms", "queries_per_sec", "upsert_ms",
+                      "qdrant_memory_delta_mib"):
+            summary[f"search_{row['points']}_{field}"] = row.get(field)
+    for row in rows:
+        if row["kind"] == "predefined_ad_index":
+            summary["predefined_ad_index_http_ms"] = row.get("index_http_ms")
+            summary["predefined_ad_index_image_kb"] = row.get("image_kb")
+            summary["predefined_ad_index_memory_delta_mib"] = row.get("qdrant_memory_delta_mib")
+    return summary
 
 
 if __name__ == "__main__":

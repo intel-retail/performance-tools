@@ -48,9 +48,9 @@ def consolidate(results):
     web_frames = load(web_path.with_name(web_path.stem + "_frames.json")) if web_path else []
     ads_path = web_path.with_name(web_path.stem + "_ads.json") if web_path else None
     ads = load(ads_path) if ads_path and ads_path.exists() else []
-    aig_path = latest(results, "aig_benchmark_*.json")
+    aig_path = latest(results, "aig_benchmark_*[0-9].json")
     aig = load(aig_path) or []
-    qdrant_path = latest(results, "qdrant_benchmark_*.json")
+    qdrant_path = latest(results, "qdrant_benchmark_*[0-9].json")
     qdrant = load(qdrant_path) or []
 
     def ad_values(field, path=None):
@@ -70,8 +70,15 @@ def consolidate(results):
                         note="Publish and broker delivery combined; DLSPS does not expose publish time"))
         rows.append(row("4. Web UI filtering (callback)", "Web UI", web_path,
                         [frame.get("callback_total_ms") for frame in web_frames]))
-        rows.append(row("4b. Queue wait before selection", "Web UI", web_path, ad_values("queue_wait_ms"),
-                        note="Includes polling and ad cooldown waits"))
+        rows.append(row("4b. Queue wait before ad decision", "Web UI", web_path,
+                [frame.get("queue_wait_ms") for frame in web_frames],
+                note="Candidate enqueue to generator dequeue; excludes cooldown suppression"))
+        rows.append(row("4c. Cooldown remaining at suppression", "Web UI", web_path,
+                [frame.get("cooldown_remaining_ms") for frame in web_frames],
+                note="Remaining cooldown when a candidate is dropped; it is not deferred"))
+        rows.append(row("4d. Cooldown-suppressed candidates", "Web UI", web_path,
+                value=sum(frame.get("cooldown_suppressed") is True for frame in web_frames),
+                note="Candidates dropped during cooldown instead of queued for later"))
         rows.append(row("5. Product selection", "Web UI", web_path,
                         [frame.get("selector_total_ms") for frame in web_frames]))
         rows.append(row("6. ASe query (live)", "Web UI", web_path, ad_values("ase_query_ms")))

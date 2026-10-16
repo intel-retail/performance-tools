@@ -16,13 +16,16 @@ from statistics import mean
 CALLBACK_MARKER = "WEB_UI_SELECTION "
 SELECTOR_MARKER = "WEB_UI_PRODUCT_SELECTION "
 AD_TRACE_MARKER = "WEB_UI_AD_TRACE "
+COOLDOWN_MARKER = "WEB_UI_AD_COOLDOWN "
 AD_SERVED_MARKER = "WEB_UI_AD_SERVED "
 AD_RENDERED_MARKER = "WEB_UI_AD_RENDERED "
-MARKERS = (CALLBACK_MARKER, SELECTOR_MARKER, AD_TRACE_MARKER, AD_SERVED_MARKER, AD_RENDERED_MARKER)
+MARKERS = (CALLBACK_MARKER, SELECTOR_MARKER, AD_TRACE_MARKER, COOLDOWN_MARKER,
+           AD_SERVED_MARKER, AD_RENDERED_MARKER)
 FIELDS = ("timestamp", "frame_id", "recency_frames", "confidence_threshold",
           "mqtt_to_web_ui_ms", "label_normalization_ms", "recency_filtering_ms", "confidence_gating_ms",
           "callback_total_ms", "product_key_normalization_ms", "csv_lookup_ms",
-          "product_deduplication_ms", "selector_total_ms", "candidate_count",
+          "product_deduplication_ms", "selector_total_ms", "candidate_count", "queue_wait_ms",
+          "cooldown_remaining_ms", "cooldown_suppressed",
           "total_selection_logic_ms")
 AD_FIELDS = ("timestamp", "ad_id", "frame_id", "item", "path", "queue_wait_ms", "ase_query_ms",
              "aig_generation_ms", "ad_generation_total_ms", "response_size_kb", "frame_to_ad_ready_ms",
@@ -43,6 +46,8 @@ def parse_log_line(line):
 def combine_events(events):
     frames = []
     selections = {}
+    queue_waits = {}
+    cooldowns = {}
     for marker, timestamp, payload in events:
         frame_id = payload.get("frame_id")
         if marker == CALLBACK_MARKER:
@@ -51,14 +56,25 @@ def combine_events(events):
             frames.append(row)
         elif marker == SELECTOR_MARKER and frame_id is not None:
             selections[frame_id] = payload
+        elif marker == AD_TRACE_MARKER and frame_id is not None:
+            queue_waits[frame_id] = payload.get("queue_wait_ms")
+        elif marker == COOLDOWN_MARKER and frame_id is not None:
+            queue_waits[frame_id] = payload.get("queue_wait_ms")
+            cooldowns[frame_id] = payload
     for row in frames:
-        payload = selections.get(row["frame_id"])
+        frame_id = row["frame_id"]
+        payload = selections.get(frame_id)
         if payload is not None:
             row.update({field: payload.get(field) for field in
                         ("product_key_normalization_ms", "csv_lookup_ms",
                          "product_deduplication_ms", "selector_total_ms", "candidate_count")})
             row["total_selection_logic_ms"] = round(
                 row["callback_total_ms"] + row["selector_total_ms"], 6)
+        row["queue_wait_ms"] = queue_waits.get(frame_id)
+        cooldown = cooldowns.get(frame_id)
+        row["cooldown_suppressed"] = cooldown is not None if frame_id is not None else None
+        if cooldown is not None:
+            row["cooldown_remaining_ms"] = cooldown.get("cooldown_remaining_ms")
     return frames
 
 
@@ -126,6 +142,7 @@ def run(duration, output):
                "capture_seconds": round(time.monotonic() - started, 3),
                "frames": len(frames),
                "frames_selected": sum(row["selector_total_ms"] is not None for row in frames),
+               "cooldown_suppressed_frames": sum(row["cooldown_suppressed"] is True for row in frames),
                "recency_frames": frames[0]["recency_frames"],
                "confidence_threshold": frames[0]["confidence_threshold"]}
     for field in FIELDS:
@@ -137,6 +154,14 @@ def run(duration, output):
         if field.endswith("_ms"):
             values = [row[field] for row in ads if isinstance(row[field], (int, float))]
             summary[f"avg_ad_{field}"] = round(mean(values), 3) if values else None
+    # Predefined ads skip AIG, so a combined average mixes two different pipelines.
+    for path in ("predefined", "dynamic"):
+        subset = [row for row in ads if row.get("path") == path]
+        summary[f"ads_{path}"] = len(subset)
+        for field in AD_FIELDS:
+            if field.endswith("_ms"):
+                values = [row[field] for row in subset if isinstance(row[field], (int, float))]
+                summary[f"avg_{path}_{field}"] = round(mean(values), 3) if values else None
 
     output.mkdir(parents=True, exist_ok=True)
     name = f"web_ui_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

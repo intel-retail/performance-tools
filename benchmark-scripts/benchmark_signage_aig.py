@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import mean
 
 import requests
 
@@ -33,7 +34,7 @@ def parse_server_timing(header):
 
 def request_ad(session, url, payload, kind, call, timeout, cold_start=False):
     start = time.perf_counter()
-    response = session.post(url, json=payload, timeout=timeout)
+    response = session.post(url, json=payload, headers={"X-Benchmark-Timing": "true"}, timeout=timeout)
     elapsed_ms = (time.perf_counter() - start) * 1000
     response.raise_for_status()
     if kind == "predefined":
@@ -63,6 +64,30 @@ def request_ad(session, url, payload, kind, call, timeout, cold_start=False):
         "result_count": result_count,
         **{f"{stage}_ms": timings.get(f"{stage}_ms") for stage in stages},
     }
+
+
+def summarize(rows, device, capture_elapsed_ms):
+    """Average each call type so predefined (ASe) and dynamic (AIG) runs compare directly."""
+    def average(values):
+        values = [value for value in values if isinstance(value, (int, float))]
+        return round(mean(values), 3) if values else None
+
+    summary = {"timestamp": datetime.now(timezone.utc).isoformat(), "device": device,
+               "capture_elapsed_ms": capture_elapsed_ms}
+    for kind, stages in (("predefined", SEARCH_STAGES), ("dynamic", GENERATION_STAGES)):
+        subset = [row for row in rows if row["kind"] == kind]
+        summary[f"{kind}_calls"] = len(subset)
+        summary[f"{kind}_sla_met"] = sum(bool(row["sla_met"]) for row in subset)
+        for field in ("http_elapsed_ms", "response_size_kb", "image_size_kb",
+                      *(f"{stage}_ms" for stage in stages)):
+            summary[f"avg_{kind}_{field}"] = average([row.get(field) for row in subset])
+    # The first dynamic call carries model load, so warm calls are the comparable number.
+    dynamic = [row for row in rows if row["kind"] == "dynamic"]
+    first = [row["http_elapsed_ms"] for row in dynamic if row["call"] == 1]
+    summary["dynamic_first_call_http_elapsed_ms"] = first[0] if first else None
+    summary["avg_dynamic_warm_http_elapsed_ms"] = average(
+        [row["http_elapsed_ms"] for row in dynamic if row["call"] > 1])
+    return summary
 
 
 def run(args):
@@ -136,8 +161,14 @@ def run(args):
         writer = csv.DictWriter(destination, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    print(json.dumps(rows, indent=2))
-    print(f"Saved {args.output / name}.json and .csv")
+    summary = summarize(rows, args.device, capture_elapsed_ms)
+    (args.output / f"{name}_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    with (args.output / f"{name}_summary.csv").open("w", newline="") as destination:
+        writer = csv.DictWriter(destination, fieldnames=summary.keys())
+        writer.writeheader()
+        writer.writerow(summary)
+    print(json.dumps(summary, indent=2))
+    print(f"Saved {args.output / name}.json, .csv and _summary.json/.csv")
 
 
 if __name__ == "__main__":
