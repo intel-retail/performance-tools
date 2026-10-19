@@ -1,8 +1,8 @@
-'''
-* Copyright (C) 2026 Intel Corporation.
-*
-* SPDX-License-Identifier: Apache-2.0
-'''
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
 
 
 """Sample Docker CPU and memory usage for running Compose services."""

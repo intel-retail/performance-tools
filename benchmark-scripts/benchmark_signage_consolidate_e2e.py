@@ -1,8 +1,8 @@
-'''
-* Copyright (C) 2026 Intel Corporation.
-*
-* SPDX-License-Identifier: Apache-2.0
-'''
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
 
 
 """Consolidate PID, Web UI, AIG, Qdrant and host-metrics results into an end-to-end stage table."""
