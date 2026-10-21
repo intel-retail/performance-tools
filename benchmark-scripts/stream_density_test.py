@@ -366,31 +366,42 @@ class Testing(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             stream_density.print_window_stream_summary(
-                4, 2, False,
-                {'pipeline_stream0': 14.0, 'pipeline_stream1': 0.0},
-                {'pipeline_stream0': [(10.0, 1.0)] * 2 + [(15.0, 1.0)] * 8},
-                {'cam1_1 -> fakesink0': [100.0, 200.0]})
+                4, 2, False, 20.0,
+                {'pipeline_stream0': 14.0, 'pipeline_stream1': 6.0},
+                {
+                    'pipeline_stream0': [(10.0, 1.0)] * 2 + [(15.0, 1.0)] * 8,
+                    'pipeline_stream1': [(6.0, 1.0)],
+                },
+                {
+                    'cam1_1 -> fakesink0': [100.0, 200.0],
+                    'cam2_1 -> fakesink0': [0.0, 300.0],
+                })
 
         self.assertIn('Pipelines: 4 | window: 2 | status: fail', output.getvalue())
+        self.assertIn('System throughput: 20.00 FPS', output.getvalue())
         self.assertIn(
             'pipeline_stream0 throughput: 14.00 FPS p10: 10.00 p90: 15.00',
             output.getvalue())
         self.assertIn(
-            'pipeline_stream1 throughput: 0.00 FPS p10: N/A p90: N/A',
+            'pipeline_stream1 throughput: 6.00 FPS p10: 6.00 p90: 6.00',
             output.getvalue())
         self.assertIn(
             'cam1_1 -> fakesink0 latency: p50: 150.00 ms p99: 199.00 ms',
+            output.getvalue())
+        self.assertIn(
+            'System latency: p50: 150.00 ms p99: 297.00 ms',
             output.getvalue())
 
     def test_window_summary_reports_missing_latency_samples(self):
         output = io.StringIO()
         with redirect_stdout(output):
             stream_density.print_window_stream_summary(
-                1, 1, True, {'pipeline_stream0': 15.0},
+                1, 1, True, 15.0, {'pipeline_stream0': 15.0},
                 {'pipeline_stream0': [(15.0, 1.0)]}, {})
 
         self.assertIn('Pipelines: 1 | window: 1 | status: pass', output.getvalue())
-        self.assertIn('Latency: no samples in this window', output.getvalue())
+        self.assertIn('System throughput: 15.00 FPS', output.getvalue())
+        self.assertIn('System latency: no samples in this window', output.getvalue())
 
     def test_sweep_fails_on_weighted_rate_even_when_p90_passes(self):
         responses = [
@@ -432,9 +443,11 @@ class Testing(unittest.TestCase):
         save_latency.assert_called_once_with(
             '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
             stream_fps={'pipeline_stream0': 15.0})
-        self.assertEqual(output.getvalue().count('latency: p50:'), 3)
+        self.assertEqual(output.getvalue().count('System latency: p50:'), 3)
         self.assertIn('Pipelines: 2 | window: 2 | status: fail', output.getvalue())
         self.assertIn('Pipelines: 1 | window: 3 | status: pass', output.getvalue())
+        self.assertEqual(output.getvalue().count('System throughput: 15.00 FPS'), 2)
+        self.assertEqual(output.getvalue().count('System throughput: 14.00 FPS'), 1)
         self.assertEqual(report.call_args.args[1], {'pipeline_stream0': 15.0})
         self.assertIn(
             "Measured FPS by stream: {'pipeline_stream0': 15.0}",

@@ -764,11 +764,21 @@ def count_valid_streams(stream_fps_dict):
     )
 
 
+def _linear_percentile(values, percent):
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * percent / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
 def print_window_stream_summary(num_pipelines, window_number, passed,
-                                stream_fps, stream_samples, latency_samples):
+                                total_fps, stream_fps, stream_samples,
+                                latency_samples):
     print(
         f"INFO: Pipelines: {num_pipelines} | window: {window_number} | "
         f"status: {'pass' if passed else 'fail'}")
+    print(f"  System throughput: {total_fps:.2f} FPS")
     for name in sorted(stream_fps):
         samples = sorted(float(fps) for fps, _ in stream_samples.get(name, []))
         if samples:
@@ -783,19 +793,22 @@ def print_window_stream_summary(num_pipelines, window_number, passed,
     for channel, values in sorted(latency_samples.items()):
         if not values:
             continue
-        ordered = sorted(values)
-
-        def percentile(percent):
-            position = (len(ordered) - 1) * percent / 100
-            lower = math.floor(position)
-            upper = math.ceil(position)
-            return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
         print(
-            f"  {channel} latency: p50: {percentile(50):.2f} ms "
-            f"p99: {percentile(99):.2f} ms")
-    if not any(latency_samples.values()):
-        print("  Latency: no samples in this window")
+            f"  {channel} latency: p50: {_linear_percentile(values, 50):.2f} ms "
+            f"p99: {_linear_percentile(values, 99):.2f} ms")
+    pooled_latency_samples = [
+        value
+        for values in latency_samples.values()
+        for value in values
+        if math.isfinite(float(value)) and float(value) >= 0
+    ]
+    if pooled_latency_samples:
+        print(
+            f"  System latency: p50: "
+            f"{_linear_percentile(pooled_latency_samples, 50):.2f} ms "
+            f"p99: {_linear_percentile(pooled_latency_samples, 99):.2f} ms")
+    else:
+        print("  System latency: no samples in this window")
 
 
 def print_stream_density_report(num_pipelines, stream_fps_dict,
@@ -1126,7 +1139,8 @@ def run_pipeline_iterations(
             window_start_offsets, window_end_offsets)
         print_window_stream_summary(
             num_pipelines, window_number, all_streams_meet_target,
-            stream_fps_dict, stream_samples_dict, latency_samples_by_stream)
+            total_fps, stream_fps_dict, stream_samples_dict,
+            latency_samples_by_stream)
         if all_streams_meet_target:
             last_passing_pipelines = num_pipelines
             last_passing_streams = streams_sustained
