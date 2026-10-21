@@ -362,12 +362,44 @@ class Testing(unittest.TestCase):
         self.assertIn('Result: Fail', report)
         self.assertIn('measuring 14.00 FPS', report)
 
+    def test_window_summary_shows_throughput_and_latency_percentiles(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_window_stream_summary(
+                4, 2, False,
+                {'pipeline_stream0': 14.0, 'pipeline_stream1': 0.0},
+                {'pipeline_stream0': [(10.0, 1.0)] * 2 + [(15.0, 1.0)] * 8},
+                {'cam1_1 -> fakesink0': [100.0, 200.0]})
+
+        self.assertIn('Pipelines: 4 | window: 2 | status: fail', output.getvalue())
+        self.assertIn(
+            'pipeline_stream0 throughput: 14.00 FPS p10: 10.00 p90: 15.00',
+            output.getvalue())
+        self.assertIn(
+            'pipeline_stream1 throughput: 0.00 FPS p10: N/A p90: N/A',
+            output.getvalue())
+        self.assertIn(
+            'cam1_1 -> fakesink0 latency: p50: 150.00 ms p99: 199.00 ms',
+            output.getvalue())
+
+    def test_window_summary_reports_missing_latency_samples(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_window_stream_summary(
+                1, 1, True, {'pipeline_stream0': 15.0},
+                {'pipeline_stream0': [(15.0, 1.0)]}, {})
+
+        self.assertIn('Pipelines: 1 | window: 1 | status: pass', output.getvalue())
+        self.assertIn('Latency: no samples in this window', output.getvalue())
+
     def test_sweep_fails_on_weighted_rate_even_when_p90_passes(self):
         responses = [
-            (15.0, 15.0, {'pipeline_stream0': 15.0}, {'pipeline_stream0': [15.0] * 100}),
+            (15.0, 15.0, {'pipeline_stream0': 15.0},
+             {'pipeline_stream0': [(15.0, 1.0)] * 100}),
             (14.0, 14.0, {'pipeline_stream0': 14.0},
-             {'pipeline_stream0': [10.0] * 20 + [15.0] * 80}),
-            (15.0, 15.0, {'pipeline_stream0': 15.0}, {'pipeline_stream0': [15.0] * 100}),
+             {'pipeline_stream0': [(10.0, 1.0)] * 20 + [(15.0, 1.0)] * 80}),
+            (15.0, 15.0, {'pipeline_stream0': 15.0},
+             {'pipeline_stream0': [(15.0, 1.0)] * 100}),
         ]
         env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',
                     'CONSECUTIVE_FAIL_WINDOWS': '1',
@@ -395,11 +427,14 @@ class Testing(unittest.TestCase):
 
         self.assertEqual((num_pipelines, passed), (1, stream_density.STATUS_PASS))
         self.assertEqual(calculate.call_count, 3)
-        # Three windows ran (1 pass, 2 fail, 1 confirm); only the last is used.
-        extract_latency.assert_called_once()
+        # Three windows ran (1 pass, 2 fail, 1 confirm); only the last is saved.
+        self.assertEqual(extract_latency.call_count, 3)
         save_latency.assert_called_once_with(
             '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
             stream_fps={'pipeline_stream0': 15.0})
+        self.assertEqual(output.getvalue().count('latency: p50:'), 3)
+        self.assertIn('Pipelines: 2 | window: 2 | status: fail', output.getvalue())
+        self.assertIn('Pipelines: 1 | window: 3 | status: pass', output.getvalue())
         self.assertEqual(report.call_args.args[1], {'pipeline_stream0': 15.0})
         self.assertIn(
             "Measured FPS by stream: {'pipeline_stream0': 15.0}",
@@ -898,7 +933,8 @@ class Testing(unittest.TestCase):
         self.assertEqual(result, (2, stream_density.STATUS_INCONCLUSIVE, 2))
         self.assertEqual(collect_calls, 4)
         self.assertIn('Result: Inconclusive', output)
-        self.assertIn('Last passing density: 2 lane(s) (2 streams)', output)
+        self.assertIn(
+            '\nINFO: Last passing density: 2 lane(s) (2 streams)', output)
 
     def test_inconclusive_interval_is_retried_without_restarting(self):
         enough = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
