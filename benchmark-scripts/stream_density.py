@@ -359,12 +359,12 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, e
     
     if monitor_memory_pressure():
         print(
-            f"Memory pressure detected. Not safe to add {increment} more pipelines."
+            f"INFO: Memory pressure detected. Not safe to add {increment} more pipelines."
         )
         return False
     
     print(
-        f"Memory check passed: {available_mb}MB available for {increment} new pipelines"
+        f"INFO: Memory check passed: {available_mb}MB available for {increment} new pipelines"
     )
     return True
 
@@ -764,6 +764,40 @@ def count_valid_streams(stream_fps_dict):
     )
 
 
+def print_window_stream_summary(num_pipelines, window_number, passed,
+                                stream_fps, stream_samples, latency_samples):
+    print(
+        f"INFO: Pipelines: {num_pipelines} | window: {window_number} | "
+        f"status: {'pass' if passed else 'fail'}")
+    for name in sorted(stream_fps):
+        samples = sorted(float(fps) for fps, _ in stream_samples.get(name, []))
+        if samples:
+            p10 = samples[math.ceil(0.1 * len(samples)) - 1]
+            p90 = samples[math.ceil(0.9 * len(samples)) - 1]
+            print(
+                f"  {name} throughput: {stream_fps[name]:.2f} FPS "
+                f"p10: {p10:.2f} p90: {p90:.2f}")
+        else:
+            print(f"  {name} throughput: {stream_fps[name]:.2f} FPS p10: N/A p90: N/A")
+
+    for channel, values in sorted(latency_samples.items()):
+        if not values:
+            continue
+        ordered = sorted(values)
+
+        def percentile(percent):
+            position = (len(ordered) - 1) * percent / 100
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+        print(
+            f"  {channel} latency: p50: {percentile(50):.2f} ms "
+            f"p99: {percentile(99):.2f} ms")
+    if not any(latency_samples.values()):
+        print("  Latency: no samples in this window")
+
+
 def print_stream_density_report(num_pipelines, stream_fps_dict,
                                 stream_target_fps, pass_thresholds,
                                 measurement_window_seconds,
@@ -958,6 +992,7 @@ def run_pipeline_iterations(
     streams_sustained = 0
     last_passing_pipelines = 0
     last_passing_streams = 0
+    window_number = 0
 
     # Measure memory usage of a single pipeline
     per_pipeline_memory_mb = measure_pipeline_memory(
@@ -1030,6 +1065,7 @@ def run_pipeline_iterations(
              enough_samples) = collect_measurement_window(
                 num_pipelines, results_dir, container_name,
                 measurement_window_seconds)
+            window_number += 1
             if enough_samples:
                 break
             print(
@@ -1040,15 +1076,17 @@ def run_pipeline_iterations(
             for log_file, count in sorted(sample_counts.items()):
                 print(f"  {os.path.basename(log_file)}: {count} samples")
             if inconclusive_retries >= MAX_INCONCLUSIVE_RETRIES:
-                last_passing_text = (
-                    f"INFO: Last passing density: {last_passing_pipelines} lane(s) "
-                    f"({last_passing_streams} streams), not confirmed by the run "
-                    f"acceptance criterion."
-                    if last_passing_pipelines else "No measurement interval had passed.")
                 print(
                     f"INFO: Result: Inconclusive - {inconclusive_retries + 1} consecutive "
                     f"measurement intervals at {num_pipelines} lane(s) were inconclusive "
-                    f"and were not used for a pass/fail decision. {last_passing_text}")
+                    f"and were not used for a pass/fail decision.")
+                if last_passing_pipelines:
+                    print(
+                        f"INFO: Last passing density: {last_passing_pipelines} lane(s) "
+                        f"({last_passing_streams} streams), not confirmed by the run "
+                        f"acceptance criterion.")
+                else:
+                    print("INFO: No measurement interval had passed.")
                 return last_passing_pipelines, STATUS_INCONCLUSIVE, last_passing_streams
             inconclusive_retries += 1
             print(
@@ -1083,6 +1121,12 @@ def run_pipeline_iterations(
             if fps >= pass_thresholds[name]
         }
         all_streams_meet_target = bool(stream_fps_dict) and len(passing_streams) == len(stream_fps_dict)
+        latency_samples_by_stream = extract_window_latency_samples(
+            results_dir, container_name,
+            window_start_offsets, window_end_offsets)
+        print_window_stream_summary(
+            num_pipelines, window_number, all_streams_meet_target,
+            stream_fps_dict, stream_samples_dict, latency_samples_by_stream)
         if all_streams_meet_target:
             last_passing_pipelines = num_pipelines
             last_passing_streams = streams_sustained
@@ -1166,9 +1210,6 @@ def run_pipeline_iterations(
                     )
                     increments = 0
                     # Latency uses the same window as the final FPS report.
-                    latency_samples_by_stream = extract_window_latency_samples(
-                        results_dir, container_name,
-                        window_start_offsets, window_end_offsets)
                     save_window_latency_samples(
                         results_dir, container_name, num_pipelines,
                         latency_samples_by_stream,
