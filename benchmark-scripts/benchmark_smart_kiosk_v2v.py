@@ -1,42 +1,43 @@
 """
 Smart Kiosk Voice-to-Voice (V2V) Latency Benchmark
 
-Orchestrates a voice-pipeline benchmark run for the Smart AI Kiosk the same way
-``benchmark_order_accuracy.py`` (in the ``performance-tools`` submodule)
-orchestrates the vision pipelines: bring the application stack up, run a fixed
-workload against it, collect metrics into ``results/``, tear the stack down.
+Copyright (C) 2025 Intel Corporation.
 
-NOTE ON LOCATION: this script lives inside the ``performance-tools``
-submodule (``performance-tools/benchmark-scripts/``), alongside
-``benchmark_order_accuracy.py``, so that it can bring the Smart Kiosk stack up
-the same way that script brings the vision-pipeline stacks up, and so
+SPDX-License-Identifier: Apache-2.0
+
+Orchestrates a voice-pipeline benchmark run for the Smart AI Kiosk the same way
+``benchmark_order_accuracy.py`` orchestrates the vision pipelines: bring the
+application stack up, run a fixed workload against it, collect metrics into
+``results/``, tear the stack down.
+
+NOTE ON LOCATION: this script lives here, alongside
+``benchmark_order_accuracy.py``, rather than in the Smart Kiosk application
+repository, so that it can bring the Smart Kiosk stack up the same way that
+script brings the vision-pipeline stacks up, and so
 ``consolidate_multiple_run_of_metrics.py``/``usage_graph_plot.py`` in this
 same directory can be chained straight after it without crossing repos.
 
-This is a deliberate trade-off: it is NOT upstreamed into
-``intel-retail/performance-tools``, so from this submodule's perspective it is
-an untracked file sitting on top of a pinned upstream commit. Concretely:
+It therefore depends on an application repository it does not live in. The
+application is located via ``--app_dir`` and must provide:
 
-* ``git status`` inside ``performance-tools/`` will show this file as ``??``.
-* ``make update-submodules`` (``git submodule update --init --recursive
-  --remote performance-tools``) resets the submodule's working tree to the
-  pinned upstream commit and DOES wipe this file if the pinned commit changes.
-  A copy of this exact file is tracked in the application repo at
-  ``smart-kiosk-assistant/tests/benchmarks/perf-tools-orchestrator/`` purely
-  as a recovery backup (not the copy that runs) -- if this file goes missing,
-  copy it back from there. ``make update-submodules`` does this
-  automatically; see the Makefile.
-* If this is ever upstreamed into ``intel-retail/performance-tools`` proper,
-  delete both the backup and this note.
+* a ``Makefile`` exposing ``up``/``down`` targets (used to start and stop the
+  stack, so this script does not duplicate the application's tested compose
+  profile and env handling), and
+* ``tests/benchmarks/v2v_scripted_conversation_benchmark.py``, which performs
+  the actual measurement.
+
+Both are validated up front, and the service URLs the health check polls are
+overridable (see ``--kiosk_url``/``--rag_url``/``--ovms_url``), so an
+application-side port or layout change does not require a change here.
 
 Differences from the vision-pipeline benchmarks, and why:
 
 * **Run-count based, not duration based.** ``benchmark_order_accuracy.py``
   sleeps for ``--duration`` while RTSP workers churn continuously. A voice turn
-  is a discrete request/response, and kiosk-core's session model is one turn per
-  session, so this script runs an exact number of scripted conversations
-  instead. A wall-clock duration would only control *how many* turns happened
-  to fit, making runs non-comparable.
+  is a discrete request/response, and kiosk-core's session model is one
+  turn per session, so this script runs an exact number of scripted
+  conversations instead. A wall-clock duration would only control *how
+  many* turns happened to fit, making runs non-comparable.
 
 * **Stack is started with the CPU-hungry vision services OFF.** rtsp-streamer +
   queue-service (YOLOv8 person counting) consume ~650-750% + ~350-500% CPU
@@ -50,9 +51,18 @@ Differences from the vision-pipeline benchmarks, and why:
 
 Usage::
 
-    python benchmark_smart_kiosk_v2v.py --app_dir ../../..
-    python benchmark_smart_kiosk_v2v.py --app_dir ../../.. \
+    # Run from this directory, against a sibling checkout of the application:
+    python benchmark_smart_kiosk_v2v.py \
+        --app_dir /path/to/smart-kiosk-assistant
+    python benchmark_smart_kiosk_v2v.py \
+        --app_dir /path/to/smart-kiosk-assistant \
         --script order-multi --runs 5 --results_dir /tmp/v2v-results
+
+``--app_dir`` defaults to ``../../smart-kiosk-assistant``, which resolves
+correctly when this repository is checked out as a sibling of the application
+(or vendored into it as a ``performance-tools/`` submodule, the layout the
+application's own ``make benchmark`` uses -- it passes ``--app_dir``
+explicitly in any case). Pass the path yourself for any other layout.
 
 By default (no ``--script``), the conversation replayed is whatever the
 application's own ``Sample_data/conversation.jsonl`` contains -- edit that
@@ -66,16 +76,38 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import re
 import statistics
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
-from typing import Dict, List, Optional
+from collections import defaultdict, deque
+from typing import Deque, Dict, List, Optional
+
+
+def percentile(ordered: List[int], fraction: float) -> int:
+    """Nearest-rank percentile of an already-sorted, non-empty sequence.
+
+    Uses the standard nearest-rank definition, ``ceil(fraction * n)``, which
+    for n=20 and fraction=0.95 selects the 19th of 20 samples. The simpler
+    ``int(n * fraction)`` indexes one past that whenever ``n * fraction`` is
+    a whole number, reporting the maximum as the p95.
+
+    Args:
+        ordered: Samples sorted ascending. Must not be empty.
+        fraction: Percentile as a fraction in (0, 1].
+
+    Returns:
+        The sample at the nearest rank.
+    """
+    if not ordered:
+        raise ValueError("percentile() requires at least one sample")
+    rank = max(1, math.ceil(fraction * len(ordered)))
+    return ordered[min(rank, len(ordered)) - 1]
 
 
 class SmartKioskV2VBenchmark:
@@ -98,11 +130,19 @@ class SmartKioskV2VBenchmark:
     # Endpoints that must answer before a run is meaningful. kiosk-core is the
     # orchestrator; rag-service and OVMS back the generation stage. A run
     # started before OVMS has loaded the LLM measures model load, not latency.
-    HEALTH_ENDPOINTS = {
+    # These are defaults only -- override per run via --kiosk_url/--rag_url/
+    # --ovms_url (or the SMART_KIOSK_V2V_* environment variables) so an
+    # application-side port change does not require a change here.
+    DEFAULT_HEALTH_ENDPOINTS = {
         "kiosk-core": "http://localhost:8012/health",
         "rag-service": "http://localhost:8020/health",
         "ovms-llm": "http://localhost:8000/v3/models",
     }
+
+    # Passed to every `make` invocation. QUEUE=false is the application
+    # Makefile's switch for leaving the vision profile out of compose
+    # entirely; see configure_stack_env() for why that matters.
+    DEFAULT_MAKE_ARGS = ["QUEUE=false"]
 
     def __init__(
         self,
@@ -110,16 +150,29 @@ class SmartKioskV2VBenchmark:
         results_dir: str,
         skip_stack: bool = False,
         keep_stack: bool = False,
+        health_endpoints: Optional[Dict[str, str]] = None,
+        make_args: Optional[List[str]] = None,
     ):
         self.app_dir = os.path.abspath(app_dir)
         self.results_dir = os.path.abspath(results_dir)
         self.skip_stack = skip_stack
         self.keep_stack = keep_stack
+        self.health_endpoints = dict(
+            health_endpoints or self.DEFAULT_HEALTH_ENDPOINTS
+        )
+        self.make_args = list(
+            self.DEFAULT_MAKE_ARGS if make_args is None else make_args
+        )
 
         if not os.path.isdir(self.app_dir):
-            raise ValueError(f"Application directory not found: {self.app_dir}")
+            raise ValueError(
+                f"Application directory not found: {self.app_dir}"
+            )
         if not os.path.isfile(os.path.join(self.app_dir, "Makefile")):
-            raise ValueError(f"No Makefile in {self.app_dir} -- is this the smart-kiosk-assistant dir?")
+            raise ValueError(
+                f"No Makefile in {self.app_dir} -- is this the "
+                f"smart-kiosk-assistant dir?"
+            )
 
         os.makedirs(self.results_dir, exist_ok=True)
 
@@ -147,18 +200,30 @@ class SmartKioskV2VBenchmark:
         env["KIOSK_CORE_DIARIZATION_INTERMEDIATE_ENABLED"] = "false"
         return env
 
-    def _run_make(self, target: str, extra_args: Optional[List[str]] = None) -> int:
-        cmd = ["make", target, "QUEUE=false"] + (extra_args or [])
+    def _run_make(
+        self, target: str, extra_args: Optional[List[str]] = None
+    ) -> int:
+        cmd = ["make", target] + self.make_args + (extra_args or [])
         print(f"\n$ {' '.join(cmd)}  (cwd={self.app_dir})")
-        proc = subprocess.run(cmd, cwd=self.app_dir, env=self.configure_stack_env())
+        # Fixed argv built from a literal target and operator-supplied make
+        # arguments; no shell, so no injection surface.
+        proc = subprocess.run(  # nosec B404, B603
+            cmd, cwd=self.app_dir, env=self.configure_stack_env()
+        )
         return proc.returncode
 
     def start_stack(self) -> None:
         if self.skip_stack:
-            print("--skip_stack set: assuming the kiosk stack is already running.")
+            print(
+                "--skip_stack set: assuming the kiosk stack is already "
+                "running."
+            )
             return
         print("\n" + "=" * 70)
-        print("Starting Smart Kiosk stack (queue-service/rtsp-streamer OFF, diarization OFF)")
+        print(
+            "Starting Smart Kiosk stack "
+            "(queue-service/rtsp-streamer OFF, diarization OFF)"
+        )
         print("=" * 70)
         rc = self._run_make("up")
         if rc != 0:
@@ -175,12 +240,16 @@ class SmartKioskV2VBenchmark:
         """Block until every required endpoint answers, or raise."""
         print(f"\nWaiting up to {timeout}s for services to become healthy...")
         deadline = time.time() + timeout
-        pending = dict(self.HEALTH_ENDPOINTS)
+        pending = dict(self.health_endpoints)
 
         while pending and time.time() < deadline:
             for name, url in list(pending.items()):
                 try:
-                    with urllib.request.urlopen(url, timeout=5) as resp:
+                    # Health URLs are http(s) endpoints supplied by the
+                    # operator, not untrusted input.
+                    with urllib.request.urlopen(  # nosec B310
+                        url, timeout=5
+                    ) as resp:
                         if 200 <= resp.status < 300:
                             elapsed = int(timeout - (deadline - time.time()))
                             print(f"  [{elapsed:>4}s] {name} healthy")
@@ -192,7 +261,8 @@ class SmartKioskV2VBenchmark:
 
         if pending:
             raise RuntimeError(
-                f"Timed out after {timeout}s waiting for: {', '.join(sorted(pending))}. "
+                f"Timed out after {timeout}s waiting for: "
+                f"{', '.join(sorted(pending))}. "
                 f"Check 'make logs' in {self.app_dir}."
             )
         print("All services healthy.")
@@ -239,10 +309,15 @@ class SmartKioskV2VBenchmark:
         conversation.
         """
         benchmark_path = os.path.join(
-            self.app_dir, "tests", "benchmarks", "v2v_scripted_conversation_benchmark.py"
+            self.app_dir,
+            "tests",
+            "benchmarks",
+            "v2v_scripted_conversation_benchmark.py",
         )
         if not os.path.isfile(benchmark_path):
-            raise FileNotFoundError(f"Benchmark script not found: {benchmark_path}")
+            raise FileNotFoundError(
+                f"Benchmark script not found: {benchmark_path}"
+            )
 
         cmd = [
             sys.executable,
@@ -259,18 +334,42 @@ class SmartKioskV2VBenchmark:
             cmd.append("--explicit-end-mark")
 
         print(f"\n$ {' '.join(cmd)}")
-        proc = subprocess.run(cmd, cwd=self.app_dir, env=self.configure_stack_env())
+        # Fixed argv: the interpreter, a path this class validated above, and
+        # typed/validated arguments. No shell.
+        proc = subprocess.run(  # nosec B404, B603
+            cmd, cwd=self.app_dir, env=self.configure_stack_env()
+        )
         return proc.returncode
 
     def _clean_previous_metrics(self) -> None:
         """Remove stale metrics from earlier runs in this results dir.
 
-        VLMMetricsLogger itself deletes files matching
-        ``vlm_application_metrics*`` when it first writes, but only inside the
-        directory it was configured with -- doing it here too keeps a
-        --skip_stack re-run from silently mixing in an older run's turns.
+        VLMMetricsLogger deletes files matching ``vlm_application_metrics*``
+        when it first writes, but only inside the directory it was configured
+        with, so a results dir that has been reused can still hold an older
+        run's files.
+
+        Deliberately a no-op under ``--skip_stack``: that mode benchmarks a
+        stack this script did not start and will not stop, so kiosk-core
+        already holds these files open through a RotatingFileHandler.
+        Unlinking them there does not give a clean slate -- it leaves the
+        handler writing to an unlinked inode, so every subsequent event
+        vanishes and the run ends with "No transactions". The ``since_ms``
+        filter in ``collect_vlm_logger_metrics`` already excludes the older
+        run's turns, which is what this cleanup was for.
         """
-        for pattern in ("vlm_application_metrics_*.txt", "vlm_performance_metrics_*.txt"):
+        if self.skip_stack:
+            print(
+                "--skip_stack set: leaving existing metrics files in place "
+                "(kiosk-core holds them open); stale turns are excluded by "
+                "timestamp instead."
+            )
+            return
+        patterns = (
+            "vlm_application_metrics_*.txt",
+            "vlm_performance_metrics_*.txt",
+        )
+        for pattern in patterns:
             for path in glob.glob(os.path.join(self.results_dir, pattern)):
                 try:
                     os.remove(path)
@@ -280,7 +379,9 @@ class SmartKioskV2VBenchmark:
     # ------------------------------------------------------------------
     # Collection
     # ------------------------------------------------------------------
-    def collect_vlm_logger_metrics(self, since_ms: Optional[int] = None) -> Dict:
+    def collect_vlm_logger_metrics(
+        self, since_ms: Optional[int] = None
+    ) -> Dict:
         """Parse vlm_application_metrics_*.txt into latency stats.
 
         Mirrors benchmark_order_accuracy.py's _collect_vlm_logger_metrics so a
@@ -302,19 +403,22 @@ class SmartKioskV2VBenchmark:
             "transactions": [],
         }
 
-        log_files = glob.glob(os.path.join(self.results_dir, "vlm_application_metrics_*.txt"))
+        log_files = glob.glob(
+            os.path.join(self.results_dir, "vlm_application_metrics_*.txt")
+        )
         if not log_files:
             print(f"No vlm_metrics_logger files found in {self.results_dir}")
             return metrics
 
-        # Events per id, paired as a stack rather than stored one-per-id.
+        # Events per id, paired as a queue rather than stored one-per-id.
         # kiosk-core stamps every turn with the same stream id (see
         # kiosk_core.config.VLM_METRICS_STREAM_ID) so that the downstream
         # consolidator produces one aggregate row instead of one row per turn.
         # Keying "{id: timestamp}" here would therefore keep only the last
         # turn and report a single transaction for the whole run. Sorting by
-        # timestamp and popping the most recent unmatched start pairs every
-        # turn correctly, and still works for the older per-turn ids.
+        # timestamp and pairing each end with the OLDEST unmatched start
+        # pairs every turn correctly, and still works for the older
+        # per-turn ids.
         events: Dict[str, List[Dict]] = defaultdict(list)
 
         for log_file in log_files:
@@ -340,12 +444,16 @@ class SmartKioskV2VBenchmark:
 
         latencies: List[int] = []
         for unique_id, entries in events.items():
-            open_starts: List[int] = []
+            open_starts: Deque[int] = deque()
             for entry in sorted(entries, key=lambda e: e["timestamp_ms"]):
                 if entry["event"] == "start":
                     open_starts.append(entry["timestamp_ms"])
                 elif open_starts:
-                    latency_ms = entry["timestamp_ms"] - open_starts.pop()
+                    # FIFO. Turns under the shared stream id are sequential
+                    # today, so this is equivalent to LIFO; it is the safer
+                    # default if they ever overlap, because the oldest
+                    # unmatched start is the one an arriving end belongs to.
+                    latency_ms = entry["timestamp_ms"] - open_starts.popleft()
                     latencies.append(latency_ms)
                     metrics["transactions"].append(
                         {"id": unique_id, "latency_ms": latency_ms}
@@ -356,12 +464,17 @@ class SmartKioskV2VBenchmark:
             ordered = sorted(latencies)
             metrics["avg_latency_ms"] = round(sum(ordered) / len(ordered), 1)
             metrics["median_latency_ms"] = round(statistics.median(ordered), 1)
-            p95_idx = int(len(ordered) * 0.95)
-            metrics["p95_latency_ms"] = ordered[p95_idx] if p95_idx < len(ordered) else ordered[-1]
+            metrics["p95_latency_ms"] = percentile(ordered, 0.95)
+            # A p95 drawn from a handful of turns is just the slowest turn:
+            # with n samples the nearest-rank index only moves below the
+            # maximum once n > 20. Report n alongside it so the number is
+            # never read as a stable tail estimate when it cannot be one.
+            metrics["p95_sample_count"] = len(ordered)
+            metrics["p95_is_max"] = len(ordered) <= 20
         return metrics
 
     def collect_benchmark_report(self, label: str) -> Dict:
-        """Read the scripted benchmark's own JSON report (the authoritative one)."""
+        """Read the benchmark's own JSON report (the authoritative one)."""
         path = os.path.join(self.results_dir, f"{label}.json")
         if not os.path.isfile(path):
             print(f"Benchmark report not found: {path}")
@@ -415,15 +528,21 @@ class SmartKioskV2VBenchmark:
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
-    def export_results(self, results: Dict, prefix: str = "smart_kiosk_v2v") -> None:
+    def export_results(
+        self, results: Dict, prefix: str = "smart_kiosk_v2v"
+    ) -> None:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-        json_path = os.path.join(self.results_dir, f"{prefix}_results_{timestamp}.json")
+        json_path = os.path.join(
+            self.results_dir, f"{prefix}_results_{timestamp}.json"
+        )
         with open(json_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Results exported to: {json_path}")
 
-        csv_path = os.path.join(self.results_dir, f"{prefix}_summary_{timestamp}.csv")
+        csv_path = os.path.join(
+            self.results_dir, f"{prefix}_summary_{timestamp}.csv"
+        )
         self._write_csv_summary(results, csv_path)
         print(f"Summary exported to: {csv_path}")
 
@@ -461,19 +580,23 @@ class SmartKioskV2VBenchmark:
     ) -> Dict:
         print("\n" + "=" * 70)
         print("Smart Kiosk Voice-to-Voice Benchmark")
-        print(f"Script: {script or '(default: Sample_data/conversation.jsonl)'}")
+        default_src = '(default: Sample_data/conversation.jsonl)'
+        print(f"Script: {script or default_src}")
         print(f"Runs: {runs} (plus {warmup_runs} discarded warmup)")
         print(f"Results: {self.results_dir}")
         print("=" * 70)
 
         self._clean_previous_metrics()
-        # Bound before start_stack() so the `finally` below can tell "the run
+        # Bound before the try block so the `finally` below can tell "the run
         # never reached the measured phase" from "it did", without raising a
         # NameError on top of whatever actually went wrong.
         measured_run_started_ms = None
-        self.start_stack()
 
         try:
+            # Inside the try so that a stack which came up partially before
+            # `make up` failed is still torn down by the `finally`.
+            # stop_stack() is safe to call when nothing started.
+            self.start_stack()
             self.wait_for_health(health_timeout)
             if init_duration > 0:
                 print(f"Settling for {init_duration}s before warmup...")
@@ -481,13 +604,22 @@ class SmartKioskV2VBenchmark:
 
             if warmup_runs > 0:
                 print(f"\n--- Warmup ({warmup_runs} run(s), discarded) ---")
-                self.run_benchmark_script(
+                warmup_rc = self.run_benchmark_script(
                     script=script,
                     runs=warmup_runs,
                     label=f"{label}-warmup",
                     emit_vlm_metrics=False,
                     explicit_end_mark=explicit_end_mark,
                 )
+                # The warmup exercises exactly the same path as the measured
+                # run, so a failure here is a failure of the whole run. Left
+                # unchecked it surfaces much later as a bare "No
+                # transactions", hiding the real cause.
+                if warmup_rc != 0:
+                    raise RuntimeError(
+                        f"Warmup run failed with exit code {warmup_rc}; "
+                        f"not starting the measured run."
+                    )
 
             # kiosk-core's own vlm_metrics_logger hook (kiosk_core.
             # audio_session._emit_vlm_metrics) emits for EVERY completed turn
@@ -518,13 +650,14 @@ class SmartKioskV2VBenchmark:
             # lifetime -- image pulls, the health wait, the warmup -- so an
             # average taken over the raw files describes a mostly-idle stack
             # rather than the measured turns. Record the window so the
-            # application side can trim them before consolidating
-            # (voice-enabled-interactions PR #112 review, item 18).
+            # application side can trim them before consolidating.
             self.write_measured_window(
                 measured_run_started_ms, measured_run_ended_ms
             )
 
-            vlm = self.collect_vlm_logger_metrics(since_ms=measured_run_started_ms)
+            vlm = self.collect_vlm_logger_metrics(
+                since_ms=measured_run_started_ms
+            )
             report = self.collect_benchmark_report(label)
 
             results = {
@@ -593,8 +726,8 @@ class SmartKioskV2VBenchmark:
         discarded warmup turns land in the same log file as the measured ones.
         This script filters them out of its own summary via ``since_ms``, but
         the downstream ``make consolidate-metrics`` step reads these files
-        directly and had no way to tell the two apart, so warmup turns were
-        averaged into consolidated_metrics.csv (PR #112 review, item 13).
+        directly and has no way to tell the two apart, so warmup turns would
+        otherwise be averaged into consolidated_metrics.csv.
 
         The unfiltered original is kept alongside with a ``.with-warmup``
         suffix -- deliberately not ``.txt``, so the consolidator's
@@ -625,9 +758,17 @@ class SmartKioskV2VBenchmark:
                 if not dropped:
                     continue
 
-                os.replace(log_file, log_file + ".with-warmup")
-                with open(log_file, "w") as f:
+                # Write the filtered copy to a temporary file FIRST, then
+                # preserve the original and move the new file into place.
+                # Renaming the original out of the way before writing would
+                # leave no *.txt at all if the write then failed, and the
+                # consolidator globs *.txt -- so a tidying step could destroy
+                # the very metrics the run produced.
+                tmp_path = log_file + ".pruned.tmp"
+                with open(tmp_path, "w") as f:
                     f.writelines(kept)
+                os.replace(log_file, log_file + ".with-warmup")
+                os.replace(tmp_path, log_file)
                 print(
                     f"Pruned {dropped} warmup event(s) from "
                     f"{os.path.basename(log_file)} "
@@ -636,6 +777,10 @@ class SmartKioskV2VBenchmark:
             except (IOError, OSError) as e:
                 # Never fail a completed run over a metrics-tidying step.
                 print(f"Warning: could not prune {log_file}: {e}")
+                try:
+                    os.remove(log_file + ".pruned.tmp")
+                except OSError:
+                    pass
 
     @staticmethod
     def _print_summary(results: Dict) -> None:
@@ -647,12 +792,18 @@ class SmartKioskV2VBenchmark:
         print(f"Transactions   : {vlm.get('total_transactions', 0)}")
         print(f"Median v2v     : {vlm.get('median_latency_ms')} ms")
         print(f"Average v2v    : {vlm.get('avg_latency_ms')} ms")
-        print(f"p95 v2v        : {vlm.get('p95_latency_ms')} ms")
-        print(f"Cross-check    : {check.get('status')} (delta={check.get('delta_ms')} ms)")
+        p95_note = " (= max; too few samples)" if vlm.get("p95_is_max") else ""
+        print(f"p95 v2v        : {vlm.get('p95_latency_ms')} ms{p95_note}")
+        print(
+            f"Cross-check    : {check.get('status')} "
+            f"(delta={check.get('delta_ms')} ms)"
+        )
         if check.get("status") == "MISMATCH":
             print(
-                "  WARNING: emitted metrics disagree with the benchmark's own report.\n"
-                "  Treat the report JSON as authoritative and investigate the emit path."
+                "  WARNING: emitted metrics disagree with the "
+                "benchmark's own report.\n"
+                "  Treat the report JSON as authoritative and "
+                "investigate the emit path."
             )
         print("=" * 70)
 
@@ -665,7 +816,10 @@ def parse_args():
     parser.add_argument(
         "--app_dir",
         default="../../smart-kiosk-assistant",
-        help="Path to the smart-kiosk-assistant directory (default: ../../smart-kiosk-assistant)",
+        help=(
+            "Path to the smart-kiosk-assistant directory "
+            "(default: ../../smart-kiosk-assistant)"
+        ),
     )
     parser.add_argument(
         "--results_dir",
@@ -714,18 +868,64 @@ def parse_args():
         "--health_timeout",
         type=int,
         default=SmartKioskV2VBenchmark.DEFAULT_HEALTH_TIMEOUT,
-        help="Max seconds to wait for services to become healthy (default: 600)",
+        help=(
+            "Max seconds to wait for services to become healthy "
+            "(default: 600)"
+        ),
     )
-    parser.add_argument("--label", default="v2v-perf-tools", help="Result filename label")
+    parser.add_argument(
+        "--label",
+        default="v2v-perf-tools",
+        help="Result filename label",
+    )
     parser.add_argument(
         "--skip_stack",
         action="store_true",
-        help="Do not start/stop the stack -- benchmark whatever is already running",
+        help=(
+            "Do not start/stop the stack -- benchmark whatever is "
+            "already running"
+        ),
     )
     parser.add_argument(
         "--keep_stack",
         action="store_true",
         help="Start the stack but leave it running afterwards",
+    )
+    parser.add_argument(
+        "--kiosk_url",
+        default=os.environ.get("SMART_KIOSK_V2V_KIOSK_URL"),
+        help=(
+            "kiosk-core health URL (default: "
+            "http://localhost:8012/health, env SMART_KIOSK_V2V_KIOSK_URL)"
+        ),
+    )
+    parser.add_argument(
+        "--rag_url",
+        default=os.environ.get("SMART_KIOSK_V2V_RAG_URL"),
+        help=(
+            "rag-service health URL (default: "
+            "http://localhost:8020/health, env SMART_KIOSK_V2V_RAG_URL)"
+        ),
+    )
+    parser.add_argument(
+        "--ovms_url",
+        default=os.environ.get("SMART_KIOSK_V2V_OVMS_URL"),
+        help=(
+            "OVMS model-list URL (default: "
+            "http://localhost:8000/v3/models, env SMART_KIOSK_V2V_OVMS_URL)"
+        ),
+    )
+    parser.add_argument(
+        "--make_arg",
+        action="append",
+        dest="make_args",
+        default=None,
+        metavar="VAR=VALUE",
+        help=(
+            "Argument passed to every `make` invocation. Repeatable. "
+            "Replaces the default QUEUE=false, so re-pass it if you still "
+            "want the vision profile left out."
+        ),
     )
     return parser.parse_args()
 
@@ -735,12 +935,25 @@ def main():
     app_dir = os.path.abspath(args.app_dir)
     results_dir = args.results_dir or os.path.join(app_dir, "results")
 
+    health_endpoints = dict(
+        SmartKioskV2VBenchmark.DEFAULT_HEALTH_ENDPOINTS
+    )
+    for name, override in (
+        ("kiosk-core", args.kiosk_url),
+        ("rag-service", args.rag_url),
+        ("ovms-llm", args.ovms_url),
+    ):
+        if override:
+            health_endpoints[name] = override
+
     try:
         benchmark = SmartKioskV2VBenchmark(
             app_dir=app_dir,
             results_dir=results_dir,
             skip_stack=args.skip_stack,
             keep_stack=args.keep_stack,
+            health_endpoints=health_endpoints,
+            make_args=args.make_args,
         )
         results = benchmark.run(
             script=args.script,
@@ -756,7 +969,10 @@ def main():
         return 1
 
     if results.get("vlm_metrics", {}).get("total_transactions", 0) == 0:
-        print("\nNo transactions were recorded -- treating as failure.", file=sys.stderr)
+        print(
+            "\nNo transactions were recorded -- treating as failure.",
+            file=sys.stderr,
+        )
         return 1
     return results.get("benchmark_exit_code", 0)
 
