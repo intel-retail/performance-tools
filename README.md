@@ -53,7 +53,9 @@ directory given by `--app_dir` must provide:
 - `tests/benchmarks/v2v_scripted_conversation_benchmark.py`, which performs
   the measurement.
 
-Both are validated before the stack is started.
+Both are validated in the constructor, before the stack is started, so a
+mistyped `--app_dir` fails in seconds rather than after a bring-up and the
+health timeout.
 
 ### Usage
 
@@ -89,6 +91,42 @@ python benchmark_smart_kiosk_v2v.py \
 The same URLs may be set through `SMART_KIOSK_V2V_KIOSK_URL`,
 `SMART_KIOSK_V2V_RAG_URL` and `SMART_KIOSK_V2V_OVMS_URL`.
 
+### Where the per-turn metrics come from, and `--results_dir`
+
+The per-turn events are not written by this script. They are written by the
+application's `kiosk-core` service from inside its container, into the
+directory bound to `/app/results` by the application's compose file. That bind
+mount is `${KIOSK_RESULTS_HOST_DIR:-./results}`, so:
+
+- When this script starts the stack, it exports `KIOSK_RESULTS_HOST_DIR` set to
+  `--results_dir`, and the service writes where this script reads.
+- With `--skip_stack` the stack is already running with whatever mount it was
+  started with. If `--results_dir` differs from that directory, no events will
+  be found and the run ends with `No transactions`. The script warns about this
+  before running. Either omit `--results_dir` or restart the stack.
+
+### Application-specific defaults
+
+This orchestrator targets one application, so it carries that application's
+names as defaults. If they change there, update them here:
+
+| Setting | Default |
+| --- | --- |
+| `--app_dir` | `../../smart-kiosk-assistant` |
+| kiosk-core health | `http://localhost:8012/health` |
+| rag-service health | `http://localhost:8020/health` |
+| OVMS model list | `http://localhost:8000/v3/models` |
+| `make` arguments | `QUEUE=false` |
+| Measurement script | `tests/benchmarks/v2v_scripted_conversation_benchmark.py` |
+| Metrics bind mount | `KIOSK_RESULTS_HOST_DIR` |
+
+The run also exports `KIOSK_CORE_QUEUE_SERVICE_ENABLED`,
+`KIOSK_CORE_DIARIZATION_ENABLED` and
+`KIOSK_CORE_DIARIZATION_INTERMEDIATE_ENABLED` as `false`, to stop vision and
+diarization work competing with text-to-speech for CPU. The
+`stack` block of the results records what each run actually used, derived from
+the `make` arguments and that environment rather than hardcoded.
+
 ### Output
 
 Written into `--results_dir` (default `<app_dir>/results`):
@@ -102,14 +140,23 @@ Written into `--results_dir` (default `<app_dir>/results`):
 | `vlm_application_metrics_*.txt.with-warmup` | Unpruned original, kept for debugging |
 
 The script cross-checks the metrics it emits against the application's own
-report and prints `MISMATCH` if they disagree by more than 1 ms, which catches
-a broken emit path rather than silently misreporting the headline number.
+report, comparing both the median latency and the turn count. A disagreement
+of more than 1 ms, or any difference in turn count, is reported as `MISMATCH`
+and **exits non-zero**, so CI cannot publish a headline number produced by a
+broken emit path. Pass `--allow_cross_check_mismatch` to downgrade it to a
+warning.
 
 Warmup turns are excluded by timestamp rather than by deleting log files,
-because the application holds those files open for the whole run.
+because the application holds those files open for the whole run. Whole
+start/end pairs are removed together, so a warmup turn whose end is logged
+after the measured window begins cannot leave an orphan event behind for the
+consolidator to mispair.
 
-Report p95 with its sample count: below 21 measured turns the nearest-rank p95
-is just the slowest turn, and the summary labels it as such.
+Report p95 with its sample count. The nearest-rank p95 of *n* samples is the
+`ceil(0.95 * n)`-th, so with 19 or fewer measured turns it is simply the
+slowest turn; at 20 turns it is the 19th. The summary and the results JSON
+carry `p95_sample_count` and `p95_is_max`, the latter determined by comparing
+the p95 against the observed maximum rather than assumed from the count.
 
 ### Tests
 

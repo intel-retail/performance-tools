@@ -1,7 +1,7 @@
 """
 Smart Kiosk Voice-to-Voice (V2V) Latency Benchmark
 
-Copyright (C) 2025 Intel Corporation.
+Copyright (C) 2026 Intel Corporation.
 
 SPDX-License-Identifier: Apache-2.0
 
@@ -45,9 +45,10 @@ Differences from the vision-pipeline benchmarks, and why:
   voice pipeline's only CPU-bound stage (TTS). Speaker diarization is disabled
   for the same reason. See ``configure_stack_env()``.
 
-* **A warmup run is discarded.** First-turn latency is materially higher than
-  steady state (measured: ~726ms cold vs ~754ms warm on a turn whose TTS opener
-  cache was still empty), so the first run would otherwise bias the median.
+* **A warmup run is discarded.** The first turn after the stack comes up pays
+  one-off costs the steady state does not: the TTS opener cache is empty and
+  the model paths have not been exercised. Including it would bias the
+  median of a short run.
 
 Usage::
 
@@ -173,8 +174,36 @@ class SmartKioskV2VBenchmark:
                 f"No Makefile in {self.app_dir} -- is this the "
                 f"smart-kiosk-assistant dir?"
             )
+        # Validated here rather than at the point of use: by then the stack
+        # has been started and waited on, so a mistyped --app_dir would cost
+        # a bring-up plus the health timeout before failing.
+        self.benchmark_script = os.path.join(
+            self.app_dir,
+            "tests",
+            "benchmarks",
+            "v2v_scripted_conversation_benchmark.py",
+        )
+        if not os.path.isfile(self.benchmark_script):
+            raise ValueError(
+                f"Benchmark script not found: {self.benchmark_script} -- "
+                f"is {self.app_dir} the smart-kiosk-assistant dir?"
+            )
 
         os.makedirs(self.results_dir, exist_ok=True)
+
+    @property
+    def app_results_dir(self) -> str:
+        """Where kiosk-core itself writes ``vlm_application_metrics_*.txt``.
+
+        The service writes from inside its container to a bind mount the
+        application's compose file defines as
+        ``${KIOSK_RESULTS_HOST_DIR:-./results}``, relative to ``app_dir`` --
+        it does not know about this script's ``--results_dir``. When the two
+        differ and this script starts the stack, it points that bind mount at
+        ``--results_dir`` (see ``configure_stack_env``) so the logs land where
+        the collectors look.
+        """
+        return os.path.join(self.app_dir, "results")
 
     # ------------------------------------------------------------------
     # Stack lifecycle
@@ -182,7 +211,7 @@ class SmartKioskV2VBenchmark:
     def configure_stack_env(self) -> Dict[str, str]:
         """Build the environment the stack is started with.
 
-        Both flags are passed through the process environment (not just as make
+        The flags are passed through the process environment (not just as make
         arguments) because docker compose gives shell environment variables
         precedence over the application's ``.env`` file -- so this forces the
         intended configuration regardless of what ``.env`` currently says.
@@ -198,7 +227,36 @@ class SmartKioskV2VBenchmark:
         # maps this onto AUDIO_ANALYZER__MODELS__ASR__DIARIZATION.
         env["KIOSK_CORE_DIARIZATION_ENABLED"] = "false"
         env["KIOSK_CORE_DIARIZATION_INTERMEDIATE_ENABLED"] = "false"
+        # kiosk-core emits vlm_application_metrics_*.txt from inside its
+        # container into a bind mount the application's compose file defines
+        # as ${KIOSK_RESULTS_HOST_DIR:-./results}. Without this, a custom
+        # --results_dir would collect nothing: the service would keep writing
+        # to <app_dir>/results while this script looked somewhere else, and
+        # the run would end with a misleading "No transactions".
+        env["KIOSK_RESULTS_HOST_DIR"] = self.results_dir
         return env
+
+    def warn_if_results_dir_unreachable(self) -> None:
+        """Warn when the stack cannot be pointed at ``--results_dir``.
+
+        Under ``--skip_stack`` the containers are already running with
+        whatever bind mount they were started with, so this script cannot
+        redirect where kiosk-core writes.
+        """
+        if not self.skip_stack:
+            return
+        if os.path.realpath(self.results_dir) == os.path.realpath(
+            self.app_results_dir
+        ):
+            return
+        print(
+            f"\nWARNING: --skip_stack with --results_dir "
+            f"{self.results_dir}, but the already-running kiosk-core writes "
+            f"its metrics to the bind mount it was started with (normally "
+            f"{self.app_results_dir}). Metrics collection will likely find "
+            f"nothing. Restart the stack without --skip_stack, or point "
+            f"--results_dir at the directory the stack already uses."
+        )
 
     def _run_make(
         self, target: str, extra_args: Optional[List[str]] = None
@@ -308,16 +366,9 @@ class SmartKioskV2VBenchmark:
         rather than this orchestrator hardcoding a named scripted
         conversation.
         """
-        benchmark_path = os.path.join(
-            self.app_dir,
-            "tests",
-            "benchmarks",
-            "v2v_scripted_conversation_benchmark.py",
-        )
-        if not os.path.isfile(benchmark_path):
-            raise FileNotFoundError(
-                f"Benchmark script not found: {benchmark_path}"
-            )
+        # Existence was validated in __init__, before the stack was
+        # started, so a bad --app_dir fails immediately.
+        benchmark_path = self.benchmark_script
 
         cmd = [
             sys.executable,
@@ -341,6 +392,22 @@ class SmartKioskV2VBenchmark:
         )
         return proc.returncode
 
+    def _kiosk_core_is_running(self) -> bool:
+        """Best-effort check for an already-running kiosk-core.
+
+        Returns False on any error: this only guards an optional cleanup
+        step, so an unreachable endpoint must never fail the run.
+        """
+        url = self.health_endpoints.get("kiosk-core")
+        if not url:
+            return False
+        try:
+            # Operator-supplied health URL, not untrusted input.
+            with urllib.request.urlopen(url, timeout=2) as resp:  # nosec B310
+                return 200 <= resp.status < 300
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+
     def _clean_previous_metrics(self) -> None:
         """Remove stale metrics from earlier runs in this results dir.
 
@@ -349,20 +416,30 @@ class SmartKioskV2VBenchmark:
         with, so a results dir that has been reused can still hold an older
         run's files.
 
-        Deliberately a no-op under ``--skip_stack``: that mode benchmarks a
-        stack this script did not start and will not stop, so kiosk-core
-        already holds these files open through a RotatingFileHandler.
-        Unlinking them there does not give a clean slate -- it leaves the
-        handler writing to an unlinked inode, so every subsequent event
-        vanishes and the run ends with "No transactions". The ``since_ms``
-        filter in ``collect_vlm_logger_metrics`` already excludes the older
-        run's turns, which is what this cleanup was for.
+        Deliberately a no-op whenever kiosk-core may already be running --
+        under ``--skip_stack``, or when its health endpoint answers before
+        the stack is started (which happens after an earlier
+        ``--keep_stack`` run). In those cases kiosk-core holds these files
+        open through a RotatingFileHandler, so unlinking them does not give
+        a clean slate: it leaves the handler writing to an unlinked inode,
+        every subsequent event vanishes, and the run ends with "No
+        transactions". The ``since_ms`` filter in
+        ``collect_vlm_logger_metrics`` already excludes the older run's
+        turns, which is what this cleanup was for.
         """
         if self.skip_stack:
             print(
                 "--skip_stack set: leaving existing metrics files in place "
                 "(kiosk-core holds them open); stale turns are excluded by "
                 "timestamp instead."
+            )
+            return
+        if self._kiosk_core_is_running():
+            print(
+                "kiosk-core is already running (likely a previous "
+                "--keep_stack run): leaving existing metrics files in place "
+                "so its open log handles stay valid; stale turns are "
+                "excluded by timestamp instead."
             )
             return
         patterns = (
@@ -466,11 +543,13 @@ class SmartKioskV2VBenchmark:
             metrics["median_latency_ms"] = round(statistics.median(ordered), 1)
             metrics["p95_latency_ms"] = percentile(ordered, 0.95)
             # A p95 drawn from a handful of turns is just the slowest turn:
-            # with n samples the nearest-rank index only moves below the
-            # maximum once n > 20. Report n alongside it so the number is
-            # never read as a stable tail estimate when it cannot be one.
+            # with the nearest-rank definition the p95 only drops below the
+            # maximum at n >= 20. Derive the flag by comparison rather than
+            # from a sample-count threshold, so it stays correct whatever
+            # the percentile definition is -- and so ties (where the second
+            # -slowest turn equals the slowest) are reported honestly.
             metrics["p95_sample_count"] = len(ordered)
-            metrics["p95_is_max"] = len(ordered) <= 20
+            metrics["p95_is_max"] = metrics["p95_latency_ms"] == ordered[-1]
         return metrics
 
     def collect_benchmark_report(self, label: str) -> Dict:
@@ -495,6 +574,41 @@ class SmartKioskV2VBenchmark:
             "summary": report.get("summary", {}),
         }
 
+    def describe_stack(self) -> Dict[str, str]:
+        """Report the stack configuration this run actually used.
+
+        Derived from the effective settings rather than hardcoded: the
+        defaults can be overridden with --make_arg, and a results file that
+        misstates its own configuration is worse than one that omits it.
+        """
+        env = self.configure_stack_env()
+
+        def _flag(name: str) -> str:
+            return (
+                "disabled"
+                if env.get(name, "").lower() == "false"
+                else "enabled"
+            )
+
+        # The application Makefile's QUEUE switch decides whether the vision
+        # profile is handed to compose at all, so the containers are absent
+        # rather than idle. The env var only gates kiosk-core's integration,
+        # so the services are only truly off when both agree.
+        queue_make_arg = None
+        for arg in self.make_args:
+            if arg.startswith("QUEUE="):
+                queue_make_arg = arg.split("=", 1)[1].strip().lower()
+        profile_off = queue_make_arg == "false"
+        queue_state = _flag("KIOSK_CORE_QUEUE_SERVICE_ENABLED")
+
+        return {
+            "queue_service": queue_state,
+            "rtsp_streamer": "disabled" if profile_off else "enabled",
+            "diarization": _flag("KIOSK_CORE_DIARIZATION_ENABLED"),
+            "make_args": " ".join(self.make_args) or "(none)",
+            "stack_managed_by_script": "no" if self.skip_stack else "yes",
+        }
+
     @staticmethod
     def cross_check(vlm: Dict, report: Dict) -> Dict:
         """Verify the emitted metrics agree with the authoritative report.
@@ -504,6 +618,10 @@ class SmartKioskV2VBenchmark:
         rounding means the emit path is broken (wrong field, wrong clock, or
         turns silently dropped) -- exactly the class of bug that would
         otherwise go unnoticed and quietly misreport the headline number.
+
+        Both the median and the turn count are compared. A median alone can
+        hide a dropped or duplicated turn, whereas a count mismatch is the
+        clearest possible signal that the emit path lost data.
         """
         summary = report.get("summary", {}) or {}
         reported = (
@@ -514,15 +632,33 @@ class SmartKioskV2VBenchmark:
         emitted = vlm.get("median_latency_ms")
         result = {"reported_median_ms": reported, "emitted_median_ms": emitted}
 
+        reported_turns = report.get("turns_total")
+        emitted_turns = vlm.get("total_transactions")
+        result["reported_turns"] = reported_turns
+        result["emitted_turns"] = emitted_turns
+        counts_disagree = (
+            reported_turns is not None
+            and emitted_turns is not None
+            and int(reported_turns) != int(emitted_turns)
+        )
+        result["turn_count_status"] = (
+            "MISMATCH" if counts_disagree else "ok"
+        )
+
         if reported is None or emitted is None:
-            result["status"] = "unavailable"
+            result["status"] = (
+                "MISMATCH" if counts_disagree else "unavailable"
+            )
             return result
 
         delta = abs(float(reported) - float(emitted))
         result["delta_ms"] = round(delta, 1)
         # 1ms tolerance: the emitted pair is built from int-rounded epoch
         # milliseconds, so a sub-millisecond difference is expected.
-        result["status"] = "ok" if delta <= 1.0 else "MISMATCH"
+        medians_disagree = delta > 1.0
+        result["status"] = (
+            "MISMATCH" if (medians_disagree or counts_disagree) else "ok"
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -586,6 +722,7 @@ class SmartKioskV2VBenchmark:
         print(f"Results: {self.results_dir}")
         print("=" * 70)
 
+        self.warn_if_results_dir_unreachable()
         self._clean_previous_metrics()
         # Bound before the try block so the `finally` below can tell "the run
         # never reached the measured phase" from "it did", without raising a
@@ -666,11 +803,7 @@ class SmartKioskV2VBenchmark:
                 "runs": runs,
                 "warmup_runs": warmup_runs,
                 "explicit_end_mark": explicit_end_mark,
-                "stack": {
-                    "queue_service": "disabled",
-                    "rtsp_streamer": "disabled",
-                    "diarization": "disabled",
-                },
+                "stack": self.describe_stack(),
                 "benchmark_report": report,
                 "vlm_metrics": vlm,
                 "cross_check": self.cross_check(vlm, report),
@@ -718,6 +851,64 @@ class SmartKioskV2VBenchmark:
             # the old behaviour, not a failed run.
             print(f"Warning: could not write {path}: {e}")
 
+    @staticmethod
+    def _warmup_line_indices(lines: List[str], since_ms: int) -> set:
+        """Indices of log lines belonging to warmup turns.
+
+        A turn is warmup if its ``start`` is stamped before ``since_ms``. Its
+        matching ``end`` is dropped with it even when that end is stamped
+        after ``since_ms``, so no orphan ends are left behind.
+
+        Lines that are not parseable start/end events are never dropped:
+        unknown content is kept rather than silently discarded.
+
+        Args:
+            lines: The log file's lines, in file order.
+            since_ms: Epoch-ms instant the measured run started.
+
+        Returns:
+            Set of indices into ``lines`` to remove.
+        """
+        # Per id, indices of starts still awaiting an end, oldest first.
+        open_starts: Dict[str, Deque[tuple]] = defaultdict(deque)
+        drop: set = set()
+
+        for i, line in enumerate(lines):
+            id_match = re.search(r"id=(\S+)", line)
+            event_match = re.search(r"event=(\w+)", line)
+            ts_match = re.search(r"timestamp_ms=(\d+)", line)
+            if not (id_match and event_match and ts_match):
+                continue
+            event = event_match.group(1)
+            if event not in ("start", "end"):
+                continue
+            stream_id = id_match.group(1)
+            timestamp = int(ts_match.group(1))
+
+            if event == "start":
+                open_starts[stream_id].append((i, timestamp))
+                continue
+
+            if not open_starts[stream_id]:
+                # Orphan end: its start is not in this file. Drop it only if
+                # it is itself older than the measured window.
+                if timestamp < since_ms:
+                    drop.add(i)
+                continue
+
+            start_i, start_ts = open_starts[stream_id].popleft()
+            if start_ts < since_ms:
+                drop.add(start_i)
+                drop.add(i)
+
+        # Starts never matched by an end: drop the warmup-era ones so the
+        # consolidator cannot pair them with a later measured end.
+        for pending in open_starts.values():
+            for start_i, start_ts in pending:
+                if start_ts < since_ms:
+                    drop.add(start_i)
+        return drop
+
     def prune_warmup_from_vlm_logs(self, since_ms: int) -> None:
         """Drop pre-measurement events from the emitted vlm metrics logs.
 
@@ -733,9 +924,16 @@ class SmartKioskV2VBenchmark:
         suffix -- deliberately not ``.txt``, so the consolidator's
         ``vlm_application_metrics_*.txt`` glob does not pick it back up.
 
+        Whole start/end pairs are dropped together. Filtering purely on
+        timestamp would split a turn that straddles ``since_ms`` -- its start
+        is older, its end is not -- leaving an orphan ``end`` in the file.
+        This parser ignores unmatched ends, but the downstream consolidator
+        may pair such an end with the next turn's start and invent a wildly
+        wrong latency.
+
         Args:
-            since_ms: Epoch-ms instant the measured run started. Events
-                stamped before this belong to the warmup.
+            since_ms: Epoch-ms instant the measured run started. Turns whose
+                ``start`` is stamped before this belong to the warmup.
         """
         for log_file in glob.glob(
             os.path.join(self.results_dir, "vlm_application_metrics_*.txt")
@@ -744,16 +942,13 @@ class SmartKioskV2VBenchmark:
                 with open(log_file, "r") as f:
                     lines = f.readlines()
 
-                kept = []
-                dropped = 0
-                for line in lines:
-                    ts_match = re.search(r"timestamp_ms=(\d+)", line)
-                    # Lines without a timestamp are not measurements; keep
-                    # them rather than silently discarding unknown content.
-                    if ts_match and int(ts_match.group(1)) < since_ms:
-                        dropped += 1
-                        continue
-                    kept.append(line)
+                drop_idx = self._warmup_line_indices(lines, since_ms)
+                kept = [
+                    line
+                    for i, line in enumerate(lines)
+                    if i not in drop_idx
+                ]
+                dropped = len(drop_idx)
 
                 if not dropped:
                     continue
@@ -792,8 +987,16 @@ class SmartKioskV2VBenchmark:
         print(f"Transactions   : {vlm.get('total_transactions', 0)}")
         print(f"Median v2v     : {vlm.get('median_latency_ms')} ms")
         print(f"Average v2v    : {vlm.get('avg_latency_ms')} ms")
-        p95_note = " (= max; too few samples)" if vlm.get("p95_is_max") else ""
+        p95_note = (
+            f" (= max of {vlm.get('p95_sample_count')} turns)"
+            if vlm.get("p95_is_max")
+            else ""
+        )
         print(f"p95 v2v        : {vlm.get('p95_latency_ms')} ms{p95_note}")
+        print(
+            f"Turns reported : {check.get('reported_turns')} "
+            f"(emitted {check.get('emitted_turns')})"
+        )
         print(
             f"Cross-check    : {check.get('status')} "
             f"(delta={check.get('delta_ms')} ms)"
@@ -927,6 +1130,16 @@ def parse_args():
             "want the vision profile left out."
         ),
     )
+    parser.add_argument(
+        "--allow_cross_check_mismatch",
+        action="store_true",
+        help=(
+            "Exit 0 even when the emitted metrics disagree with the "
+            "application's own report. By default a MISMATCH fails the run, "
+            "because the headline number cannot be trusted when the two "
+            "measurements of the same turns disagree."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -974,6 +1187,26 @@ def main():
             file=sys.stderr,
         )
         return 1
+
+    # A MISMATCH means the two independent measurements of the same turns
+    # disagree, so the headline number is untrustworthy. Exiting 0 here
+    # would let CI publish it anyway, which is exactly what the cross-check
+    # exists to prevent.
+    if results.get("cross_check", {}).get("status") == "MISMATCH":
+        if args.allow_cross_check_mismatch:
+            print(
+                "\nCross-check MISMATCH ignored "
+                "(--allow_cross_check_mismatch).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nCross-check MISMATCH: the emitted metrics disagree with "
+                "the application's own report -- treating as failure. "
+                "Pass --allow_cross_check_mismatch to override.",
+                file=sys.stderr,
+            )
+            return 1
     return results.get("benchmark_exit_code", 0)
 
 

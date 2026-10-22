@@ -1,5 +1,5 @@
 '''
-* Copyright (C) 2025 Intel Corporation.
+* Copyright (C) 2026 Intel Corporation.
 *
 * SPDX-License-Identifier: Apache-2.0
 '''
@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock as mock
 
 import benchmark_smart_kiosk_v2v as v2v
 
@@ -55,9 +56,17 @@ class BenchmarkTempDirTest(unittest.TestCase):
         self.results_dir = os.path.join(self.tmp, "results")
         os.makedirs(self.app_dir)
         os.makedirs(self.results_dir)
-        # The constructor requires a Makefile to exist.
+        # The constructor validates both of these up front, before the stack
+        # is started, so the fixture has to provide them.
         with open(os.path.join(self.app_dir, "Makefile"), "w") as f:
             f.write("up:\n\t@true\n")
+        self.script_dir = os.path.join(self.app_dir, "tests", "benchmarks")
+        os.makedirs(self.script_dir)
+        self.app_script = os.path.join(
+            self.script_dir, "v2v_scripted_conversation_benchmark.py"
+        )
+        with open(self.app_script, "w") as f:
+            f.write("# stub\n")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -167,6 +176,36 @@ class CollectVlmLoggerMetricsTest(BenchmarkTempDirTest):
         self.assertEqual(metrics["p95_sample_count"], 8)
         self.assertTrue(metrics["p95_is_max"])
 
+    def _write_n_turns(self, n):
+        lines = []
+        for i in range(n):
+            base = 10000 + i * 1000
+            lines.append(_event_line("stream0", "start", base))
+            # Strictly increasing latencies, so there are no ties.
+            lines.append(_event_line("stream0", "end", base + 100 + i))
+        self.write_log("vlm_application_metrics_0.txt", lines)
+
+    def test_p95_is_max_true_at_19_samples(self):
+        # ceil(0.95 * 19) = 19 -> the 19th of 19 samples is the maximum.
+        self._write_n_turns(19)
+        metrics = self.make().collect_vlm_logger_metrics()
+        self.assertTrue(metrics["p95_is_max"])
+        self.assertEqual(
+            metrics["p95_latency_ms"],
+            max(t["latency_ms"] for t in metrics["transactions"]),
+        )
+
+    def test_p95_is_max_false_at_20_samples(self):
+        # ceil(0.95 * 20) = 19 -> the 19th of 20 samples is NOT the maximum.
+        self._write_n_turns(20)
+        metrics = self.make().collect_vlm_logger_metrics()
+        self.assertEqual(metrics["p95_sample_count"], 20)
+        self.assertFalse(metrics["p95_is_max"])
+        self.assertLess(
+            metrics["p95_latency_ms"],
+            max(t["latency_ms"] for t in metrics["transactions"]),
+        )
+
 
 class CleanPreviousMetricsTest(BenchmarkTempDirTest):
 
@@ -271,17 +310,139 @@ class PruneWarmupFromVlmLogsTest(BenchmarkTempDirTest):
                 raise IOError("disk full")
             return real_open(file, mode, *args, **kwargs)
 
-        import builtins
-        builtins.open = failing_open
-        try:
+        # Patch only the module under test, and only for this call, rather
+        # than reassigning builtins.open for the whole process.
+        with mock.patch.object(
+            v2v, "open", failing_open, create=True
+        ):
             bench.prune_warmup_from_vlm_logs(since_ms=5000)
-        finally:
-            builtins.open = real_open
 
         self.assertTrue(os.path.exists(path))
         with open(path) as f:
             self.assertEqual(len(f.readlines()), 4)
         self.assertFalse(os.path.exists(path + ".pruned.tmp"))
+
+
+class StraddlingWarmupTurnTest(BenchmarkTempDirTest):
+    """A turn whose start is warmup but whose end lands after since_ms."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.write_log(
+            "vlm_application_metrics_0.txt",
+            [
+                # Warmup turn that straddles the measured-window boundary.
+                _event_line("stream0", "start", 4900),
+                _event_line("stream0", "end", 5200),
+                # A genuine measured turn.
+                _event_line("stream0", "start", 9000),
+                _event_line("stream0", "end", 9400),
+            ],
+        )
+
+    def test_whole_pair_is_dropped_leaving_no_orphan_end(self):
+        self.make().prune_warmup_from_vlm_logs(since_ms=5000)
+        with open(self.path) as f:
+            kept = f.readlines()
+        # Both warmup lines must go, including the end stamped after
+        # since_ms, or the consolidator pairs it with the next start.
+        self.assertEqual(len(kept), 2)
+        self.assertNotIn("timestamp_ms=5200", "".join(kept))
+        self.assertEqual(
+            sum(1 for line in kept if "event=start" in line), 1
+        )
+        self.assertEqual(sum(1 for line in kept if "event=end" in line), 1)
+
+    def test_pruned_file_reparses_to_only_the_measured_turn(self):
+        self.make().prune_warmup_from_vlm_logs(since_ms=5000)
+        metrics = self.make().collect_vlm_logger_metrics()
+        self.assertEqual(metrics["total_transactions"], 1)
+        self.assertEqual(metrics["transactions"][0]["latency_ms"], 400)
+
+    def test_unmatched_warmup_start_is_dropped(self):
+        # A warmup turn whose end never made it to the log. Leaving the
+        # start behind would let the consolidator pair it with a later
+        # measured end and report an absurd latency.
+        self.write_log(
+            "vlm_application_metrics_1.txt",
+            [
+                _event_line("stream1", "start", 1000),
+                _event_line("stream2", "start", 9000),
+                _event_line("stream2", "end", 9400),
+            ],
+        )
+        self.make().prune_warmup_from_vlm_logs(since_ms=5000)
+        path = os.path.join(self.results_dir, "vlm_application_metrics_1.txt")
+        with open(path) as f:
+            kept = f.readlines()
+        self.assertEqual(len(kept), 2)
+        self.assertNotIn("timestamp_ms=1000", "".join(kept))
+
+    def test_unparseable_lines_are_never_dropped(self):
+        self.write_log(
+            "vlm_application_metrics_2.txt",
+            [
+                "some header line without events\n",
+                _event_line("stream0", "start", 1000),
+                _event_line("stream0", "end", 1400),
+            ],
+        )
+        self.make().prune_warmup_from_vlm_logs(since_ms=5000)
+        path = os.path.join(self.results_dir, "vlm_application_metrics_2.txt")
+        with open(path) as f:
+            kept = f.readlines()
+        self.assertEqual(kept, ["some header line without events\n"])
+
+
+class DescribeStackTest(BenchmarkTempDirTest):
+    """Results must state the configuration the run actually used."""
+
+    def test_defaults_report_everything_disabled(self):
+        stack = self.make().describe_stack()
+        self.assertEqual(stack["queue_service"], "disabled")
+        self.assertEqual(stack["rtsp_streamer"], "disabled")
+        self.assertEqual(stack["diarization"], "disabled")
+        self.assertEqual(stack["stack_managed_by_script"], "yes")
+
+    def test_queue_true_is_not_reported_as_disabled(self):
+        # --make_arg QUEUE=true starts the vision profile, so claiming
+        # rtsp_streamer is disabled would misreport the configuration.
+        stack = self.make(make_args=["QUEUE=true"]).describe_stack()
+        self.assertEqual(stack["rtsp_streamer"], "enabled")
+        self.assertEqual(stack["make_args"], "QUEUE=true")
+
+    def test_records_make_args_and_skip_stack(self):
+        stack = self.make(
+            skip_stack=True, make_args=["QUEUE=false", "TARGET_DEVICE=GPU"]
+        ).describe_stack()
+        self.assertIn("TARGET_DEVICE=GPU", stack["make_args"])
+        self.assertEqual(stack["stack_managed_by_script"], "no")
+
+
+class ResultsDirWiringTest(BenchmarkTempDirTest):
+    """--results_dir must reach the service that writes the metrics."""
+
+    def test_stack_env_points_the_bind_mount_at_results_dir(self):
+        env = self.make().configure_stack_env()
+        self.assertEqual(env["KIOSK_RESULTS_HOST_DIR"], self.results_dir)
+
+    def test_warns_under_skip_stack_with_a_divergent_results_dir(self):
+        bench = self.make(skip_stack=True)
+        with mock.patch("builtins.print") as printed:
+            bench.warn_if_results_dir_unreachable()
+        output = " ".join(str(c) for c in printed.call_args_list)
+        self.assertIn("WARNING", output)
+
+    def test_no_warning_when_results_dir_matches_the_app(self):
+        bench = v2v.SmartKioskV2VBenchmark(
+            app_dir=self.app_dir,
+            results_dir=os.path.join(self.app_dir, "results"),
+            skip_stack=True,
+        )
+        with mock.patch("builtins.print") as printed:
+            bench.warn_if_results_dir_unreachable()
+        output = " ".join(str(c) for c in printed.call_args_list)
+        self.assertNotIn("WARNING", output)
 
 
 class CrossCheckTest(unittest.TestCase):
@@ -319,6 +480,55 @@ class CrossCheckTest(unittest.TestCase):
             )["status"],
             "unavailable",
         )
+
+    def test_turn_count_mismatch_fails_even_when_medians_agree(self):
+        # A dropped or duplicated turn can leave the median untouched, so
+        # comparing medians alone would miss a broken metrics path.
+        result = v2v.SmartKioskV2VBenchmark.cross_check(
+            {"median_latency_ms": 750.0, "total_transactions": 7},
+            {
+                "summary": {"voice_to_voice_ms": {"median": 750.0}},
+                "turns_total": 8,
+            },
+        )
+        self.assertEqual(result["status"], "MISMATCH")
+        self.assertEqual(result["turn_count_status"], "MISMATCH")
+        self.assertEqual(result["reported_turns"], 8)
+        self.assertEqual(result["emitted_turns"], 7)
+
+    def test_matching_turn_counts_keep_the_run_ok(self):
+        result = v2v.SmartKioskV2VBenchmark.cross_check(
+            {"median_latency_ms": 750.0, "total_transactions": 8},
+            {
+                "summary": {"voice_to_voice_ms": {"median": 750.0}},
+                "turns_total": 8,
+            },
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["turn_count_status"], "ok")
+
+
+class ConstructorValidationTest(BenchmarkTempDirTest):
+    """Bad paths must fail immediately, not after a ~10 minute bring-up."""
+
+    def test_missing_makefile_is_rejected(self):
+        os.remove(os.path.join(self.app_dir, "Makefile"))
+        with self.assertRaises(ValueError):
+            self.make()
+
+    def test_missing_app_benchmark_script_is_rejected_up_front(self):
+        # Previously this was only noticed inside run_benchmark_script, i.e.
+        # after make up and the health wait had already been paid for.
+        os.remove(self.app_script)
+        with self.assertRaisesRegex(ValueError, "Benchmark script not found"):
+            self.make()
+
+    def test_missing_app_dir_is_rejected(self):
+        with self.assertRaises(ValueError):
+            v2v.SmartKioskV2VBenchmark(
+                app_dir=os.path.join(self.tmp, "nope"),
+                results_dir=self.results_dir,
+            )
 
 
 class WriteCsvSummaryTest(BenchmarkTempDirTest):
