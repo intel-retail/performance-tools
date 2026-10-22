@@ -6,6 +6,7 @@
 
 import json
 import os
+import csv
 import tempfile
 import unittest
 
@@ -152,6 +153,125 @@ class WindowLatencyMetricsTest(unittest.TestCase):
             result = metrics.load_window_latency_records(root_directory)
 
         self.assertEqual(result, [record])
+
+    def test_load_stream_density_records_separates_sweep_results(self):
+        samples = {
+            "container_name": "gst",
+            "pipeline_count": 2,
+            "samples_by_stream": {"source0 -> sink0": [12.5]},
+        }
+        result = {
+            "record_type": "sweep_result",
+            "container_name": "gst",
+            "status": "inconclusive",
+            "lane_count": 2,
+            "result_id": "2026-10-22T10:00:00+05:30",
+        }
+        with tempfile.TemporaryDirectory() as root_directory:
+            sample_path = os.path.join(
+                root_directory, "stream_density_latency_samples.jsonl")
+            with open(sample_path, "w", encoding="utf-8") as sample_file:
+                sample_file.write(json.dumps(samples) + "\n")
+                sample_file.write(json.dumps(result) + "\n")
+
+            window_records, sweep_results = (
+                metrics.load_stream_density_records(root_directory))
+
+        self.assertEqual(window_records, [samples])
+        self.assertEqual(sweep_results, [result])
+        self.assertTrue(metrics.has_unconfirmed_density(sweep_results))
+        self.assertFalse(metrics.has_unconfirmed_density([
+            {**result, "status": "pass"}]))
+
+    def test_unconfirmed_result_filters_fps_latency_and_marks_csv(self):
+        metrics_to_write = metrics.filter_unconfirmed_fps_latency_metrics({
+            "Camera_0 FPS": 15.0,
+            "System Latency p99 (ms)": 20.0,
+            "CPU Utilization %": 55.0,
+        })
+
+        with tempfile.TemporaryDirectory() as results_dir:
+            output = os.path.join(results_dir, "metrics.csv")
+            metrics.write_metrics_csv(
+                output, metrics_to_write, no_confirmed_density=True)
+            with open(output, newline="", encoding="utf-8") as csv_file:
+                rows = list(csv.reader(csv_file))
+
+        self.assertEqual(rows[0], ["Result: no confirmed density"])
+        self.assertEqual(rows[1], ["CPU Utilization %", "55.0"])
+        self.assertFalse(any("FPS" in ",".join(row) for row in rows))
+        self.assertFalse(any("Latency" in ",".join(row) for row in rows))
+
+    def test_consolidation_omits_whole_log_fps_and_latency_when_unconfirmed(self):
+        with tempfile.TemporaryDirectory() as results_dir:
+            with open(os.path.join(results_dir, "pipeline_stream0_gst.log"),
+                      "w", encoding="utf-8") as log_file:
+                log_file.write("fps,duration_seconds\n999,1\n")
+            with open(os.path.join(results_dir, "gst-launch_gst.log"),
+                      "w", encoding="utf-8") as log_file:
+                log_file.write(
+                    "latency_tracer_pipeline, source_name=(string)source0, "
+                    "sink_name=(string)sink0, frame_num=(uint)1, "
+                    "frame_latency=(double)999\n")
+            with open(os.path.join(
+                    results_dir, "stream_density_latency_samples.jsonl"),
+                    "w", encoding="utf-8") as sample_file:
+                sample_file.write(json.dumps({
+                    "record_type": "sweep_result",
+                    "container_name": "gst",
+                    "status": "inconclusive",
+                    "lane_count": 1,
+                }) + "\n")
+
+            output = os.path.join(results_dir, "metrics.csv")
+            metrics.consolidate_metrics(results_dir, output)
+
+            with open(output, newline="", encoding="utf-8") as csv_file:
+                rows = list(csv.reader(csv_file))
+
+        self.assertEqual(rows, [["Result: no confirmed density"]])
+
+    def test_consolidation_uses_confirmed_window_metrics_when_passed(self):
+        with tempfile.TemporaryDirectory() as results_dir:
+            with open(os.path.join(results_dir, "pipeline_stream0_gst.log"),
+                      "w", encoding="utf-8") as log_file:
+                log_file.write("fps,duration_seconds\n999,1\n")
+            with open(os.path.join(results_dir, "gst-launch_gst.log"),
+                      "w", encoding="utf-8") as log_file:
+                log_file.write(
+                    "latency_tracer_pipeline, source_name=(string)source0, "
+                    "sink_name=(string)sink0, frame_num=(uint)1, "
+                    "frame_latency=(double)999\n")
+            records = [
+                {
+                    "container_name": "gst",
+                    "pipeline_count": 1,
+                    "stream_fps": {"pipeline_stream0": 15.0},
+                    "samples_by_stream": {"source0 -> sink0": [10.0, 20.0]},
+                },
+                {
+                    "record_type": "sweep_result",
+                    "container_name": "gst",
+                    "status": "pass",
+                    "lane_count": 1,
+                },
+            ]
+            with open(os.path.join(
+                    results_dir, "stream_density_latency_samples.jsonl"),
+                    "w", encoding="utf-8") as sample_file:
+                sample_file.writelines(
+                    json.dumps(record) + "\n" for record in records)
+
+            output = os.path.join(results_dir, "metrics.csv")
+            metrics.consolidate_metrics(results_dir, output)
+
+            with open(output, newline="", encoding="utf-8") as csv_file:
+                rows = list(csv.reader(csv_file))
+
+        self.assertIn(["Camera_0 FPS", "15.0"], rows)
+        self.assertIn(["System Latency p99 (ms)", "19.9"], rows)
+        self.assertNotIn(["Camera_0 FPS", "999.0"], rows)
+        self.assertNotIn(["System Latency p99 (ms)", "999.0"], rows)
 
 
 if __name__ == "__main__":

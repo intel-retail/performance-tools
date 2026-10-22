@@ -301,7 +301,7 @@ def measure_pipeline_memory(env_vars, compose_files, results_dir, container_name
     """
 
     # Clean up any previous logs and containers
-    clean_up_pipeline_logs(results_dir)
+    clean_up_pipeline_logs(results_dir, preserve_latency_samples=True)
     benchmark.docker_compose_containers(
         "down", compose_files=compose_files,
         compose_post_args="-t 30 --volumes --remove-orphans", env_vars=env_vars)
@@ -458,11 +458,12 @@ def is_env_non_empty(env_vars, key):
         return False
 
 
-def clean_up_pipeline_logs(results_dir):
+def clean_up_pipeline_logs(results_dir, preserve_latency_samples=False):
     '''
     cleans up the pipeline log files under results_dir
     Args:
         results_dir: directory holding the benchmark results
+        preserve_latency_samples: keep confirmed latency samples between targets
     '''
     print('INFO: Cleaning logs')
     matching_files = glob.glob(os.path.join(results_dir, 'pipeline*_*.log')) \
@@ -470,6 +471,9 @@ def clean_up_pipeline_logs(results_dir):
         + glob.glob(os.path.join(results_dir, 'rs*_*.jsonl')) \
         + glob.glob(os.path.join(results_dir, 'qmassa*-*.json')) \
         + glob.glob(os.path.join(results_dir, 'pipeline_streams_*.json'))
+    if not preserve_latency_samples:
+        matching_files += glob.glob(
+            os.path.join(results_dir, LATENCY_SAMPLES_FILENAME))
     if len(matching_files) > 0:
         for log_file in matching_files:
             os.remove(log_file)
@@ -776,7 +780,8 @@ def print_window_stream_summary(num_pipelines, window_number, passed,
                                 total_fps, stream_fps, stream_samples,
                                 latency_samples):
     print(
-        f"INFO: Pipelines: {num_pipelines} | window: {window_number} | "
+        f"INFO: Lanes: {num_pipelines} | "
+        f"measurement interval: {window_number} | "
         f"status: {'pass' if passed else 'fail'}")
     print(f"  System throughput: {total_fps:.2f} FPS")
     for name in sorted(stream_fps):
@@ -795,6 +800,7 @@ def print_window_stream_summary(num_pipelines, window_number, passed,
             continue
         print(
             f"  {channel} latency: p50: {_linear_percentile(values, 50):.2f} ms "
+            f"p95: {_linear_percentile(values, 95):.2f} ms "
             f"p99: {_linear_percentile(values, 99):.2f} ms")
     pooled_latency_samples = [
         value
@@ -806,9 +812,10 @@ def print_window_stream_summary(num_pipelines, window_number, passed,
         print(
             f"  System latency: p50: "
             f"{_linear_percentile(pooled_latency_samples, 50):.2f} ms "
+            f"p95: {_linear_percentile(pooled_latency_samples, 95):.2f} ms "
             f"p99: {_linear_percentile(pooled_latency_samples, 99):.2f} ms")
     else:
-        print("  System latency: no samples in this window")
+        print("  System latency: no samples in this measurement interval")
 
 
 def print_stream_density_report(num_pipelines, stream_fps_dict,
@@ -1013,8 +1020,8 @@ def run_pipeline_iterations(
     )
     print(f"TEST: per_pipeline_memory_mb = {per_pipeline_memory_mb} MB")
 
-    # clean up any residual pipeline log files before starts:
-    clean_up_pipeline_logs(results_dir)
+    # Keep confirmed samples from earlier targets in this same density run.
+    clean_up_pipeline_logs(results_dir, preserve_latency_samples=True)
     target_fps_label = describe_target_fps_configuration(target_fps, env_vars=env_vars)
     print(
         f"INFO: Stream density {target_fps_label} "
@@ -1219,8 +1226,7 @@ def run_pipeline_iterations(
                     )
                     meet_target_fps = True
                     print(
-                        f"INFO: Max stream density achieved "
-                        f"is {num_pipelines}"
+                        f"INFO: Use case density (lanes): {num_pipelines}"
                     )
                     increments = 0
                     # Latency uses the same window as the final FPS report.
@@ -1235,7 +1241,7 @@ def run_pipeline_iterations(
                         f"INFO: Captured {latency_sample_count} per-frame "
                         f"latency samples across "
                         f"{len(latency_samples_by_stream)} stream(s) in the "
-                        f"final confirming measurement window.")
+                        f"final confirming measurement interval.")
                     stream_camera_meta = build_per_stream_camera_meta(
                         stream_fps_dict, env_vars=env_vars)
                     print_stream_density_report(
@@ -1335,11 +1341,8 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     results = []
     validate_and_setup_env(env_vars, target_fps_list)
     results_dir = env_vars[RESULTS_DIR_KEY]
-    if os.path.isdir(results_dir):
-        latency_samples_path = os.path.join(
-            results_dir, LATENCY_SAMPLES_FILENAME)
-        with open(latency_samples_path, "w", encoding="utf-8"):
-            pass
+    os.makedirs(results_dir, exist_ok=True)
+    clean_up_pipeline_logs(results_dir)
     log_file_path = os.path.join(results_dir, 'stream_density.log')
     orig_stdout = sys.stdout
     orig_stderr = sys.stderr
@@ -1359,12 +1362,15 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                 if explicit_target_fps:
                     env_vars[TARGET_FPS_KEY] = str(target_fps)
                 env_vars[CONTAINER_NAME_KEY] = container_name
+                env_vars["PIPELINE_COUNT"] = "0"
                 # stream density main logic:
                 try:
                     num_pipelines, status, streams_sustained = run_pipeline_iterations(
                         env_vars, compose_files, results_dir,
                         container_name, target_fps, explicit_target_fps
                     )
+                    save_sweep_result(
+                        results_dir, container_name, status, num_pipelines)
                     results.append(
                         (
                             target_fps,
@@ -1374,6 +1380,22 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                             streams_sustained
                         )
                     )
+                except KeyboardInterrupt:
+                    try:
+                        lane_count = int(env_vars.get("PIPELINE_COUNT", "0"))
+                    except ValueError:
+                        lane_count = 0
+                    save_sweep_result(
+                        results_dir, container_name, "interrupted", lane_count)
+                    raise
+                except Exception:
+                    try:
+                        lane_count = int(env_vars.get("PIPELINE_COUNT", "0"))
+                    except ValueError:
+                        lane_count = 0
+                    save_sweep_result(
+                        results_dir, container_name, "error", lane_count)
+                    raise
                 finally:
                     # better to compose-down before the next iteration
                     benchmark.docker_compose_containers(
@@ -1516,6 +1538,22 @@ def save_window_latency_samples(results_dir, container_name, num_pipelines,
         "window_id": datetime.now().astimezone().isoformat(),
         "stream_fps": dict(stream_fps),
         "samples_by_stream": samples_by_stream,
+    }
+    with open(output_path, "a", encoding="utf-8") as output_file:
+        json.dump(record, output_file, separators=(",", ":"))
+        output_file.write("\n")
+
+
+def save_sweep_result(results_dir, container_name, status, lane_count):
+    """Append the terminal status and lane count for one density sweep."""
+    os.makedirs(results_dir, exist_ok=True)
+    output_path = os.path.join(results_dir, LATENCY_SAMPLES_FILENAME)
+    record = {
+        "record_type": "sweep_result",
+        "container_name": container_name,
+        "status": status,
+        "lane_count": lane_count,
+        "result_id": datetime.now().astimezone().isoformat(),
     }
     with open(output_path, "a", encoding="utf-8") as output_file:
         json.dump(record, output_file, separators=(",", ":"))

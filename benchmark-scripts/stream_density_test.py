@@ -23,6 +23,57 @@ from datetime import datetime
 
 
 class Testing(unittest.TestCase):
+    def test_run_stream_density_records_terminal_status_and_lane_count(self):
+        outcomes = [
+            (stream_density.STATUS_PASS, 4, 8),
+            (stream_density.STATUS_FAIL, 3, 6),
+            (stream_density.STATUS_INCONCLUSIVE, 2, 4),
+        ]
+        for status, lane_count, streams in outcomes:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as results_dir:
+                env_vars = {RESULTS_DIR_KEY: results_dir}
+                with patch('stream_density.validate_and_setup_env'), \
+                        patch(
+                            'stream_density.run_pipeline_iterations',
+                            return_value=(lane_count, status, streams)), \
+                        patch('stream_density.clean_up_pipeline_logs'), \
+                        patch('stream_density.benchmark.docker_compose_containers'), \
+                        patch('stream_density.time.sleep'):
+                    result = stream_density.run_stream_density(
+                        env_vars, ['compose.yml'], [15.0], ['gst'])
+
+                sample_path = os.path.join(
+                    results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
+                with open(sample_path, encoding="utf-8") as sample_file:
+                    record = json.loads(sample_file.readline())
+
+                self.assertEqual(result[0][3], status)
+                self.assertEqual(record["record_type"], "sweep_result")
+                self.assertEqual(record["status"], status)
+                self.assertEqual(record["lane_count"], lane_count)
+
+    def test_run_stream_density_records_interrupt(self):
+        with tempfile.TemporaryDirectory() as results_dir:
+            env_vars = {RESULTS_DIR_KEY: results_dir}
+            with patch('stream_density.validate_and_setup_env'), \
+                    patch(
+                        'stream_density.run_pipeline_iterations',
+                        side_effect=KeyboardInterrupt), \
+                    patch('stream_density.clean_up_pipeline_logs'), \
+                    patch('stream_density.benchmark.docker_compose_containers'), \
+                    patch('stream_density.time.sleep'):
+                with self.assertRaises(KeyboardInterrupt):
+                    stream_density.run_stream_density(
+                        env_vars, ['compose.yml'], [15.0], ['gst'])
+
+            sample_path = os.path.join(
+                results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
+            with open(sample_path, encoding="utf-8") as sample_file:
+                record = json.loads(sample_file.readline())
+
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["lane_count"], 0)
+
     def test_build_per_stream_target_fps_mixed_values(self):
         stream_fps_dict = {
             'pipeline_stream0': 10.0,
@@ -377,7 +428,9 @@ class Testing(unittest.TestCase):
                     'cam2_1 -> fakesink0': [0.0, 300.0],
                 })
 
-        self.assertIn('Pipelines: 4 | window: 2 | status: fail', output.getvalue())
+        self.assertIn(
+            'Lanes: 4 | measurement interval: 2 | status: fail',
+            output.getvalue())
         self.assertIn('System throughput: 20.00 FPS', output.getvalue())
         self.assertIn(
             'pipeline_stream0 throughput: 14.00 FPS p10: 10.00 p90: 15.00',
@@ -386,10 +439,12 @@ class Testing(unittest.TestCase):
             'pipeline_stream1 throughput: 6.00 FPS p10: 6.00 p90: 6.00',
             output.getvalue())
         self.assertIn(
-            'cam1_1 -> fakesink0 latency: p50: 150.00 ms p99: 199.00 ms',
+            'cam1_1 -> fakesink0 latency: p50: 150.00 ms '
+            'p95: 195.00 ms p99: 199.00 ms',
             output.getvalue())
         self.assertIn(
-            'System latency: p50: 150.00 ms p99: 297.00 ms',
+            'System latency: p50: 150.00 ms p95: 285.00 ms '
+            'p99: 297.00 ms',
             output.getvalue())
 
     def test_window_summary_reports_missing_latency_samples(self):
@@ -399,9 +454,13 @@ class Testing(unittest.TestCase):
                 1, 1, True, 15.0, {'pipeline_stream0': 15.0},
                 {'pipeline_stream0': [(15.0, 1.0)]}, {})
 
-        self.assertIn('Pipelines: 1 | window: 1 | status: pass', output.getvalue())
+        self.assertIn(
+            'Lanes: 1 | measurement interval: 1 | status: pass',
+            output.getvalue())
         self.assertIn('System throughput: 15.00 FPS', output.getvalue())
-        self.assertIn('System latency: no samples in this window', output.getvalue())
+        self.assertIn(
+            'System latency: no samples in this measurement interval',
+            output.getvalue())
 
     def test_sweep_fails_on_weighted_rate_even_when_p90_passes(self):
         responses = [
@@ -444,8 +503,12 @@ class Testing(unittest.TestCase):
             '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
             stream_fps={'pipeline_stream0': 15.0})
         self.assertEqual(output.getvalue().count('System latency: p50:'), 3)
-        self.assertIn('Pipelines: 2 | window: 2 | status: fail', output.getvalue())
-        self.assertIn('Pipelines: 1 | window: 3 | status: pass', output.getvalue())
+        self.assertIn(
+            'Lanes: 2 | measurement interval: 2 | status: fail',
+            output.getvalue())
+        self.assertIn(
+            'Lanes: 1 | measurement interval: 3 | status: pass',
+            output.getvalue())
         self.assertEqual(output.getvalue().count('System throughput: 15.00 FPS'), 2)
         self.assertEqual(output.getvalue().count('System throughput: 14.00 FPS'), 1)
         self.assertEqual(report.call_args.args[1], {'pipeline_stream0': 15.0})
@@ -671,6 +734,8 @@ class Testing(unittest.TestCase):
             test_results_dir, 'pipeline98765432_def.log')
         manifestFile = os.path.join(
             test_results_dir, 'pipeline_streams_20261009092918074066_gst0.json')
+        latencySamplesFile = os.path.join(
+            test_results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
         try:
             os.makedirs(test_results_dir)
             with open(testFile1, 'w') as file:
@@ -679,6 +744,13 @@ class Testing(unittest.TestCase):
                 file.write('another file for testing')
             with open(manifestFile, 'w') as file:
                 file.write('{"streams": []}')
+            with open(latencySamplesFile, 'w') as file:
+                file.write('{"samples_by_stream": {}}\n')
+            stream_density.clean_up_pipeline_logs(
+                test_results_dir, preserve_latency_samples=True)
+            self.assertTrue(
+                os.path.exists(latencySamplesFile),
+                f"confirmed samples were removed: {latencySamplesFile}")
             stream_density.clean_up_pipeline_logs(
                 test_results_dir)
             self.assertFalse(
@@ -690,6 +762,9 @@ class Testing(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(manifestFile),
                 f"file still exists: {manifestFile}")
+            self.assertFalse(
+                os.path.exists(latencySamplesFile),
+                f"file still exists: {latencySamplesFile}")
         except Exception as ex:
             self.fail(f"ERROR: found exception {ex}")
         finally:
@@ -699,6 +774,8 @@ class Testing(unittest.TestCase):
                 os.remove(testFile2)
             if os.path.exists(manifestFile):
                 os.remove(manifestFile)
+            if os.path.exists(latencySamplesFile):
+                os.remove(latencySamplesFile)
             if not os.listdir(test_results_dir):
                 os.rmdir(test_results_dir)
 
@@ -1023,52 +1100,48 @@ class Testing(unittest.TestCase):
         for i, test_case in enumerate(test_cases):
             with self.subTest(f"Test case {i + 1}"):
                 mock_docker_compose.reset_mock()
-                env_vars = test_case["env_vars"].copy()
-                compose_files = test_case["compose_files"]
-                target_fps_list = test_case["target_fps_list"]
-                container_names_list = test_case["container_names_list"]
+                with tempfile.TemporaryDirectory() as results_dir:
+                    env_vars = dict(
+                        test_case["env_vars"], **{RESULTS_DIR_KEY: results_dir})
+                    compose_files = test_case["compose_files"]
+                    target_fps_list = test_case["target_fps_list"]
+                    container_names_list = test_case["container_names_list"]
 
-                # Mock the behavior of run_pipeline_iterations
-                # based on the test case
-                if isinstance(test_case["run_pipeline_side_effect"], list):
-                    mock_run_pipeline_iterations.side_effect = test_case[
-                        "run_pipeline_side_effect"]
-                else:
                     mock_run_pipeline_iterations.side_effect = test_case[
                         "run_pipeline_side_effect"]
 
-                # Run the function and verify results or exceptions
-                if test_case.get("expect_exception"):
-                    print('expecting exception test case')
-                    with self.assertRaises(Exception) as context:
-                        stream_density.run_stream_density(
+                    # Run the function and verify results or exceptions
+                    if test_case.get("expect_exception"):
+                        print('expecting exception test case')
+                        with self.assertRaises(Exception) as context:
+                            stream_density.run_stream_density(
+                                env_vars, compose_files,
+                                target_fps_list, container_names_list)
+                        self.assertTrue(isinstance(context.exception, Exception))
+                    else:
+                        results = stream_density.run_stream_density(
                             env_vars, compose_files,
                             target_fps_list, container_names_list)
-                    self.assertTrue(isinstance(context.exception, Exception))
-                else:
-                    results = stream_density.run_stream_density(
-                        env_vars, compose_files,
-                        target_fps_list, container_names_list)
-                    self.assertEqual(results, test_case["expected_results"])
+                        self.assertEqual(results, test_case["expected_results"])
 
-                # Verify that validate_and_setup_env was called correctly
-                mock_validate_env.assert_called_with(
-                    env_vars, target_fps_list
-                )
+                    # Verify that validate_and_setup_env was called correctly
+                    mock_validate_env.assert_called_with(
+                        env_vars, target_fps_list
+                    )
 
-                expected_down_call_count = test_case[
-                    "expected_down_call_count"
-                ]
-                actual_down_calls = [
-                    call for call in mock_docker_compose.call_args_list
-                    if call[0][0] == 'down'
-                ]
-                self.assertEqual(
-                    len(actual_down_calls),
-                    expected_down_call_count,
-                    f"Expected {expected_down_call_count} 'down' calls, "
-                    f"but found {len(actual_down_calls)}"
-                )
+                    expected_down_call_count = test_case[
+                        "expected_down_call_count"
+                    ]
+                    actual_down_calls = [
+                        call for call in mock_docker_compose.call_args_list
+                        if call[0][0] == 'down'
+                    ]
+                    self.assertEqual(
+                        len(actual_down_calls),
+                        expected_down_call_count,
+                        f"Expected {expected_down_call_count} 'down' calls, "
+                        f"but found {len(actual_down_calls)}"
+                    )
 
 
 if __name__ == '__main__':

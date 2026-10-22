@@ -828,7 +828,14 @@ CSV_EXCLUDED_METRICS = {"Per-stream Latency Sample Count"}
 
 def load_window_latency_records(root_directory):
     """Load latency samples recorded for final confirming stream-density windows."""
-    records = []
+    records, _ = load_stream_density_records(root_directory)
+    return records
+
+
+def load_stream_density_records(root_directory):
+    """Load confirmed-window samples and terminal sweep-result records."""
+    sample_records = []
+    sweep_results = []
     sample_filename = "stream_density_latency_samples.jsonl"
     for sample_path in pathlib.Path(root_directory).rglob(sample_filename):
         with open(sample_path, "r", encoding="utf-8") as sample_file:
@@ -842,14 +849,61 @@ def load_window_latency_records(root_directory):
                         f"WARN: Invalid latency sample record at "
                         f"{sample_path}:{line_number}: {error}")
                     continue
-                if not isinstance(record, dict) or not isinstance(
-                        record.get("samples_by_stream"), dict):
+                if not isinstance(record, dict):
                     print(
                         f"WARN: Ignoring malformed latency sample record at "
                         f"{sample_path}:{line_number}")
                     continue
-                records.append(record)
-    return records
+                if record.get("record_type") == "sweep_result":
+                    if not isinstance(record.get("status"), str) or not isinstance(
+                            record.get("lane_count"), int):
+                        print(
+                            f"WARN: Ignoring malformed sweep result at "
+                            f"{sample_path}:{line_number}")
+                        continue
+                    sweep_results.append(record)
+                elif isinstance(record.get("samples_by_stream"), dict):
+                    sample_records.append(record)
+                else:
+                    print(
+                        f"WARN: Ignoring malformed latency sample record at "
+                        f"{sample_path}:{line_number}")
+    return sample_records, sweep_results
+
+
+def has_unconfirmed_density(sweep_results):
+    """Return whether any recorded density sweep ended without confirmation."""
+    return any(result["status"] != "pass" for result in sweep_results)
+
+
+def is_fps_or_latency_metric(metric_name):
+    """Return whether a CSV metric is an FPS or latency measurement."""
+    return bool(re.search(r"\bfps\b|latency", str(metric_name), re.IGNORECASE))
+
+
+def filter_unconfirmed_fps_latency_metrics(metrics):
+    """Remove FPS and latency metrics when no density was confirmed."""
+    return {
+        key: value for key, value in metrics.items()
+        if not is_fps_or_latency_metric(key)
+    }
+
+
+def write_metrics_csv(output, metrics, no_confirmed_density=False):
+    """Write consolidated metrics, marking unconfirmed density sweeps."""
+    with open(output, 'w') as csv_file:
+        writer = csv.writer(csv_file)
+        if no_confirmed_density:
+            writer.writerow(["Result: no confirmed density"])
+        for key, value in metrics.items():
+            if key in CSV_EXCLUDED_METRICS:
+                continue
+            if isinstance(value, dict):
+                formatted_value = ', '.join(
+                    [f'{k}: {v}' for k, v in value.items()])
+                writer.writerow([key, formatted_value])
+            else:
+                writer.writerow([key, value])
 
 
 def build_window_fps_metrics(records):
@@ -941,24 +995,24 @@ def build_window_latency_metrics(records):
     return metric_values
 
 
-if __name__ == '__main__':
-    parser = add_parser()
-    args = vars(parser.parse_args())
-
-    root_directory = args['root_directory'][0]
-    output = args['output'][0]
-
+def consolidate_metrics(root_directory, output):
     n = 0
     df = pd.DataFrame()
     full_kpi_dict = {}
     # Final confirming stream-density window; empty when nothing was saved.
-    window_records = load_window_latency_records(root_directory)
+    window_records, sweep_results = load_stream_density_records(root_directory)
+    has_sweep_results = bool(sweep_results)
+    no_confirmed_density = (
+        has_sweep_results and has_unconfirmed_density(sweep_results))
     whole_log_latency_records = []
 
     for kpiExtractor in KPIExtractor_OPTION:
+        if has_sweep_results and kpiExtractor in (
+                "camera", "gst-launch", PIPELINE_FPS_LOG_PATTERN):
+            continue
         # When the final window was saved, it replaces the whole-log FPS
         # and latency so metrics.csv matches stream_density.log.
-        if window_records and kpiExtractor in (
+        if (window_records or has_sweep_results) and kpiExtractor in (
                 "gst-launch", PIPELINE_FPS_LOG_PATTERN):
             continue
         fileFound = False
@@ -974,19 +1028,18 @@ if __name__ == '__main__':
                     if kpi_dict:
                         full_kpi_dict.update(kpi_dict)
 
-    if window_records:
+    if window_records and not no_confirmed_density:
         full_kpi_dict.update(build_window_fps_metrics(window_records))
-    full_kpi_dict.update(build_window_latency_metrics(
-        window_records or whole_log_latency_records))
-    # Write out summary csv file from dictionary
-    with open(output, 'w') as csv_file:
-        writer = csv.writer(csv_file)
-        for key, value in full_kpi_dict.items():
-            if key in CSV_EXCLUDED_METRICS:
-                continue
-            if isinstance(value, dict):
-                # Format dictionary values without curly braces
-                formatted_value = ', '.join([f'{k}: {v}' for k, v in value.items()])
-                writer.writerow([key, formatted_value])
-            else:
-                writer.writerow([key, value])
+    if not no_confirmed_density:
+        full_kpi_dict.update(build_window_latency_metrics(
+            window_records or (
+                [] if has_sweep_results else whole_log_latency_records)))
+    else:
+        full_kpi_dict = filter_unconfirmed_fps_latency_metrics(full_kpi_dict)
+    write_metrics_csv(output, full_kpi_dict, no_confirmed_density)
+
+
+if __name__ == '__main__':
+    parser = add_parser()
+    args = vars(parser.parse_args())
+    consolidate_metrics(args['root_directory'][0], args['output'][0])
