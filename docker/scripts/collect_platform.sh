@@ -4,43 +4,48 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
+# RESULTS_DIR defaults to /tmp/results, matching the previous hardcoded
+# path exactly -- callers that don't set it (e.g. docker-compose.yaml) see
+# no behavior change.
+RESULTS_DIR="${RESULTS_DIR:-/tmp/results}"
+mkdir -p "${RESULTS_DIR}"
 
 echo "Starting platform data collection"
 
 echo "Starting sar collection"
-touch /tmp/results/cpu_usage.log
-chown 1000:1000 /tmp/results/cpu_usage.log
-sar 1 >& /tmp/results/cpu_usage.log &
+touch "${RESULTS_DIR}/cpu_usage.log"
+chown 1000:1000 "${RESULTS_DIR}/cpu_usage.log"
+sar 1 >& "${RESULTS_DIR}/cpu_usage.log" &
 
 echo "Starting free collection"
-touch /tmp/results/memory_usage.log
-chown 1000:1000 /tmp/results/memory_usage.log
-free -s 1 >& /tmp/results/memory_usage.log &
+touch "${RESULTS_DIR}/memory_usage.log"
+chown 1000:1000 "${RESULTS_DIR}/memory_usage.log"
+free -s 1 >& "${RESULTS_DIR}/memory_usage.log" &
 
 echo "Starting iotop collection"
-touch /tmp/results/disk_bandwidth.log
-chown 1000:1000 /tmp/results/disk_bandwidth.log
-iotop -o -P -b >& /tmp/results/disk_bandwidth.log &
+touch "${RESULTS_DIR}/disk_bandwidth.log"
+chown 1000:1000 "${RESULTS_DIR}/disk_bandwidth.log"
+iotop -o -P -b >& "${RESULTS_DIR}/disk_bandwidth.log" &
 
 is_xeon=`lscpu | grep -i xeon | wc -l`
 
 if [ "$is_xeon"  == "1"  ]
   then
     echo "Starting pcm-memory collection"
-    touch /tmp/results/pcm-memory.csv
-    chown 1000:1000 /tmp/results/pcm-memory.csv
-    /opt/intel/pcm-bin/bin/pcm-memory 1 -silent -nc -csv=/tmp/results/pcm-memory.csv &
+    touch "${RESULTS_DIR}/pcm-memory.csv"
+    chown 1000:1000 "${RESULTS_DIR}/pcm-memory.csv"
+    /opt/intel/pcm-bin/bin/pcm-memory 1 -silent -nc -csv="${RESULTS_DIR}/pcm-memory.csv" &
 
     echo "Starting pcm-power collection"
-    touch /tmp/results/pcm-power.log
-    chown 1000:1000 /tmp/results/pcm-power.log
-    /opt/intel/pcm-bin/bin/pcm-power >& /tmp/results/pcm-power.log &
+    touch "${RESULTS_DIR}/pcm-power.log"
+    chown 1000:1000 "${RESULTS_DIR}/pcm-power.log"
+    /opt/intel/pcm-bin/bin/pcm-power >& "${RESULTS_DIR}/pcm-power.log" &
   fi
 
 echo "Starting general pcm collection"
-touch /tmp/results/pcm.csv
-chown 1000:1000 /tmp/results/pcm.csv
-/opt/intel/pcm-bin/bin/pcm 1 -silent -r -nc -nsys -csv=/tmp/results/pcm.csv &
+touch "${RESULTS_DIR}/pcm.csv"
+chown 1000:1000 "${RESULTS_DIR}/pcm.csv"
+/opt/intel/pcm-bin/bin/pcm 1 -silent -r -nc -nsys -csv="${RESULTS_DIR}/pcm.csv" &
 
 while true
 do

@@ -29,7 +29,7 @@ RUN cargo install qmassa --version 1.3.2 --locked
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-COPY requirements.txt .
+COPY docker/requirements.txt .
 RUN pip install --require-hashes --no-deps --no-cache-dir --break-system-packages -r requirements.txt
 
 # Clean up any old PCM
@@ -50,10 +50,16 @@ RUN echo "Installing PCM" && \
     
 
 # Copy all scripts and supervisor config
-COPY scripts/ /scripts/
-COPY supervisord.conf supervisord.conf
+COPY docker/scripts/ /scripts/
+COPY docker/supervisord.conf supervisord.conf
 
 # Ensure all .sh are executable
 RUN chmod +x /scripts/*.sh
+
+# live-metrics: opt-in live HTTP API served alongside the existing collectors.
+COPY live-metrics/ /live-metrics/
+# --ignore-installed: fastapi pulls in a newer typing-extensions 
+RUN pip install --no-cache-dir --break-system-packages --ignore-installed -r /live-metrics/requirements.txt
+EXPOSE 9000
 
 CMD ["/usr/bin/supervisord", "-c", "/supervisord.conf"]
