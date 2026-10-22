@@ -122,21 +122,6 @@ _EVENT_RE = re.compile(r"(?<!\w)event=(\w+)")
 _TIMESTAMP_RE = re.compile(r"(?<!\w)timestamp_ms=(\d+)")
 
 
-def _iso_to_epoch_ms(value: Optional[str]) -> Optional[int]:
-    """Convert an ISO-8601 timestamp to epoch ms, or None if unparseable.
-
-    Naive timestamps are read as local time, matching datetime's own
-    default, because the report and this script run on the same host.
-    """
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return int(parsed.timestamp() * 1000)
-
-
 def parse_event_line(line: str) -> Optional[Tuple[str, str, int]]:
     """Parse one vlm_metrics_logger line into (id, event, timestamp_ms).
 
@@ -329,10 +314,11 @@ class SmartKioskV2VBenchmark:
                 "running."
             )
             return
+        queue_state = "ON" if self.queue_enabled else "OFF"
         print("\n" + "=" * 70)
         print(
-            "Starting Smart Kiosk stack "
-            "(queue-service/rtsp-streamer OFF, diarization OFF)"
+            f"Starting Smart Kiosk stack "
+            f"(queue-service/rtsp-streamer {queue_state}, diarization OFF)"
         )
         print("=" * 70)
         rc = self._run_make("up")
@@ -711,13 +697,21 @@ class SmartKioskV2VBenchmark:
             return {}
 
         if not_before_ms is not None:
-            finished_ms = _iso_to_epoch_ms(report.get("finished_at"))
-            if finished_ms is not None and finished_ms < not_before_ms:
+            # Deliberately the file's mtime rather than its finished_at
+            # field. Both are produced on this host, so they share a clock,
+            # and mtime cannot be misread the way a timestamp string can:
+            # an ISO value without an offset would be parsed as local time
+            # and a fresh report could look hours old on any host not on
+            # UTC, silently downgrading the cross-check to "unavailable".
+            try:
+                written_ms = int(os.path.getmtime(path) * 1000)
+            except OSError:
+                written_ms = None
+            if written_ms is not None and written_ms < not_before_ms:
                 print(
                     f"Warning: ignoring stale report {path} "
-                    f"(finished_at={report.get('finished_at')} predates "
-                    f"this run). The measured run most likely failed "
-                    f"before writing its report."
+                    f"(last written before this run started). The measured "
+                    f"run most likely failed before writing its report."
                 )
                 return {}
 
@@ -739,6 +733,18 @@ class SmartKioskV2VBenchmark:
             "summary": report.get("summary", {}),
         }
 
+    @staticmethod
+    def _queue_value_is_on(value: str) -> bool:
+        """Apply the application Makefile's exact truthiness rule.
+
+        That Makefile uses ``$(filter true TRUE,$(QUEUE))``, so only the
+        literals ``true`` and ``TRUE`` enable the vision profile. Anything
+        else -- including ``1``, ``yes`` and ``True`` -- leaves it off.
+        Accepting a broader set here would record a run as queue-enabled
+        while the services were never started.
+        """
+        return value.strip() in ("true", "TRUE")
+
     @property
     def queue_enabled(self) -> bool:
         """Whether the vision (queue) profile will be started.
@@ -750,10 +756,10 @@ class SmartKioskV2VBenchmark:
         """
         for arg in reversed(self.make_args):
             if arg.startswith("QUEUE="):
-                return arg.split("=", 1)[1].strip().lower() in ("true", "1")
+                return self._queue_value_is_on(arg.split("=", 1)[1])
         inherited = os.environ.get("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "")
         if inherited:
-            return inherited.strip().lower() in ("true", "1")
+            return self._queue_value_is_on(inherited)
         return True
 
     def describe_stack(self) -> Dict[str, str]:
@@ -1341,10 +1347,11 @@ def parse_args():
         "--allow_cross_check_mismatch",
         action="store_true",
         help=(
-            "Exit 0 even when the emitted metrics disagree with the "
-            "application's own report. By default a MISMATCH fails the run, "
-            "because the headline number cannot be trusted when the two "
-            "measurements of the same turns disagree."
+            "Exit 0 even when the cross-check does not pass. By default "
+            "both MISMATCH (the two measurements of the same turns "
+            "disagree) and unavailable (the application's report was "
+            "missing or stale, so nothing verified the number) fail the "
+            "run."
         ),
     )
     return parser.parse_args()
@@ -1396,21 +1403,32 @@ def main():
         return 1
 
     # A MISMATCH means the two independent measurements of the same turns
-    # disagree, so the headline number is untrustworthy. Exiting 0 here
-    # would let CI publish it anyway, which is exactly what the cross-check
-    # exists to prevent.
-    if results.get("cross_check", {}).get("status") == "MISMATCH":
+    # disagree, so the headline number is untrustworthy. "unavailable" is
+    # no better: it means the application's report was missing or stale, so
+    # nothing checked the number at all. Exiting 0 in either case would let
+    # CI publish an unverified result, which is exactly what the
+    # cross-check exists to prevent.
+    status = results.get("cross_check", {}).get("status")
+    reasons = {
+        "MISMATCH": (
+            "the emitted metrics disagree with the application's own report"
+        ),
+        "unavailable": (
+            "the application's report was missing or stale, so the emitted "
+            "metrics were never verified against it"
+        ),
+    }
+    if status in reasons:
         if args.allow_cross_check_mismatch:
             print(
-                "\nCross-check MISMATCH ignored "
-                "(--allow_cross_check_mismatch).",
+                f"\nCross-check {status} ignored "
+                f"(--allow_cross_check_mismatch): {reasons[status]}.",
                 file=sys.stderr,
             )
         else:
             print(
-                "\nCross-check MISMATCH: the emitted metrics disagree with "
-                "the application's own report -- treating as failure. "
-                "Pass --allow_cross_check_mismatch to override.",
+                f"\nCross-check {status}: {reasons[status]} -- treating as "
+                f"failure. Pass --allow_cross_check_mismatch to override.",
                 file=sys.stderr,
             )
             return 1

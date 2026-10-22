@@ -136,7 +136,10 @@ Makefile defaults `QUEUE` from `KIOSK_CORE_QUEUE_SERVICE_ENABLED`, uses
 `QUEUE` to decide whether compose is given `--profile queue` at all, and then
 re-exports `KIOSK_CORE_QUEUE_SERVICE_ENABLED` derived from `QUEUE`. A `QUEUE=`
 argument therefore always wins, so this script mirrors it into the environment
-instead of forcing a value that would be silently overridden. `queue-service`
+instead of forcing a value that would be silently overridden. The Makefile
+tests it with `$(filter true TRUE,$(QUEUE))`, so only the literals `true` and
+`TRUE` enable the vision profile; this script applies the same rule, so a
+`QUEUE=1` run is correctly recorded as queue-disabled. `queue-service`
 and `rtsp-streamer` are consequently always both on or both off, and the
 `stack` block of the results reports the resolved value rather than a
 hardcoded one.
@@ -165,8 +168,14 @@ marks as errored are excluded from that count, since they never produce a
 start/end pair. A disagreement
 of more than 1 ms, or any difference in turn count, is reported as `MISMATCH`
 and **exits non-zero**, so CI cannot publish a headline number produced by a
-broken emit path. Pass `--allow_cross_check_mismatch` to downgrade it to a
-warning.
+broken emit path. A cross-check of `unavailable` -- the application's report
+was missing or written before the measured run started -- fails the run for
+the same reason: nothing verified the number. Pass
+`--allow_cross_check_mismatch` to downgrade both to warnings.
+
+Staleness is judged by the report file's modification time rather than its
+`finished_at` field, so a timestamp written without a UTC offset cannot make a
+fresh report look hours old on a host that is not on UTC.
 
 Warmup turns are excluded by timestamp rather than by deleting log files,
 because the application holds those files open for the whole run. Whole

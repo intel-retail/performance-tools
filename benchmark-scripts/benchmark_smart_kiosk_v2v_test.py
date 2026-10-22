@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess  # nosec B404
 import tempfile
+import time
 import unittest
 import unittest.mock as mock
 from datetime import datetime
@@ -687,23 +688,45 @@ class StaleReportTest(BenchmarkTempDirTest):
             )
         return path
 
-    def test_report_predating_the_measured_run_is_rejected(self):
-        self.write_report("lbl", "2026-01-01T00:00:00", [{"run": 1}])
-        not_before = int(
-            datetime(2026, 6, 1, 0, 0, 0).timestamp() * 1000
+    def test_report_written_before_the_measured_run_is_rejected(self):
+        path = self.write_report(
+            "lbl", "2026-01-01T00:00:00+00:00", [{"run": 1}]
         )
+        # Staleness is decided by the file's mtime, so age it explicitly.
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        not_before = int(time.time() * 1000)
         report = self.make().collect_benchmark_report(
             "lbl", not_before_ms=not_before
         )
         self.assertEqual(report, {})
 
     def test_fresh_report_is_accepted(self):
-        self.write_report("lbl", "2026-06-02T00:00:00", [{"run": 1}])
-        not_before = int(
-            datetime(2026, 6, 1, 0, 0, 0).timestamp() * 1000
-        )
+        self.write_report("lbl", "2026-06-02T00:00:00+00:00", [{"run": 1}])
+        not_before = int(time.time() * 1000) - 60_000
         report = self.make().collect_benchmark_report(
             "lbl", not_before_ms=not_before
+        )
+        self.assertEqual(report["turns_total"], 1)
+
+    def test_timezone_naive_finished_at_does_not_cause_rejection(self):
+        # The app writes offset-aware timestamps today, but a naive value
+        # must never be misread as local time and make a fresh report look
+        # hours old -- that would silently downgrade the cross-check to
+        # "unavailable", which now fails the run.
+        self.write_report("lbl", "2026-06-02T00:00:00", [{"run": 1}])
+        not_before = int(time.time() * 1000) - 60_000
+        report = self.make().collect_benchmark_report(
+            "lbl", not_before_ms=not_before
+        )
+        self.assertEqual(report["turns_total"], 1)
+
+    def test_a_report_with_no_finished_at_is_still_accepted(self):
+        path = os.path.join(self.results_dir, "lbl.json")
+        with open(path, "w") as f:
+            json.dump({"turns": [{"run": 1}], "summary": {}}, f)
+        report = self.make().collect_benchmark_report(
+            "lbl", not_before_ms=int(time.time() * 1000) - 60_000
         )
         self.assertEqual(report["turns_total"], 1)
 
@@ -747,6 +770,34 @@ class QueueFlagConsistencyTest(BenchmarkTempDirTest):
     def test_last_queue_argument_wins(self):
         bench = self.make(make_args=["QUEUE=true", "QUEUE=false"])
         self.assertFalse(bench.queue_enabled)
+
+    def test_truthiness_matches_the_makefile_exactly(self):
+        # The Makefile uses $(filter true TRUE,$(QUEUE)), so only these two
+        # literals start the vision profile. Treating "1" or "yes" as on
+        # would record a run as queue-enabled while the services never ran.
+        for value in ("true", "TRUE"):
+            self.assertTrue(
+                self.make(make_args=["QUEUE=" + value]).queue_enabled, value
+            )
+        for value in ("1", "yes", "on", "True", "false", ""):
+            self.assertFalse(
+                self.make(make_args=["QUEUE=" + value]).queue_enabled, value
+            )
+
+    def test_banner_reflects_the_resolved_queue_state(self):
+        for make_args, expected in (
+            (["QUEUE=true"], "ON"),
+            (["QUEUE=false"], "OFF"),
+        ):
+            bench = self.make(make_args=make_args)
+            with mock.patch.object(
+                bench, "_run_make", return_value=0
+            ), mock.patch("builtins.print") as printed:
+                bench.start_stack()
+            banner = " ".join(str(c) for c in printed.call_args_list)
+            self.assertIn(
+                "rtsp-streamer " + expected, banner, make_args
+            )
 
 
 class OvmsReadinessTest(unittest.TestCase):
@@ -992,6 +1043,28 @@ class MainExitCodeTest(unittest.TestCase):
             {
                 "vlm_metrics": {"total_transactions": 8},
                 "cross_check": {"status": "MISMATCH"},
+                "benchmark_exit_code": 0,
+            },
+            extra_argv=["--allow_cross_check_mismatch"],
+        )
+        self.assertEqual(rc, 0)
+
+    def test_unavailable_cross_check_fails(self):
+        # A missing or stale report means nothing verified the number.
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "unavailable"},
+                "benchmark_exit_code": 0,
+            }
+        )
+        self.assertEqual(rc, 1)
+
+    def test_unavailable_can_be_downgraded(self):
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "unavailable"},
                 "benchmark_exit_code": 0,
             },
             extra_argv=["--allow_cross_check_mismatch"],
