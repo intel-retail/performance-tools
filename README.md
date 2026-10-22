@@ -105,6 +105,12 @@ mount is `${KIOSK_RESULTS_HOST_DIR:-./results}`, so:
   be found and the run ends with `No transactions`. The script warns about this
   before running. Either omit `--results_dir` or restart the stack.
 
+Under `--skip_stack` or `--keep_stack` the warmup events are **not** pruned
+from the log files. Rewriting them while kiosk-core still holds them open
+would leave the service writing into `*.txt.with-warmup`, which the
+consolidator ignores. The printed summary and the exported JSON still exclude
+the warmup turns; only the raw log files keep them.
+
 ### Application-specific defaults
 
 This orchestrator targets one application, so it carries that application's
@@ -117,15 +123,29 @@ names as defaults. If they change there, update them here:
 | rag-service health | `http://localhost:8020/health` |
 | OVMS model list | `http://localhost:8000/v3/models` |
 | `make` arguments | `QUEUE=false` |
+| Report basename | `--label`, default `v2v-perf-tools` |
 | Measurement script | `tests/benchmarks/v2v_scripted_conversation_benchmark.py` |
 | Metrics bind mount | `KIOSK_RESULTS_HOST_DIR` |
 
-The run also exports `KIOSK_CORE_QUEUE_SERVICE_ENABLED`,
-`KIOSK_CORE_DIARIZATION_ENABLED` and
-`KIOSK_CORE_DIARIZATION_INTERMEDIATE_ENABLED` as `false`, to stop vision and
-diarization work competing with text-to-speech for CPU. The
-`stack` block of the results records what each run actually used, derived from
-the `make` arguments and that environment rather than hardcoded.
+The run exports `KIOSK_CORE_DIARIZATION_ENABLED` and
+`KIOSK_CORE_DIARIZATION_INTERMEDIATE_ENABLED` as `false`, to stop diarization
+competing with text-to-speech for CPU.
+
+Queue handling follows the application Makefile rather than fighting it. That
+Makefile defaults `QUEUE` from `KIOSK_CORE_QUEUE_SERVICE_ENABLED`, uses
+`QUEUE` to decide whether compose is given `--profile queue` at all, and then
+re-exports `KIOSK_CORE_QUEUE_SERVICE_ENABLED` derived from `QUEUE`. A `QUEUE=`
+argument therefore always wins, so this script mirrors it into the environment
+instead of forcing a value that would be silently overridden. `queue-service`
+and `rtsp-streamer` are consequently always both on or both off, and the
+`stack` block of the results reports the resolved value rather than a
+hardcoded one.
+
+Before each run the script deletes its own `{label}.json`,
+`{label}-warmup.json` and `measured_window.json`, and ignores any report that
+finished before the measured run started. Without this, a measured run that
+crashed before writing its report would be cross-checked against the previous
+run's numbers.
 
 ### Output
 
@@ -140,7 +160,9 @@ Written into `--results_dir` (default `<app_dir>/results`):
 | `vlm_application_metrics_*.txt.with-warmup` | Unpruned original, kept for debugging |
 
 The script cross-checks the metrics it emits against the application's own
-report, comparing both the median latency and the turn count. A disagreement
+report, comparing both the median latency and the turn count. Turns the report
+marks as errored are excluded from that count, since they never produce a
+start/end pair. A disagreement
 of more than 1 ms, or any difference in turn count, is reported as `MISMATCH`
 and **exits non-zero**, so CI cannot publish a headline number produced by a
 broken emit path. Pass `--allow_cross_check_mismatch` to downgrade it to a

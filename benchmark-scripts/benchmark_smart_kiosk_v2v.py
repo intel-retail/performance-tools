@@ -87,7 +87,8 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
-from typing import Deque, Dict, List, Optional
+from datetime import datetime
+from typing import Deque, Dict, List, Optional, Tuple
 
 
 def percentile(ordered: List[int], fraction: float) -> int:
@@ -109,6 +110,48 @@ def percentile(ordered: List[int], fraction: float) -> int:
         raise ValueError("percentile() requires at least one sample")
     rank = max(1, math.ceil(fraction * len(ordered)))
     return ordered[min(rank, len(ordered)) - 1]
+
+
+# Precompiled once, and shared by every parser below so the two cannot
+# drift apart. The negative lookbehind matters: vlm_metrics_logger's
+# log_custom_event() appends arbitrary **kwargs to the line, so a future
+# `session_id=` or `request_id=` field would otherwise be matched by a bare
+# `id=` pattern and silently regroup turns under the wrong identifier.
+_ID_RE = re.compile(r"(?<!\w)id=(\S+)")
+_EVENT_RE = re.compile(r"(?<!\w)event=(\w+)")
+_TIMESTAMP_RE = re.compile(r"(?<!\w)timestamp_ms=(\d+)")
+
+
+def _iso_to_epoch_ms(value: Optional[str]) -> Optional[int]:
+    """Convert an ISO-8601 timestamp to epoch ms, or None if unparseable.
+
+    Naive timestamps are read as local time, matching datetime's own
+    default, because the report and this script run on the same host.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return int(parsed.timestamp() * 1000)
+
+
+def parse_event_line(line: str) -> Optional[Tuple[str, str, int]]:
+    """Parse one vlm_metrics_logger line into (id, event, timestamp_ms).
+
+    Returns None for anything that is not a complete start/end event, so
+    callers can keep unrecognised lines rather than discard them.
+    """
+    id_match = _ID_RE.search(line)
+    event_match = _EVENT_RE.search(line)
+    ts_match = _TIMESTAMP_RE.search(line)
+    if not (id_match and event_match and ts_match):
+        return None
+    event = event_match.group(1)
+    if event not in ("start", "end"):
+        return None
+    return id_match.group(1), event, int(ts_match.group(1))
 
 
 class SmartKioskV2VBenchmark:
@@ -218,10 +261,19 @@ class SmartKioskV2VBenchmark:
         """
         env = os.environ.copy()
         # Frees ~10-12 CPU cores otherwise burned by rtsp-streamer +
-        # queue-service. The application Makefile reads this to decide whether
-        # to pass `--profile queue` to compose at all, so the containers are
-        # never started rather than merely being idle.
-        env["KIOSK_CORE_QUEUE_SERVICE_ENABLED"] = "false"
+        # queue-service when disabled.
+        #
+        # The application Makefile owns this relationship: it defaults
+        # QUEUE from KIOSK_CORE_QUEUE_SERVICE_ENABLED (`QUEUE ?=`), uses
+        # QUEUE to decide whether compose gets `--profile queue` at all,
+        # and then re-exports KIOSK_CORE_QUEUE_SERVICE_ENABLED derived from
+        # QUEUE. So a `QUEUE=` make argument always wins, and setting this
+        # env var to a value that disagrees with it would be ignored at
+        # best and misleading in the results at worst. Mirror the make
+        # argument instead, so the two can never contradict each other.
+        env["KIOSK_CORE_QUEUE_SERVICE_ENABLED"] = (
+            "true" if self.queue_enabled else "false"
+        )
         # Speaker diarization (pyannote) adds analyzer latency and CPU load
         # that is irrelevant to a single-speaker scripted benchmark. compose
         # maps this onto AUDIO_ANALYZER__MODELS__ASR__DIARIZATION.
@@ -292,7 +344,56 @@ class SmartKioskV2VBenchmark:
             print("Leaving the stack running (--skip_stack/--keep_stack).")
             return
         print("\nStopping stack...")
-        self._run_make("down")
+        rc = self._run_make("down")
+        if rc != 0:
+            # Not fatal -- the measurements are already collected -- but a
+            # failed teardown leaves containers holding the ports, and the
+            # next run's health check would then pass against the old stack.
+            print(
+                f"Warning: 'make down' exited {rc}. Containers may still be "
+                f"running; check `docker compose ps` in {self.app_dir} "
+                f"before the next run, or its health checks will pass "
+                f"against the old stack.",
+                file=sys.stderr,
+            )
+
+    @staticmethod
+    def _endpoint_is_ready(name: str, body: bytes) -> bool:
+        """Decide whether a 2xx response really means "ready".
+
+        For OVMS a 200 from /v3/models is not enough: it answers while the
+        LLM is still loading, with an empty or not-yet-AVAILABLE model
+        list. Starting a run then would charge model-load time to the
+        first measured turn, which is precisely what the warmup and this
+        wait exist to avoid.
+
+        Anything unrecognised is treated as ready, so an operator pointing
+        --ovms_url at a plain health endpoint is not locked out.
+        """
+        if name != "ovms-llm":
+            return True
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return True
+
+        entries = payload.get("data") if isinstance(payload, dict) else None
+        if entries is None and isinstance(payload, list):
+            entries = payload
+        if not isinstance(entries, list):
+            return True
+        if not entries:
+            return False
+
+        def _available(entry) -> bool:
+            if not isinstance(entry, dict):
+                return True
+            state = entry.get("state") or entry.get("status")
+            if state is None:
+                return True
+            return str(state).upper() in ("AVAILABLE", "READY", "LOADED")
+
+        return any(_available(entry) for entry in entries)
 
     def wait_for_health(self, timeout: int) -> None:
         """Block until every required endpoint answers, or raise."""
@@ -308,10 +409,14 @@ class SmartKioskV2VBenchmark:
                     with urllib.request.urlopen(  # nosec B310
                         url, timeout=5
                     ) as resp:
-                        if 200 <= resp.status < 300:
-                            elapsed = int(timeout - (deadline - time.time()))
-                            print(f"  [{elapsed:>4}s] {name} healthy")
-                            pending.pop(name)
+                        if not 200 <= resp.status < 300:
+                            continue
+                        body = resp.read()
+                    if not self._endpoint_is_ready(name, body):
+                        continue
+                    elapsed = int(timeout - (deadline - time.time()))
+                    print(f"  [{elapsed:>4}s] {name} healthy")
+                    pending.pop(name)
                 except (urllib.error.URLError, OSError, ValueError):
                     pass
             if pending:
@@ -501,21 +606,27 @@ class SmartKioskV2VBenchmark:
         for log_file in log_files:
             try:
                 with open(log_file, "r") as f:
-                    for line in f:
-                        id_match = re.search(r"id=(\S+)", line)
-                        event_match = re.search(r"event=(\w+)", line)
-                        ts_match = re.search(r"timestamp_ms=(\d+)", line)
-                        if not (id_match and event_match and ts_match):
-                            continue
-                        event = event_match.group(1)
-                        if event not in ("start", "end"):
-                            continue
-                        timestamp = int(ts_match.group(1))
-                        if since_ms is not None and timestamp < since_ms:
-                            continue
-                        events[id_match.group(1)].append(
-                            {"event": event, "timestamp_ms": timestamp}
-                        )
+                    lines = f.readlines()
+                # One definition of "warmup", shared with the pruner, so
+                # the summary and the pruned log files can never disagree
+                # about which turns belong to the measured window. Filtering
+                # each event independently would split a turn straddling
+                # since_ms and leave an orphan end behind.
+                warmup = (
+                    self._warmup_line_indices(lines, since_ms)
+                    if since_ms is not None
+                    else set()
+                )
+                for i, line in enumerate(lines):
+                    if i in warmup:
+                        continue
+                    parsed = parse_event_line(line)
+                    if parsed is None:
+                        continue
+                    unique_id, event, timestamp = parsed
+                    events[unique_id].append(
+                        {"event": event, "timestamp_ms": timestamp}
+                    )
             except (IOError, OSError) as e:
                 print(f"Warning: could not read {log_file}: {e}")
 
@@ -552,8 +663,42 @@ class SmartKioskV2VBenchmark:
             metrics["p95_is_max"] = metrics["p95_latency_ms"] == ordered[-1]
         return metrics
 
-    def collect_benchmark_report(self, label: str) -> Dict:
-        """Read the benchmark's own JSON report (the authoritative one)."""
+    def _clean_previous_reports(self, label: str) -> None:
+        """Remove earlier runs' JSON reports from this results dir.
+
+        The default label is fixed, so without this a measured run that
+        crashes before writing its report leaves the previous run's
+        ``{label}.json`` in place -- and the cross-check would silently
+        validate this run's emitted metrics against last run's numbers.
+
+        Unlike the vlm logs these are written and closed by a short-lived
+        child process, not held open by kiosk-core, so removing them is
+        safe even when the stack is running.
+        """
+        stale = [
+            os.path.join(self.results_dir, f"{label}.json"),
+            os.path.join(self.results_dir, f"{label}-warmup.json"),
+            os.path.join(self.results_dir, "measured_window.json"),
+        ]
+        for path in stale:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def collect_benchmark_report(
+        self, label: str, not_before_ms: Optional[int] = None
+    ) -> Dict:
+        """Read the benchmark's own JSON report (the authoritative one).
+
+        Args:
+            label: Report basename, without the ``.json`` suffix.
+            not_before_ms: When given, a report that finished before this
+                epoch-ms instant is rejected as stale rather than returned.
+                Belt-and-braces alongside ``_clean_previous_reports``: a
+                stale report is worse than no report, because it makes the
+                cross-check vouch for numbers it never saw.
+        """
         path = os.path.join(self.results_dir, f"{label}.json")
         if not os.path.isfile(path):
             print(f"Benchmark report not found: {path}")
@@ -565,14 +710,51 @@ class SmartKioskV2VBenchmark:
             print(f"Warning: could not parse {path}: {e}")
             return {}
 
+        if not_before_ms is not None:
+            finished_ms = _iso_to_epoch_ms(report.get("finished_at"))
+            if finished_ms is not None and finished_ms < not_before_ms:
+                print(
+                    f"Warning: ignoring stale report {path} "
+                    f"(finished_at={report.get('finished_at')} predates "
+                    f"this run). The measured run most likely failed "
+                    f"before writing its report."
+                )
+                return {}
+
         turns = report.get("turns", []) or []
+        # Turns that errored (for example a TTS synthesis failure) are
+        # recorded in the report but never emit a start/end pair, so
+        # counting them would fail the cross-check on a turn-count
+        # mismatch and point at the metrics path instead of the real cause.
+        successful = [
+            t for t in turns if not (isinstance(t, dict) and t.get("error"))
+        ]
         return {
             "label": report.get("label"),
             "started_at": report.get("started_at"),
             "finished_at": report.get("finished_at"),
-            "turns_total": len(turns),
+            "turns_total": len(successful),
+            "turns_recorded": len(turns),
+            "turns_failed": len(turns) - len(successful),
             "summary": report.get("summary", {}),
         }
+
+    @property
+    def queue_enabled(self) -> bool:
+        """Whether the vision (queue) profile will be started.
+
+        Resolved the same way the application Makefile resolves it: an
+        explicit ``QUEUE=`` make argument wins, otherwise the inherited
+        ``KIOSK_CORE_QUEUE_SERVICE_ENABLED`` acts as the default, otherwise
+        the Makefile's own default of true.
+        """
+        for arg in reversed(self.make_args):
+            if arg.startswith("QUEUE="):
+                return arg.split("=", 1)[1].strip().lower() in ("true", "1")
+        inherited = os.environ.get("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "")
+        if inherited:
+            return inherited.strip().lower() in ("true", "1")
+        return True
 
     def describe_stack(self) -> Dict[str, str]:
         """Report the stack configuration this run actually used.
@@ -590,20 +772,16 @@ class SmartKioskV2VBenchmark:
                 else "enabled"
             )
 
-        # The application Makefile's QUEUE switch decides whether the vision
-        # profile is handed to compose at all, so the containers are absent
-        # rather than idle. The env var only gates kiosk-core's integration,
-        # so the services are only truly off when both agree.
-        queue_make_arg = None
-        for arg in self.make_args:
-            if arg.startswith("QUEUE="):
-                queue_make_arg = arg.split("=", 1)[1].strip().lower()
-        profile_off = queue_make_arg == "false"
-        queue_state = _flag("KIOSK_CORE_QUEUE_SERVICE_ENABLED")
+        # The Makefile derives both the compose profile and kiosk-core's
+        # own flag from the same QUEUE value, so queue-service and
+        # rtsp-streamer are always either both present or both absent.
+        # Reporting them from one resolved value keeps the results file
+        # from ever claiming a combination that cannot occur.
+        queue_state = "enabled" if self.queue_enabled else "disabled"
 
         return {
             "queue_service": queue_state,
-            "rtsp_streamer": "disabled" if profile_off else "enabled",
+            "rtsp_streamer": queue_state,
             "diarization": _flag("KIOSK_CORE_DIARIZATION_ENABLED"),
             "make_args": " ".join(self.make_args) or "(none)",
             "stack_managed_by_script": "no" if self.skip_stack else "yes",
@@ -724,6 +902,7 @@ class SmartKioskV2VBenchmark:
 
         self.warn_if_results_dir_unreachable()
         self._clean_previous_metrics()
+        self._clean_previous_reports(label)
         # Bound before the try block so the `finally` below can tell "the run
         # never reached the measured phase" from "it did", without raising a
         # NameError on top of whatever actually went wrong.
@@ -795,7 +974,9 @@ class SmartKioskV2VBenchmark:
             vlm = self.collect_vlm_logger_metrics(
                 since_ms=measured_run_started_ms
             )
-            report = self.collect_benchmark_report(label)
+            report = self.collect_benchmark_report(
+                label, not_before_ms=measured_run_started_ms
+            )
 
             results = {
                 "benchmark": "smart_kiosk_v2v",
@@ -815,11 +996,23 @@ class SmartKioskV2VBenchmark:
             return results
         finally:
             self.stop_stack()
-            # Only safe once the stack is down. kiosk-core holds these files
-            # open through a RotatingFileHandler for the whole run, so they
-            # cannot be rewritten (or removed) while it is alive without its
-            # subsequent writes vanishing into an unlinked inode.
-            if measured_run_started_ms is not None:
+            # Pruning rewrites the log files, so it is only safe once
+            # kiosk-core is actually gone. stop_stack() is a no-op under
+            # --skip_stack/--keep_stack, and os.replace() would then swap
+            # the file out from under kiosk-core's still-open
+            # RotatingFileHandler: the service would keep writing into
+            # *.txt.with-warmup, which the consolidator's glob ignores.
+            if measured_run_started_ms is None:
+                pass
+            elif self.skip_stack or self.keep_stack:
+                print(
+                    "\nSkipping warmup pruning: the stack is still running "
+                    "(--skip_stack/--keep_stack) and rewriting the log "
+                    "files would detach kiosk-core's open handles. The "
+                    "summary above already excludes warmup turns; the log "
+                    "files still contain them."
+                )
+            else:
                 self.prune_warmup_from_vlm_logs(measured_run_started_ms)
 
     def write_measured_window(self, start_ms: int, end_ms: int) -> None:
@@ -874,16 +1067,10 @@ class SmartKioskV2VBenchmark:
         drop: set = set()
 
         for i, line in enumerate(lines):
-            id_match = re.search(r"id=(\S+)", line)
-            event_match = re.search(r"event=(\w+)", line)
-            ts_match = re.search(r"timestamp_ms=(\d+)", line)
-            if not (id_match and event_match and ts_match):
+            parsed = parse_event_line(line)
+            if parsed is None:
                 continue
-            event = event_match.group(1)
-            if event not in ("start", "end"):
-                continue
-            stream_id = id_match.group(1)
-            timestamp = int(ts_match.group(1))
+            stream_id, event, timestamp = parsed
 
             if event == "start":
                 open_starts[stream_id].append((i, timestamp))
@@ -1011,6 +1198,26 @@ class SmartKioskV2VBenchmark:
         print("=" * 70)
 
 
+def positive_int(value: str) -> int:
+    """argparse type: an integer >= 1."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be 1 or greater, got {number}"
+        )
+    return number
+
+
+def non_negative_int(value: str) -> int:
+    """argparse type: an integer >= 0."""
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be 0 or greater, got {number}"
+        )
+    return number
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Smart Kiosk voice-to-voice latency benchmark",
@@ -1040,7 +1247,7 @@ def parse_args():
     )
     parser.add_argument(
         "--runs",
-        type=int,
+        type=positive_int,
         default=SmartKioskV2VBenchmark.DEFAULT_RUNS,
         help="Measured repetitions of the script (default: 8)",
     )
@@ -1057,19 +1264,19 @@ def parse_args():
     )
     parser.add_argument(
         "--warmup_runs",
-        type=int,
+        type=non_negative_int,
         default=SmartKioskV2VBenchmark.DEFAULT_WARMUP_RUNS,
         help="Discarded warmup repetitions (default: 1)",
     )
     parser.add_argument(
         "--init_duration",
-        type=int,
+        type=non_negative_int,
         default=SmartKioskV2VBenchmark.DEFAULT_INIT_DURATION,
         help="Settle time after health checks pass, in seconds (default: 30)",
     )
     parser.add_argument(
         "--health_timeout",
-        type=int,
+        type=positive_int,
         default=SmartKioskV2VBenchmark.DEFAULT_HEALTH_TIMEOUT,
         help=(
             "Max seconds to wait for services to become healthy "

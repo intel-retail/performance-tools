@@ -7,9 +7,11 @@
 import json
 import os
 import shutil
+import subprocess  # nosec B404
 import tempfile
 import unittest
 import unittest.mock as mock
+from datetime import datetime
 
 import benchmark_smart_kiosk_v2v as v2v
 
@@ -212,8 +214,40 @@ class CleanPreviousMetricsTest(BenchmarkTempDirTest):
     def test_removes_stale_files_when_managing_the_stack(self):
         os.makedirs(self.results_dir, exist_ok=True)
         path = self.write_log("vlm_application_metrics_0.txt", ["stale\n"])
-        self.make()._clean_previous_metrics()
+        # _kiosk_core_is_running() is patched rather than left to make a
+        # real request to localhost:8012: unpatched, this test fails on a
+        # developer box that happens to have the kiosk running, and costs
+        # up to the probe timeout in CI.
+        with mock.patch.object(
+            v2v.SmartKioskV2VBenchmark,
+            "_kiosk_core_is_running",
+            return_value=False,
+        ):
+            self.make()._clean_previous_metrics()
         self.assertFalse(os.path.exists(path))
+
+    def test_is_a_no_op_when_kiosk_core_already_answers(self):
+        # A stack left up by an earlier --keep_stack run still holds these
+        # files open, so unlinking them would send every later write to an
+        # unlinked inode and the run would end with "No transactions".
+        os.makedirs(self.results_dir, exist_ok=True)
+        path = self.write_log("vlm_application_metrics_0.txt", ["live\n"])
+        with mock.patch.object(
+            v2v.SmartKioskV2VBenchmark,
+            "_kiosk_core_is_running",
+            return_value=True,
+        ):
+            self.make()._clean_previous_metrics()
+        self.assertTrue(os.path.exists(path))
+
+    def test_skip_stack_short_circuits_before_probing(self):
+        os.makedirs(self.results_dir, exist_ok=True)
+        self.write_log("vlm_application_metrics_0.txt", ["live\n"])
+        with mock.patch.object(
+            v2v.SmartKioskV2VBenchmark, "_kiosk_core_is_running"
+        ) as probe:
+            self.make(skip_stack=True)._clean_previous_metrics()
+        probe.assert_not_called()
 
     def test_is_a_no_op_under_skip_stack(self):
         # kiosk-core already holds the file open; unlinking it would send
@@ -222,6 +256,31 @@ class CleanPreviousMetricsTest(BenchmarkTempDirTest):
         path = self.write_log("vlm_application_metrics_0.txt", ["live\n"])
         self.make(skip_stack=True)._clean_previous_metrics()
         self.assertTrue(os.path.exists(path))
+
+    def test_removes_stale_reports(self):
+        for name in (
+            "v2v-perf-tools.json",
+            "v2v-perf-tools-warmup.json",
+            "measured_window.json",
+        ):
+            with open(os.path.join(self.results_dir, name), "w") as f:
+                f.write("{}")
+        self.make()._clean_previous_reports("v2v-perf-tools")
+        for name in (
+            "v2v-perf-tools.json",
+            "v2v-perf-tools-warmup.json",
+            "measured_window.json",
+        ):
+            self.assertFalse(
+                os.path.exists(os.path.join(self.results_dir, name)), name
+            )
+
+    def test_cleaning_reports_leaves_other_labels_alone(self):
+        keep = os.path.join(self.results_dir, "some-other-label.json")
+        with open(keep, "w") as f:
+            f.write("{}")
+        self.make()._clean_previous_reports("v2v-perf-tools")
+        self.assertTrue(os.path.exists(keep))
 
 
 class PruneWarmupFromVlmLogsTest(BenchmarkTempDirTest):
@@ -608,6 +667,356 @@ class WriteMeasuredWindowTest(BenchmarkTempDirTest):
         self.assertEqual(payload["start_ms"], 1_000_000)
         self.assertEqual(payload["end_ms"], 1_060_000)
         self.assertEqual(payload["duration_s"], 60.0)
+
+
+class StaleReportTest(BenchmarkTempDirTest):
+    """A crashed measured run must not cross-check last run's numbers."""
+
+    def write_report(self, label, finished_at, turns):
+        path = os.path.join(self.results_dir, label + ".json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "label": label,
+                    "started_at": finished_at,
+                    "finished_at": finished_at,
+                    "turns": turns,
+                    "summary": {"voice_to_voice_ms": {"median": 750.0}},
+                },
+                f,
+            )
+        return path
+
+    def test_report_predating_the_measured_run_is_rejected(self):
+        self.write_report("lbl", "2026-01-01T00:00:00", [{"run": 1}])
+        not_before = int(
+            datetime(2026, 6, 1, 0, 0, 0).timestamp() * 1000
+        )
+        report = self.make().collect_benchmark_report(
+            "lbl", not_before_ms=not_before
+        )
+        self.assertEqual(report, {})
+
+    def test_fresh_report_is_accepted(self):
+        self.write_report("lbl", "2026-06-02T00:00:00", [{"run": 1}])
+        not_before = int(
+            datetime(2026, 6, 1, 0, 0, 0).timestamp() * 1000
+        )
+        report = self.make().collect_benchmark_report(
+            "lbl", not_before_ms=not_before
+        )
+        self.assertEqual(report["turns_total"], 1)
+
+    def test_errored_turns_are_not_counted_as_measured(self):
+        # Failed turns never emit a start/end pair, so counting them would
+        # fail the cross-check and blame the metrics path.
+        self.write_report(
+            "lbl",
+            "2026-06-02T00:00:00",
+            [{"run": 1}, {"run": 2, "error": "tts synth failed"}],
+        )
+        report = self.make().collect_benchmark_report("lbl")
+        self.assertEqual(report["turns_total"], 1)
+        self.assertEqual(report["turns_recorded"], 2)
+        self.assertEqual(report["turns_failed"], 1)
+
+
+class QueueFlagConsistencyTest(BenchmarkTempDirTest):
+    """The app Makefile derives both the profile and the env var from QUEUE."""
+
+    def test_default_disables_queue_consistently(self):
+        bench = self.make()
+        self.assertFalse(bench.queue_enabled)
+        env = bench.configure_stack_env()
+        self.assertEqual(env["KIOSK_CORE_QUEUE_SERVICE_ENABLED"], "false")
+        stack = bench.describe_stack()
+        self.assertEqual(stack["queue_service"], "disabled")
+        self.assertEqual(stack["rtsp_streamer"], "disabled")
+
+    def test_queue_true_is_reported_and_exported_consistently(self):
+        bench = self.make(make_args=["QUEUE=true"])
+        self.assertTrue(bench.queue_enabled)
+        env = bench.configure_stack_env()
+        # Must not contradict the make argument: the Makefile re-exports
+        # this derived from QUEUE, so a false here would be a lie.
+        self.assertEqual(env["KIOSK_CORE_QUEUE_SERVICE_ENABLED"], "true")
+        stack = bench.describe_stack()
+        self.assertEqual(stack["queue_service"], "enabled")
+        self.assertEqual(stack["rtsp_streamer"], "enabled")
+
+    def test_last_queue_argument_wins(self):
+        bench = self.make(make_args=["QUEUE=true", "QUEUE=false"])
+        self.assertFalse(bench.queue_enabled)
+
+
+class OvmsReadinessTest(unittest.TestCase):
+
+    def ready(self, name, payload):
+        return v2v.SmartKioskV2VBenchmark._endpoint_is_ready(
+            name, json.dumps(payload).encode()
+        )
+
+    def test_empty_model_list_is_not_ready(self):
+        self.assertFalse(self.ready("ovms-llm", {"data": []}))
+
+    def test_loading_model_is_not_ready(self):
+        self.assertFalse(
+            self.ready("ovms-llm", {"data": [{"state": "LOADING"}]})
+        )
+
+    def test_available_model_is_ready(self):
+        self.assertTrue(
+            self.ready("ovms-llm", {"data": [{"state": "AVAILABLE"}]})
+        )
+
+    def test_model_without_a_state_field_is_assumed_ready(self):
+        self.assertTrue(self.ready("ovms-llm", {"data": [{"id": "qwen"}]}))
+
+    def test_unparseable_body_does_not_block_startup(self):
+        self.assertTrue(
+            v2v.SmartKioskV2VBenchmark._endpoint_is_ready(
+                "ovms-llm", b"not json"
+            )
+        )
+
+    def test_other_services_are_ready_on_any_2xx(self):
+        self.assertTrue(
+            v2v.SmartKioskV2VBenchmark._endpoint_is_ready(
+                "kiosk-core", b""
+            )
+        )
+
+
+class WaitForHealthTest(BenchmarkTempDirTest):
+
+    def test_raises_and_names_the_pending_services(self):
+        bench = self.make()
+        with mock.patch.object(
+            v2v.urllib.request,
+            "urlopen",
+            side_effect=v2v.urllib.error.URLError("refused"),
+        ), mock.patch.object(v2v.time, "sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                bench.wait_for_health(timeout=1)
+        message = str(ctx.exception)
+        self.assertIn("kiosk-core", message)
+        self.assertIn("rag-service", message)
+
+
+class _FakeResponse:
+    """Minimal urlopen context manager stand-in."""
+
+    def __init__(self, status=200, body=b'{"data": [{"state": "AVAILABLE"}]}'):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class RunEndToEndTest(BenchmarkTempDirTest):
+    """run() with every external effect mocked out."""
+
+    def setUp(self):
+        super().setUp()
+        self.made = []
+
+    def _fake_run(self, cmd, **kwargs):
+        self.made.append(cmd)
+        # Emit the per-turn events the child benchmark would have caused
+        # kiosk-core to log, plus the report it writes itself.
+        if any("v2v_scripted" in str(part) for part in cmd):
+            label = cmd[cmd.index("--label") + 1]
+            now = int(v2v.time.time() * 1000)
+            path = os.path.join(
+                self.results_dir, "vlm_application_metrics_0.txt"
+            )
+            with open(path, "a") as f:
+                for i in range(2):
+                    f.write(_event_line("kiosk-voice", "start", now + i * 10))
+                    f.write(
+                        _event_line("kiosk-voice", "end", now + i * 10 + 700)
+                    )
+            with open(
+                os.path.join(self.results_dir, label + ".json"), "w"
+            ) as f:
+                json.dump(
+                    {
+                        "label": label,
+                        "started_at": datetime.now().isoformat(),
+                        "finished_at": datetime.now().isoformat(),
+                        "turns": [{"run": 1}, {"run": 2}],
+                        "summary": {
+                            "voice_to_voice_ms": {"median": 700.0}
+                        },
+                    },
+                    f,
+                )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def run_benchmark(self, bench, **kwargs):
+        params = dict(
+            script=None,
+            runs=2,
+            warmup_runs=0,
+            init_duration=0,
+            health_timeout=1,
+            explicit_end_mark=False,
+            label="unit-label",
+        )
+        params.update(kwargs)
+        with mock.patch.object(
+            v2v.subprocess, "run", side_effect=self._fake_run
+        ), mock.patch.object(
+            v2v.urllib.request, "urlopen", return_value=_FakeResponse()
+        ), mock.patch.object(
+            v2v.time, "sleep"
+        ):
+            return bench.run(**params)
+
+    def test_happy_path_collects_and_cross_checks(self):
+        results = self.run_benchmark(self.make())
+        self.assertEqual(results["vlm_metrics"]["total_transactions"], 2)
+        self.assertEqual(results["cross_check"]["status"], "ok")
+
+    def test_stack_is_torn_down_and_logs_pruned(self):
+        bench = self.make()
+        with mock.patch.object(bench, "prune_warmup_from_vlm_logs") as prune:
+            self.run_benchmark(bench)
+        joined = [" ".join(str(p) for p in cmd) for cmd in self.made]
+        self.assertTrue(any("down" in c for c in joined), joined)
+        prune.assert_called_once()
+
+    def test_keep_stack_does_not_prune_the_live_logs(self):
+        # os.replace() under a live RotatingFileHandler would leave
+        # kiosk-core writing into *.with-warmup, which the consolidator's
+        # glob ignores -- the exact lost-writes bug guarded elsewhere.
+        bench = self.make(keep_stack=True)
+        with mock.patch.object(bench, "prune_warmup_from_vlm_logs") as prune:
+            self.run_benchmark(bench)
+        prune.assert_not_called()
+
+    def test_skip_stack_neither_starts_nor_prunes(self):
+        bench = self.make(skip_stack=True)
+        with mock.patch.object(bench, "prune_warmup_from_vlm_logs") as prune:
+            self.run_benchmark(bench)
+        prune.assert_not_called()
+        joined = [" ".join(str(p) for p in cmd) for cmd in self.made]
+        self.assertFalse(
+            any("make" in c and " up" in c for c in joined), joined
+        )
+
+    def test_warmup_failure_stops_before_the_measured_run(self):
+        def failing(cmd, **kwargs):
+            if any("v2v_scripted" in str(p) for p in cmd):
+                return subprocess.CompletedProcess(cmd, 3)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        bench = self.make()
+        with mock.patch.object(
+            v2v.subprocess, "run", side_effect=failing
+        ), mock.patch.object(
+            v2v.urllib.request, "urlopen", return_value=_FakeResponse()
+        ), mock.patch.object(v2v.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                bench.run(
+                    script=None,
+                    runs=2,
+                    warmup_runs=1,
+                    init_duration=0,
+                    health_timeout=1,
+                    explicit_end_mark=False,
+                    label="unit-label",
+                )
+
+    def test_stack_is_stopped_even_when_make_up_fails(self):
+        def failing_up(cmd, **kwargs):
+            self.made.append(cmd)
+            if "up" in cmd:
+                return subprocess.CompletedProcess(cmd, 2)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        bench = self.make()
+        with mock.patch.object(
+            v2v.subprocess, "run", side_effect=failing_up
+        ), mock.patch.object(v2v.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                bench.run(
+                    script=None,
+                    runs=1,
+                    warmup_runs=0,
+                    init_duration=0,
+                    health_timeout=1,
+                    explicit_end_mark=False,
+                    label="unit-label",
+                )
+        joined = [" ".join(str(p) for p in cmd) for cmd in self.made]
+        self.assertTrue(any("down" in c for c in joined), joined)
+
+
+class MainExitCodeTest(unittest.TestCase):
+
+    def _main_with(self, results, extra_argv=()):
+        argv = ["prog", "--app_dir", "/app"] + list(extra_argv)
+        with mock.patch.object(v2v.sys, "argv", argv), mock.patch.object(
+            v2v.SmartKioskV2VBenchmark, "__init__", return_value=None
+        ), mock.patch.object(
+            v2v.SmartKioskV2VBenchmark, "run", return_value=results
+        ):
+            return v2v.main()
+
+    def test_zero_transactions_fails(self):
+        rc = self._main_with(
+            {"vlm_metrics": {"total_transactions": 0}, "cross_check": {}}
+        )
+        self.assertEqual(rc, 1)
+
+    def test_cross_check_mismatch_fails(self):
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "MISMATCH"},
+                "benchmark_exit_code": 0,
+            }
+        )
+        self.assertEqual(rc, 1)
+
+    def test_mismatch_can_be_downgraded(self):
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "MISMATCH"},
+                "benchmark_exit_code": 0,
+            },
+            extra_argv=["--allow_cross_check_mismatch"],
+        )
+        self.assertEqual(rc, 0)
+
+    def test_child_exit_code_is_propagated(self):
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "ok"},
+                "benchmark_exit_code": 7,
+            }
+        )
+        self.assertEqual(rc, 7)
+
+    def test_happy_path_returns_zero(self):
+        rc = self._main_with(
+            {
+                "vlm_metrics": {"total_transactions": 8},
+                "cross_check": {"status": "ok"},
+                "benchmark_exit_code": 0,
+            }
+        )
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
