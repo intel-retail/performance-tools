@@ -146,7 +146,10 @@ class Testing(unittest.TestCase):
             config_path = os.path.join(tmpdir, 'cameras.json')
             manifest_path = os.path.join(tmpdir, 'pipeline_streams.json')
             with open(config_path, 'w') as f:
-                json.dump({'lane_config': {'cameras': cameras}}, f)
+                json.dump({
+                    '_about': {'name': 'Test scenario'},
+                    'lane_config': {'cameras': cameras},
+                }, f)
             with open(manifest_path, 'w') as f:
                 json.dump({'streams': manifest_streams}, f)
             stream_fps_dict = {f'pipeline_stream{i}': 10.0 for i in range(stream_count)}
@@ -193,6 +196,44 @@ class Testing(unittest.TestCase):
             lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
         self.assertEqual([targets[f'pipeline_stream{i}'] for i in range(6)],
                          [15.0, 5.0, 5.0, 15.0, 5.0, 5.0])
+
+    def test_get_camera_config_about_reads_selected_config(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump({'_about': about, 'lane_config': {'cameras': []}}, temp_file)
+            temp_file.flush()
+            config_path = temp_file.name
+
+        try:
+            self.assertEqual(
+                stream_density.get_camera_config_about({'CAMERA_STREAM': config_path}),
+                about)
+        finally:
+            os.remove(config_path)
+
+    def test_print_camera_config_about_shows_selected_config_and_fields(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with patch('stream_density.get_camera_config_about', return_value=about), \
+                patch('builtins.print') as print_line:
+            stream_density.print_camera_config_about(
+                {'CAMERA_STREAM': 'camera_to_workload_test.json'})
+
+        self.assertEqual(print_line.call_args_list[0].args[0],
+                         'Camera config _about (camera_to_workload_test.json):')
+        self.assertEqual(
+            [call.args[0] for call in print_line.call_args_list[1:]],
+            ['Scenario: Test scenario', 'Summary: Test summary',
+             'Cameras: One camera at 15 fps', 'Why run it: Test purpose'])
 
     def test_manifest_log_count_mismatch_raises(self):
         cameras = [{'camera_id': 'cam1', 'fps': 15}]
@@ -658,9 +699,20 @@ class Testing(unittest.TestCase):
                 18, stream_fps, targets, pass_marks, 100, 2, 2, 0.95,
                 meta, 10, samples, 103.4,
                 {'pipeline_stream0_lane1_gst.log': 100,
-                 'pipeline_stream1_lane1_gst.log': 103})
+                 'pipeline_stream1_lane1_gst.log': 103},
+                {
+                    'name': 'Example lane',
+                    'summary': 'Detects and classifies products',
+                    'cameras': 'One camera at 15 fps',
+                    'why_run_it': 'Compares complete product scanning performance',
+                })
         report = output.getvalue()
 
+        self.assertLess(report.index('Scenario: Example lane'),
+                        report.index('Stream density result'))
+        self.assertIn('Summary: Detects and classifies products', report)
+        self.assertIn('Cameras: One camera at 15 fps', report)
+        self.assertIn('Why run it: Compares complete product scanning performance', report)
         self.assertIn('Use case density (lanes) 18', report)
         self.assertIn('Stream density (streams) 2', report)
         self.assertIn('Warmup period            10 s', report)
@@ -917,6 +969,7 @@ class Testing(unittest.TestCase):
             {
                 "env_vars": {
                     "INIT_DURATION": "10",
+                    "PIPELINE_INC": "1",
                     "CONSECUTIVE_FAIL_WINDOWS": "1",
                 },
                 "compose_files": ["docker-compose.yml"],
@@ -927,6 +980,7 @@ class Testing(unittest.TestCase):
                 "expected_status": stream_density.STATUS_FAIL,
                 "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
                     (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                     (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                 ]
@@ -948,6 +1002,24 @@ class Testing(unittest.TestCase):
                 "expect_no_fps_calculation": True,
                 "expected_window_calls": 2,
             },
+            {
+                "env_vars": {
+                    "INIT_DURATION": "0",
+                    "CONSECUTIVE_FAIL_WINDOWS": "1",
+                },
+                "compose_files": ["docker-compose.yml"],
+                "results_dir": "/path/to/results",
+                "container_name": "first_step_failure",
+                "target_fps": 15.0,
+                "expected_num_pipelines": 1,
+                "expected_status": stream_density.STATUS_FAIL,
+                "expected_streams_sustained": 1,
+                "calculate_fps_side_effect": [
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                ],
+                "expected_window_calls": 1,
+                "expect_no_report": True,
+            },
         ]
 
         for i, test_case in enumerate(test_cases):
@@ -968,11 +1040,20 @@ class Testing(unittest.TestCase):
                     "measurement_window_result",
                     ({}, {}, 100.0,
                      {'pipeline_stream0_lane_gst.log': 100}, True))
-                num_pipelines, status, streams_sustained = (
-                    stream_density.run_pipeline_iterations(
-                        env_vars, compose_files, results_dir,
-                        container_name, target_fps)
-                )
+                about = {
+                    'name': 'Test lane',
+                    'summary': 'Runs a test workload',
+                }
+                with patch('stream_density.get_camera_config_about',
+                           return_value=about), \
+                        patch('stream_density.print_stream_density_report') as report:
+                    num_pipelines, status, streams_sustained = (
+                        stream_density.run_pipeline_iterations(
+                            env_vars, compose_files, results_dir,
+                            container_name, target_fps)
+                    )
+                if test_case.get("expect_no_report"):
+                    report.assert_not_called()
 
                 self.assertEqual(
                     num_pipelines, test_case["expected_num_pipelines"])
@@ -984,6 +1065,9 @@ class Testing(unittest.TestCase):
                 if "expected_window_calls" in test_case:
                     self.assertEqual(mock_collect_window.call_count,
                                      test_case["expected_window_calls"])
+                if i < 2:
+                    report.assert_called_once()
+                    self.assertEqual(report.call_args.kwargs['about'], about)
 
     def _run_iterations_with_windows(self, window_results, fps_responses):
         env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',
