@@ -4,12 +4,10 @@
 * SPDX-License-Identifier: Apache-2.0
 '''
 
-import mock
-import subprocess  # nosec B404
 import unittest
 import tempfile
 import json
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import patch, mock_open
 import stream_density
 from stream_density import validate_and_setup_env, ArgumentError
 from stream_density import (
@@ -19,9 +17,63 @@ from stream_density import (
     DEFAULT_TARGET_FPS
 )
 import os
+import io
+from contextlib import redirect_stdout
+from datetime import datetime
 
 
 class Testing(unittest.TestCase):
+    def test_run_stream_density_records_terminal_status_and_lane_count(self):
+        outcomes = [
+            (stream_density.STATUS_PASS, 4, 8),
+            (stream_density.STATUS_FAIL, 3, 6),
+            (stream_density.STATUS_INCONCLUSIVE, 2, 4),
+        ]
+        for status, lane_count, streams in outcomes:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as results_dir:
+                env_vars = {RESULTS_DIR_KEY: results_dir}
+                with patch('stream_density.validate_and_setup_env'), \
+                        patch(
+                            'stream_density.run_pipeline_iterations',
+                            return_value=(lane_count, status, streams)), \
+                        patch('stream_density.clean_up_pipeline_logs'), \
+                        patch('stream_density.benchmark.docker_compose_containers'), \
+                        patch('stream_density.time.sleep'):
+                    result = stream_density.run_stream_density(
+                        env_vars, ['compose.yml'], [15.0], ['gst'])
+
+                sample_path = os.path.join(
+                    results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
+                with open(sample_path, encoding="utf-8") as sample_file:
+                    record = json.loads(sample_file.readline())
+
+                self.assertEqual(result[0][3], status)
+                self.assertEqual(record["record_type"], "sweep_result")
+                self.assertEqual(record["status"], status)
+                self.assertEqual(record["lane_count"], lane_count)
+
+    def test_run_stream_density_records_interrupt(self):
+        with tempfile.TemporaryDirectory() as results_dir:
+            env_vars = {RESULTS_DIR_KEY: results_dir}
+            with patch('stream_density.validate_and_setup_env'), \
+                    patch(
+                        'stream_density.run_pipeline_iterations',
+                        side_effect=KeyboardInterrupt), \
+                    patch('stream_density.clean_up_pipeline_logs'), \
+                    patch('stream_density.benchmark.docker_compose_containers'), \
+                    patch('stream_density.time.sleep'):
+                with self.assertRaises(KeyboardInterrupt):
+                    stream_density.run_stream_density(
+                        env_vars, ['compose.yml'], [15.0], ['gst'])
+
+            sample_path = os.path.join(
+                results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
+            with open(sample_path, encoding="utf-8") as sample_file:
+                record = json.loads(sample_file.readline())
+
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["lane_count"], 0)
+
     def test_build_per_stream_target_fps_mixed_values(self):
         stream_fps_dict = {
             'pipeline_stream0': 10.0,
@@ -48,17 +100,18 @@ class Testing(unittest.TestCase):
             temp_config_path = temp_file.name
 
         try:
-            with patch.dict(os.environ, {'CAMERA_STREAM': temp_config_path}, clear=False):
+            with patch.dict(os.environ, {'CAMERA_STREAM': temp_config_path,
+                                         'STREAM_MANIFEST_PATH': temp_config_path + '.missing'}, clear=False):
                 result = stream_density.build_per_stream_target_fps(
-                    stream_fps_dict, default_target_fps=14.95
+                    stream_fps_dict, default_target_fps=15
                 )
 
             expected = {
                 'pipeline_stream0': 30.0,
                 'pipeline_stream1': 15.5,
-                'pipeline_stream2': 14.95,
-                'pipeline_stream3': 14.95,
-                'pipeline_stream4': 14.95,
+                'pipeline_stream2': 15,
+                'pipeline_stream3': 15,
+                'pipeline_stream4': 15,
             }
             self.assertEqual(result, expected)
         finally:
@@ -75,7 +128,8 @@ class Testing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing_path = os.path.join(tmpdir, 'non-existent-camera-config-for-test.json')
         
-        with patch.dict(os.environ, {'CAMERA_STREAM': missing_path}, clear=False):
+        with patch.dict(os.environ, {'CAMERA_STREAM': missing_path,
+                                     'STREAM_MANIFEST_PATH': missing_path}, clear=False):
             result = stream_density.build_per_stream_target_fps(
                 stream_fps_dict, default_target_fps=22.0
             )
@@ -86,6 +140,108 @@ class Testing(unittest.TestCase):
             'stream_without_index': 22.0,
         }
         self.assertEqual(result, expected)
+
+    def _run_with_manifest(self, cameras, manifest_streams, stream_count, func):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, 'cameras.json')
+            manifest_path = os.path.join(tmpdir, 'pipeline_streams.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    '_about': {'name': 'Test scenario'},
+                    'lane_config': {'cameras': cameras},
+                }, f)
+            with open(manifest_path, 'w') as f:
+                json.dump({'streams': manifest_streams}, f)
+            stream_fps_dict = {f'pipeline_stream{i}': 10.0 for i in range(stream_count)}
+            env_vars = {'CAMERA_STREAM': config_path, 'STREAM_MANIFEST_PATH': manifest_path}
+            with redirect_stdout(io.StringIO()):
+                return func(stream_fps_dict, env_vars)
+
+    @staticmethod
+    def _manifest(lane_camera_pairs):
+        return [{'log_index': i, 'lane': lane, 'camera_index': cam}
+                for i, (lane, cam) in enumerate(lane_camera_pairs)]
+
+    def test_target_fps_uses_manifest_for_multiple_lanes(self):
+        cameras = [{'camera_id': f'cam{i + 1}', 'fps': 15} for i in range(6)]
+        cameras[5]['fps'] = 5
+        for lanes in (1, 2, 5):
+            with self.subTest(lanes=lanes):
+                manifest = self._manifest([(l, c) for l in range(lanes) for c in range(6)])
+                result = self._run_with_manifest(
+                    cameras, manifest, 6 * lanes,
+                    lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
+                slow = sorted(int(n[len('pipeline_stream'):]) for n, v in result.items() if v == 5.0)
+                self.assertEqual(slow, [6 * l + 5 for l in range(lanes)])
+
+    def test_camera_meta_handles_multi_branch_and_skipped_cameras(self):
+        # cam2 is lp_vlm (no branch); cam3 has two branches per lane
+        cameras = [
+            {'camera_id': 'cam1', 'workloads': ['a'], 'fps': 15},
+            {'camera_id': 'cam2', 'workloads': ['lp_vlm'], 'fps': 15},
+            {'camera_id': 'cam3', 'workloads': ['b', 'c'], 'fps': 5},
+        ]
+        manifest = self._manifest([(l, c) for l in range(2) for c in (0, 2, 2)])
+        for entry, workloads in zip(manifest, [['a'], ['b'], ['c']] * 2):
+            entry['workloads'] = workloads
+        meta = self._run_with_manifest(
+            cameras, manifest, 6,
+            lambda d, e: stream_density.build_per_stream_camera_meta(d, env_vars=e))
+        self.assertEqual([meta[f'pipeline_stream{i}']['camera'] for i in range(6)],
+                         ['cam1', 'cam3', 'cam3', 'cam1', 'cam3', 'cam3'])
+        self.assertEqual([meta[f'pipeline_stream{i}']['workload'] for i in range(6)],
+                         ['a', 'b', 'c', 'a', 'b', 'c'])
+        targets = self._run_with_manifest(
+            cameras, manifest, 6,
+            lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
+        self.assertEqual([targets[f'pipeline_stream{i}'] for i in range(6)],
+                         [15.0, 5.0, 5.0, 15.0, 5.0, 5.0])
+
+    def test_get_camera_config_about_reads_selected_config(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump({'_about': about, 'lane_config': {'cameras': []}}, temp_file)
+            temp_file.flush()
+            config_path = temp_file.name
+
+        try:
+            self.assertEqual(
+                stream_density.get_camera_config_about({'CAMERA_STREAM': config_path}),
+                about)
+        finally:
+            os.remove(config_path)
+
+    def test_print_camera_config_about_shows_selected_config_and_fields(self):
+        about = {
+            'name': 'Test scenario',
+            'summary': 'Test summary',
+            'cameras': 'One camera at 15 fps',
+            'why_run_it': 'Test purpose',
+        }
+        with patch('stream_density.get_camera_config_about', return_value=about), \
+                patch('builtins.print') as print_line:
+            stream_density.print_camera_config_about(
+                {'CAMERA_STREAM': 'camera_to_workload_test.json'})
+
+        self.assertEqual(print_line.call_args_list[0].args[0],
+                         'Camera config _about (camera_to_workload_test.json):')
+        self.assertEqual(
+            [call.args[0] for call in print_line.call_args_list[1:]],
+            ['Scenario: Test scenario', 'Summary: Test summary',
+             'Cameras: One camera at 15 fps', 'Why run it: Test purpose'])
+
+    def test_manifest_log_count_mismatch_raises(self):
+        cameras = [{'camera_id': 'cam1', 'fps': 15}]
+        manifest = self._manifest([(0, 0), (1, 0)])
+        with self.assertRaises(ValueError):
+            self._run_with_manifest(
+                cameras, manifest, 3,
+                lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
 
     def test_is_env_non_empty(self):
         sys_env = os.environ.copy()
@@ -164,20 +320,463 @@ class Testing(unittest.TestCase):
             if not os.listdir(test_results_dir):
                 os.rmdir(test_results_dir)
 
-    def test_calculate_total_fps_success(self):
-        test_results_dir = './test_stream_density_results'
-        try:
-            fps, avg_fps = stream_density.calculate_total_fps(
-                2, test_results_dir, 'gst')
-            self.assertTrue(
-                fps > 0.0,
-                f"total_fps is expected > 0.0 but found {fps}")
-            self.assertTrue(
-                avg_fps > 0.0,
-                f"total_fps_per_stream is expected > 0.0 but found "
-                f"{avg_fps}")
-        except Exception as ex:
-            self.fail(f'ERROR: got exception {type(ex).__name__}')
+    def test_calculate_multi_stream_fps_success(self):
+        samples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        with tempfile.TemporaryDirectory() as test_results_dir:
+            log_file = os.path.join(
+                test_results_dir, 'pipeline_stream0_123_gst.log')
+            with open(log_file, 'w') as file:
+                file.write('fps,duration_seconds\n')
+                file.write(''.join(f'{s},1.00\n' for s in samples))
+
+            with patch('stream_density.get_pipeline_stream_count',
+                       return_value=1):
+                total_fps, min_stream_fps, stream_fps, stream_samples = (
+                    stream_density.calculate_multi_stream_fps(
+                        1, test_results_dir, 'gst'))
+
+            self.assertEqual(total_fps, 5.5)
+            self.assertEqual(min_stream_fps, 5.5)
+            self.assertEqual(stream_fps, {'pipeline_stream0': 5.5})
+            self.assertEqual(
+                stream_samples,
+                {'pipeline_stream0': [(float(s), 1.0) for s in samples]})
+
+    def test_calculate_multi_stream_fps_measurement_window(self):
+        with tempfile.TemporaryDirectory() as test_results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}), \
+                patch('stream_density.get_pipeline_stream_count',
+                      return_value=1):
+            log_file = os.path.join(
+                test_results_dir, 'pipeline_stream0_123_gst.log')
+            with open(log_file, 'w') as file:
+                file.write('fps,duration_seconds\n1,1.00\n2,1.00\n3,1.00\n')
+            start_offsets = stream_density.snapshot_stream_log_offsets(
+                test_results_dir, 'gst')
+            with open(log_file, 'a') as file:
+                file.write('14,1.00\n15,1.00\n16,1.00\n')
+            end_offsets = stream_density.snapshot_stream_log_offsets(
+                test_results_dir, 'gst')
+            with open(log_file, 'a') as file:
+                file.write('99,1.00\n100,1.00\n')
+
+            total_fps, min_stream_fps, stream_fps, stream_samples = (
+                stream_density.calculate_multi_stream_fps(
+                    1, test_results_dir, 'gst',
+                    start_offsets=start_offsets,
+                    end_offsets=end_offsets))
+
+        self.assertEqual(
+            stream_samples,
+            {'pipeline_stream0': [(14.0, 1.0), (15.0, 1.0), (16.0, 1.0)]})
+        self.assertEqual(total_fps, 15.0)
+        self.assertEqual(stream_fps, {'pipeline_stream0': 15.0})
+        self.assertEqual(min_stream_fps, 15.0)
+
+    def test_extract_fps_samples_requires_duration_column(self):
+        with tempfile.TemporaryDirectory() as test_results_dir:
+            log_file = os.path.join(test_results_dir, 'pipeline_stream0.log')
+            with open(log_file, 'w') as file:
+                file.write('fps,duration_seconds\n')
+                file.write('15\n')
+                file.write('14.5,1.25\n')
+
+            self.assertEqual(
+                stream_density.extract_fps_samples(log_file),
+                [(14.5, 1.25)])
+
+    def test_weighted_rate_uses_only_measurement_rows(self):
+        samples = [(14.97, 1.00), (14.99, 1.00), (14.94, 1.00),
+                   (15.76, 1.02), (14.97, 1.00), (14.42, 1.04),
+                   (14.97, 1.00), (14.96, 1.00)]
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}), \
+                patch('stream_density.get_pipeline_stream_count', return_value=1):
+            log_file = os.path.join(results_dir, 'pipeline_stream0_123_gst.log')
+            with open(log_file, 'w') as output:
+                output.write('fps,duration_seconds\n1.00,1.00\n')
+            start_offsets = stream_density.snapshot_stream_log_offsets(results_dir, 'gst')
+            with open(log_file, 'a') as output:
+                for fps, seconds in samples:
+                    output.write(f'{fps:.2f},{seconds:.2f}\n')
+            end_offsets = stream_density.snapshot_stream_log_offsets(results_dir, 'gst')
+            with open(log_file, 'a') as output:
+                output.write('99.00,1.00\n')
+
+            calculation_log = io.StringIO()
+            with redirect_stdout(calculation_log):
+                total, minimum, rates, fps_samples = stream_density.calculate_multi_stream_fps(
+                    1, results_dir, 'gst', start_offsets=start_offsets, end_offsets=end_offsets)
+
+        expected_rate = sum(fps * seconds for fps, seconds in samples) / sum(
+            seconds for _, seconds in samples)
+        self.assertAlmostEqual(expected_rate, 120.872 / 8.06)
+        self.assertAlmostEqual(rates['pipeline_stream0'], expected_rate, places=6)
+        self.assertAlmostEqual(total, expected_rate, places=6)
+        self.assertAlmostEqual(minimum, expected_rate, places=6)
+        self.assertEqual(fps_samples['pipeline_stream0'], samples)
+        self.assertIn('weighted_frames_estimate=120.872000', calculation_log.getvalue())
+        self.assertIn('total_duration_seconds=8.060000', calculation_log.getvalue())
+        self.assertIn('measured_fps=14.996526', calculation_log.getvalue())
+
+    def test_report_uses_weighted_rate_and_displays_p10_and_p90(self):
+        fps_samples = [10.0, 10.0] + [15.0] * 8
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}), \
+                patch('stream_density.get_pipeline_stream_count', return_value=1):
+            log_file = os.path.join(results_dir, 'pipeline_stream0_123_gst.log')
+            with open(log_file, 'w') as output:
+                output.write('fps,duration_seconds\n')
+                for fps in fps_samples:
+                    output.write(f'{fps:.2f},1.00\n')
+            _, _, rates, samples = stream_density.calculate_multi_stream_fps(
+                1, results_dir, 'gst')
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_stream_density_report(
+                1, rates, {'pipeline_stream0': 15.0},
+                {'pipeline_stream0': 14.25}, 100, 2, 2, 0.95,
+                stream_samples=samples)
+
+        report = output.getvalue()
+        self.assertEqual(rates['pipeline_stream0'], 14.0)
+        self.assertIn('throughput threshold', report)
+        self.assertIn('measured (avg)', report)
+        self.assertIn('p10', report)
+        self.assertIn('p90', report)
+        self.assertIn('14.00', report)
+        self.assertNotIn('14.0000', report)
+        self.assertIn('10.00', report)
+        self.assertIn('15.00', report)
+        self.assertIn('seconds below throughput threshold', report)
+        self.assertIn('2.00 s (20%)', report)
+        self.assertIn('Result: Fail', report)
+        self.assertIn('measuring 14.00 FPS', report)
+
+    def test_window_summary_shows_throughput_and_latency_percentiles(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_window_stream_summary(
+                4, 2, False, 20.0,
+                {'pipeline_stream0': 14.0, 'pipeline_stream1': 6.0},
+                {
+                    'pipeline_stream0': [(10.0, 1.0)] * 2 + [(15.0, 1.0)] * 8,
+                    'pipeline_stream1': [(6.0, 1.0)],
+                },
+                {
+                    'cam1_1 -> fakesink0': [100.0, 200.0],
+                    'cam2_1 -> fakesink0': [0.0, 300.0],
+                })
+
+        self.assertIn(
+            'Lanes: 4 | measurement interval: 2 | status: fail',
+            output.getvalue())
+        self.assertIn('System throughput: 20.00 FPS', output.getvalue())
+        self.assertIn(
+            'pipeline_stream0 throughput: 14.00 FPS p10: 10.00 p90: 15.00',
+            output.getvalue())
+        self.assertIn(
+            'pipeline_stream1 throughput: 6.00 FPS p10: 6.00 p90: 6.00',
+            output.getvalue())
+        self.assertIn(
+            'cam1_1 -> fakesink0 latency: p50: 150.00 ms '
+            'p95: 195.00 ms p99: 199.00 ms',
+            output.getvalue())
+        self.assertIn(
+            'System latency: p50: 150.00 ms p95: 285.00 ms '
+            'p99: 297.00 ms',
+            output.getvalue())
+
+    def test_window_summary_reports_missing_latency_samples(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_window_stream_summary(
+                1, 1, True, 15.0, {'pipeline_stream0': 15.0},
+                {'pipeline_stream0': [(15.0, 1.0)]}, {})
+
+        self.assertIn(
+            'Lanes: 1 | measurement interval: 1 | status: pass',
+            output.getvalue())
+        self.assertIn('System throughput: 15.00 FPS', output.getvalue())
+        self.assertIn(
+            'System latency: no samples in this measurement interval',
+            output.getvalue())
+
+    def test_sweep_fails_on_weighted_rate_even_when_p90_passes(self):
+        responses = [
+            (15.0, 15.0, {'pipeline_stream0': 15.0},
+             {'pipeline_stream0': [(15.0, 1.0)] * 100}),
+            (14.0, 14.0, {'pipeline_stream0': 14.0},
+             {'pipeline_stream0': [(10.0, 1.0)] * 20 + [(15.0, 1.0)] * 80}),
+            (15.0, 15.0, {'pipeline_stream0': 15.0},
+             {'pipeline_stream0': [(15.0, 1.0)] * 100}),
+        ]
+        env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',
+                    'CONSECUTIVE_FAIL_WINDOWS': '1',
+                    'CONSECUTIVE_PASS_WINDOWS': '1'}
+        with patch('stream_density.measure_pipeline_memory', return_value=100), \
+                patch('stream_density.clean_up_pipeline_logs'), \
+                patch('stream_density.check_can_add_pipelines', return_value=True), \
+                patch('stream_density.benchmark.docker_compose_containers'), \
+                patch('stream_density.time.sleep'), \
+                patch('stream_density.check_non_empty_result_logs'), \
+                patch('stream_density.collect_measurement_window',
+                      return_value=({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)), \
+                patch('stream_density.calculate_multi_stream_fps', side_effect=responses) as calculate, \
+                patch('stream_density.extract_window_latency_samples',
+                      return_value={'cam1 -> sink0': [10.0]}) as extract_latency, \
+                patch('stream_density.save_window_latency_samples') as save_latency, \
+                patch('stream_density.build_per_stream_target_fps',
+                      return_value={'pipeline_stream0': 15.0}), \
+                patch('stream_density.build_per_stream_camera_meta', return_value={}), \
+                patch('stream_density.print_stream_density_report') as report:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                num_pipelines, passed, _ = stream_density.run_pipeline_iterations(
+                    env_vars, ['docker-compose.yml'], '/tmp/results', 'gst', 15.0)
+
+        self.assertEqual((num_pipelines, passed), (1, stream_density.STATUS_PASS))
+        self.assertEqual(calculate.call_count, 3)
+        # Three windows ran (1 pass, 2 fail, 1 confirm); only the last is saved.
+        self.assertEqual(extract_latency.call_count, 3)
+        save_latency.assert_called_once_with(
+            '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
+            stream_fps={'pipeline_stream0': 15.0})
+        self.assertEqual(output.getvalue().count('System latency: p50:'), 3)
+        self.assertIn(
+            'Lanes: 2 | measurement interval: 2 | status: fail',
+            output.getvalue())
+        self.assertIn(
+            'Lanes: 1 | measurement interval: 3 | status: pass',
+            output.getvalue())
+        self.assertEqual(output.getvalue().count('System throughput: 15.00 FPS'), 2)
+        self.assertEqual(output.getvalue().count('System throughput: 14.00 FPS'), 1)
+        self.assertEqual(report.call_args.args[1], {'pipeline_stream0': 15.0})
+        self.assertIn(
+            "Measured FPS by stream: {'pipeline_stream0': 15.0}",
+            output.getvalue())
+        self.assertNotIn("throughput thresholds {'pipeline_stream0': 14.25}",
+                         output.getvalue())
+
+    def test_count_measurement_samples_counts_generated_stream_logs_once(self):
+        with tempfile.TemporaryDirectory() as test_results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}), \
+                patch('stream_density.get_pipeline_stream_count',
+                      return_value=2):
+            first_log = os.path.join(
+                test_results_dir, 'pipeline_stream0_lane1_gst.log')
+            second_log = os.path.join(
+                test_results_dir, 'pipeline_stream1_lane2_gst.log')
+            with open(first_log, 'w') as file:
+                file.write('fps,duration_seconds\n' + '1,1.00\n' * 99)
+            with open(second_log, 'w') as file:
+                file.write('fps,duration_seconds\n' + '1,1.00\n' * 100)
+
+            end_offsets = {
+                first_log: os.path.getsize(first_log),
+                second_log: os.path.getsize(second_log),
+            }
+            counts, expected_count = stream_density.count_measurement_samples(
+                2, test_results_dir, 'gst', {}, end_offsets)
+
+        self.assertEqual(expected_count, 2)
+        self.assertEqual(sorted(counts.values()), [99, 100])
+
+    def test_latency_samples_use_the_same_log_offset_window(self):
+        first_line = (
+            "latency_tracer_pipeline, source_name=(string)source0, "
+            "sink_name=(string)sink0, frame_num=(uint)1, "
+            "frame_latency=(double)10.5\n")
+        second_line = (
+            "latency_tracer_pipeline, source_name=(string)source0, "
+            "sink_name=(string)sink0, frame_num=(uint)2, "
+            "frame_latency=(double)20.5\n")
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch.dict(os.environ, {'TIMESTAMP': ''}):
+            latency_log = os.path.join(
+                results_dir, 'gst-launch_123_gst.log')
+            with open(latency_log, 'w', encoding='utf-8') as file:
+                file.write(first_line + second_line)
+            start_offset = len(first_line.encode("utf-8"))
+            end_offset = os.path.getsize(latency_log)
+
+            samples = stream_density.extract_window_latency_samples(
+                results_dir, 'gst',
+                {latency_log: start_offset},
+                {latency_log: end_offset})
+
+        self.assertEqual(samples, {'source0 -> sink0': [20.5]})
+
+    def test_snapshot_offsets_include_latency_logs(self):
+        with tempfile.TemporaryDirectory() as results_dir, \
+                patch('stream_density.get_pipeline_stream_count',
+                      return_value=1), \
+                patch('stream_density.filter_logs_for_current_timestamp',
+                      side_effect=lambda paths: paths):
+            fps_log = os.path.join(
+                results_dir, 'pipeline_stream0_lane_gst.log')
+            latency_log = os.path.join(
+                results_dir, 'gst-launch_123_gst.log')
+            for log_path in (fps_log, latency_log):
+                with open(log_path, 'w', encoding='utf-8') as file:
+                    file.write('sample\n')
+
+            offsets = stream_density.snapshot_stream_log_offsets(
+                results_dir, 'gst')
+
+        self.assertEqual(set(offsets), {fps_log, latency_log})
+
+    def test_collect_measurement_window_extends_to_sample_floor(self):
+        elapsed = [0.0]
+        output = io.StringIO()
+
+        def advance_time(seconds):
+            elapsed[0] += seconds
+
+        with patch('stream_density.time.monotonic',
+                   side_effect=lambda: elapsed[0]), \
+                patch('stream_density.time.sleep', side_effect=advance_time), \
+                patch('stream_density.snapshot_stream_log_offsets',
+                      side_effect=[{}, {'log': 99}, {'log': 100}]), \
+                patch('stream_density.count_measurement_samples',
+                      side_effect=[({'log': 99}, 1), ({'log': 100}, 1)]), \
+                redirect_stdout(output):
+            result = stream_density.collect_measurement_window(
+                1, '/results', 'gst', minimum_duration_seconds=2)
+
+        for marker in ('SWEEPING-START', 'SWEEPING-STOP'):
+            message = next(line for line in output.getvalue().splitlines()
+                           if marker in line)
+            timestamp = message.rsplit(': ', 1)[1]
+            parsed = datetime.fromisoformat(timestamp)
+            self.assertIsNotNone(parsed.utcoffset())
+            self.assertEqual(parsed.isoformat(), timestamp)
+
+        start_offsets, end_offsets, duration, counts, enough_samples = result
+        self.assertEqual(start_offsets, {})
+        self.assertEqual(end_offsets, {'log': 100})
+        self.assertEqual(duration, 3)
+        self.assertEqual(counts, {'log': 100})
+        self.assertTrue(enough_samples)
+
+    def test_collect_measurement_window_caps_extension_at_configured_duration(self):
+        elapsed = [0.0]
+
+        def advance_time(seconds):
+            elapsed[0] += seconds
+
+        with patch('stream_density.time.monotonic',
+                   side_effect=lambda: elapsed[0]), \
+                patch('stream_density.time.sleep', side_effect=advance_time), \
+                patch('stream_density.snapshot_stream_log_offsets',
+                      return_value={}), \
+                patch('stream_density.count_measurement_samples',
+                      return_value=({'log': 99}, 1)):
+            result = stream_density.collect_measurement_window(
+                1, '/results', 'gst', minimum_duration_seconds=2)
+
+        self.assertEqual(result[2], 4)
+        self.assertFalse(result[4])
+
+    def test_print_stream_density_report_summary(self):
+        stream_fps = {'pipeline_stream0': 14.6, 'pipeline_stream1': 15.0}
+        targets = {'pipeline_stream0': 15.0, 'pipeline_stream1': 15.0}
+        pass_marks = {'pipeline_stream0': 14.25, 'pipeline_stream1': 14.25}
+        samples = {
+            'pipeline_stream0': [(fps, 1.0) for fps in
+                                 [16, 14, 15, 13, 17, 14, 16, 12, 15, 14]],
+            'pipeline_stream1': [(15, 1.0)] * 10,
+        }
+        meta = {
+            'pipeline_stream0': {'camera': 'cam1', 'workload': 'wl'},
+            'pipeline_stream1': {'camera': 'cam2', 'workload': 'wl'},
+        }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            stream_density.print_stream_density_report(
+                18, stream_fps, targets, pass_marks, 100, 2, 2, 0.95,
+                meta, 10, samples, 103.4,
+                {'pipeline_stream0_lane1_gst.log': 100,
+                 'pipeline_stream1_lane1_gst.log': 103},
+                {
+                    'name': 'Example lane',
+                    'summary': 'Detects and classifies products',
+                    'cameras': 'One camera at 15 fps',
+                    'why_run_it': 'Compares complete product scanning performance',
+                })
+        report = output.getvalue()
+
+        self.assertLess(report.index('Scenario: Example lane'),
+                        report.index('Stream density result'))
+        self.assertIn('Summary: Detects and classifies products', report)
+        self.assertIn('Cameras: One camera at 15 fps', report)
+        self.assertIn('Why run it: Compares complete product scanning performance', report)
+        self.assertIn('Use case density (lanes) 18', report)
+        self.assertIn('Stream density (streams) 2', report)
+        self.assertIn('Warmup period            10 s', report)
+        self.assertIn('Measurement interval     100 s minimum', report)
+        self.assertIn('run acceptance criterion (two consecutive passes)', report)
+        self.assertIn('Actual measurement time  103.4 s (minimum 100 s)', report)
+        self.assertIn(
+            'Samples per pipeline log 100-103 across 2 logs (minimum 100)',
+            report)
+        header = next(line for line in report.splitlines()
+                      if line.startswith('stream'))
+        for column in ('target', 'throughput threshold', 'measured (avg)',
+                       'p10', 'p90', 'seconds below throughput threshold', 'result'):
+            self.assertIn(column, header)
+        rows = {line.split()[0]: line for line in report.splitlines()
+                if line.startswith('pipeline_stream')}
+        self.assertIn('14.25', rows['pipeline_stream0'])
+        self.assertIn('14.60', rows['pipeline_stream0'])
+        self.assertIn('12.00', rows['pipeline_stream0'])
+        self.assertIn('16.00', rows['pipeline_stream0'])
+        self.assertIn('5.00 s (50%)', rows['pipeline_stream0'])
+        self.assertIn('pass', rows['pipeline_stream0'])
+        self.assertIn('0.00 s (0%)', rows['pipeline_stream1'])
+        self.assertIn(
+            'The lowest-throughput stream was pipeline_stream0', report)
+        self.assertIn('targeting 15.00 FPS', report)
+        self.assertIn('measuring 14.60 FPS', report)
+        self.assertIn('against its 14.25 FPS throughput threshold', report)
+
+    def test_count_valid_streams(self):
+        stream_fps_dict = {
+            'pipeline_stream0': 15.0,
+            'pipeline_stream1': 12.5,
+            'pipeline_stream2': 0.0,
+        }
+
+        self.assertEqual(
+            stream_density.count_valid_streams(stream_fps_dict), 2)
+
+    def test_count_valid_streams_five_lanes_of_six_cameras(self):
+        lane_count = 5
+        cameras_per_lane = 6
+        stream_fps_dict = {
+            f'pipeline_stream{stream_index}': 15.0
+            for stream_index in range(lane_count * cameras_per_lane)
+        }
+
+        self.assertEqual(
+            stream_density.count_valid_streams(stream_fps_dict), 30)
+
+    def test_build_per_stream_target_fps_camera_ordered_logs_above_one_lane(self):
+        # Camera-ordered logs, where index % cameras picks the wrong camera above one lane
+        cameras = [{'camera_id': f'cam{i + 1}', 'fps': 15} for i in range(6)]
+        cameras[5]['fps'] = 5
+        for lanes, expected_slow in ((2, [10, 11]), (5, [25, 26, 27, 28, 29])):
+            with self.subTest(lanes=lanes):
+                manifest = self._manifest([(lane, cam) for cam in range(6) for lane in range(lanes)])
+                result = self._run_with_manifest(
+                    cameras, manifest, 6 * lanes,
+                    lambda d, e: stream_density.build_per_stream_target_fps(d, 15, env_vars=e))
+                slow = sorted(int(name[len('pipeline_stream'):])
+                              for name, target in result.items() if target == 5.0)
+                self.assertEqual(slow, expected_slow)
+                self.assertEqual(list(result.values()).count(15.0), 6 * lanes - lanes)
 
     def test_clean_up_pipeline_logs(self):
         test_results_dir = './test_results_clean'
@@ -185,12 +784,25 @@ class Testing(unittest.TestCase):
             test_results_dir, 'pipeline12345656_abc.log')
         testFile2 = os.path.join(
             test_results_dir, 'pipeline98765432_def.log')
+        manifestFile = os.path.join(
+            test_results_dir, 'pipeline_streams_20261009092918074066_gst0.json')
+        latencySamplesFile = os.path.join(
+            test_results_dir, stream_density.LATENCY_SAMPLES_FILENAME)
         try:
             os.makedirs(test_results_dir)
             with open(testFile1, 'w') as file:
                 file.write('this is a test')
             with open(testFile2, 'w') as file:
                 file.write('another file for testing')
+            with open(manifestFile, 'w') as file:
+                file.write('{"streams": []}')
+            with open(latencySamplesFile, 'w') as file:
+                file.write('{"samples_by_stream": {}}\n')
+            stream_density.clean_up_pipeline_logs(
+                test_results_dir, preserve_latency_samples=True)
+            self.assertTrue(
+                os.path.exists(latencySamplesFile),
+                f"confirmed samples were removed: {latencySamplesFile}")
             stream_density.clean_up_pipeline_logs(
                 test_results_dir)
             self.assertFalse(
@@ -199,6 +811,12 @@ class Testing(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(testFile2),
                 f"file still exists: {testFile2}")
+            self.assertFalse(
+                os.path.exists(manifestFile),
+                f"file still exists: {manifestFile}")
+            self.assertFalse(
+                os.path.exists(latencySamplesFile),
+                f"file still exists: {latencySamplesFile}")
         except Exception as ex:
             self.fail(f"ERROR: found exception {ex}")
         finally:
@@ -206,6 +824,10 @@ class Testing(unittest.TestCase):
                 os.remove(testFile1)
             if os.path.exists(testFile2):
                 os.remove(testFile2)
+            if os.path.exists(manifestFile):
+                os.remove(manifestFile)
+            if os.path.exists(latencySamplesFile):
+                os.remove(latencySamplesFile)
             if not os.listdir(test_results_dir):
                 os.rmdir(test_results_dir)
 
@@ -219,7 +841,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [20.0],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 2: Missing RESULTS_DIR_KEY in env_vars
@@ -237,7 +859,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [DEFAULT_TARGET_FPS],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 4: Negative target_fps value in target_fps_list
@@ -248,7 +870,7 @@ class Testing(unittest.TestCase):
                 "exception_type": ArgumentError,
             },
             # Test case 5: Missing INIT_DURATION_KEY in env_vars-
-            # should default to "120"
+            # should default to "10"
             {
                 "env_vars": {RESULTS_DIR_KEY: "/some/path"},
                 "target_fps_list": [20.0],
@@ -256,7 +878,7 @@ class Testing(unittest.TestCase):
                 "expected_target_fps_list": [20.0],
                 "expected_env_vars": {
                     RESULTS_DIR_KEY: "/some/path",
-                    INIT_DURATION_KEY: "120"
+                    INIT_DURATION_KEY: "10"
                 },
             },
             # Test case 6: PIPELINE_INCR_KEY <= 0 (should raise exception)
@@ -295,142 +917,224 @@ class Testing(unittest.TestCase):
                         self.fail(f"Unexpected exception raised: {ex}")
 
     @patch('time.sleep', return_value=None)
+    @patch('stream_density.collect_measurement_window',
+           return_value=({}, {}, 100.0,
+                         {'pipeline_stream0_lane_gst.log': 100}, True))
     @patch('benchmark.docker_compose_containers')
-    @patch('stream_density.calculate_total_fps')
+    @patch('stream_density.calculate_multi_stream_fps')
+    @patch('stream_density.extract_window_latency_samples', return_value={})
+    @patch('stream_density.save_window_latency_samples')
+    @patch('stream_density.snapshot_stream_log_offsets', return_value={})
+    @patch('stream_density.check_can_add_pipelines', return_value=True)
+    @patch('stream_density.measure_pipeline_memory', return_value=100.0)
     @patch('stream_density.check_non_empty_result_logs')
     @patch('stream_density.clean_up_pipeline_logs')
     def test_pipeline_iterations(
         self,
         mock_clean_logs,
         mock_check_logs,
+        mock_measure_memory,
+        mock_check_can_add,
+        mock_snapshot_offsets,
+        mock_save_latency_samples,
+        mock_extract_latency_samples,
         mock_calculate_fps,
         mock_docker_compose,
+        mock_collect_window,
         mock_sleep
     ):
         test_cases = [
-            # Test case 1: Succeed on the first iteration
-            # with target_fps achieved
+            # Test case 1: fail at two pipelines, then pass at one pipeline.
             {
-                "env_vars": {"INIT_DURATION": "10"},
+                "env_vars": {
+                    "INIT_DURATION": "10",
+                    "PIPELINE_INC": "1",
+                    "CONSECUTIVE_PASS_WINDOWS": "1",
+                    "CONSECUTIVE_FAIL_WINDOWS": "1",
+                },
                 "compose_files": ["docker-compose.yml"],
                 "results_dir": "/path/to/results",
                 "container_name": "above_fps_target",
                 "target_fps": 14.0,
-                "expected_num_pipelines": 10,
-                "expected_meet_target_fps": True,
-                # Mock returns FPS below target
+                "expected_num_pipelines": 1,
+                "expected_status": stream_density.STATUS_PASS,
+                "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
-                    (50, 20.0), (70, 16.0), (100, 12.0), (120, 14.8)
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
                 ]
             },
-            # Test case 2: Reach minimum pipeline count
-            # without achieving target_fps
+            # Test case 2: fail at the minimum pipeline count.
             {
-                "env_vars": {"INIT_DURATION": "10"},
+                "env_vars": {
+                    "INIT_DURATION": "10",
+                    "PIPELINE_INC": "1",
+                    "CONSECUTIVE_FAIL_WINDOWS": "1",
+                },
                 "compose_files": ["docker-compose.yml"],
                 "results_dir": "/path/to/results",
                 "container_name": "below_fps_target",
                 "target_fps": 15.0,
                 "expected_num_pipelines": 1,
-                "expected_meet_target_fps": False,
-                # Mock returns FPS below target
-                "calculate_fps_side_effect": [(100, 10.0), (50, 5.0)]
-            },
-            # Test case 3: Below target_fps and come back
-            {
-                "env_vars": {"INIT_DURATION": "10", "PIPELINE_INC": "1"},
-                "compose_files": ["docker-compose.yml"],
-                "results_dir": "/path/to/results",
-                "container_name": "below_comeback_target",
-                "target_fps": 14.0,
-                "expected_num_pipelines": 1,
-                "expected_meet_target_fps": True,
-                # Mock returns FPS below target
+                "expected_status": stream_density.STATUS_FAIL,
+                "expected_streams_sustained": 1,
                 "calculate_fps_side_effect": [
-                    (100, 60.0), (190, 10.0), (320, 14.2)
+                    (15.0, 15.0, {"pipeline_stream0": 15.0}, {}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                 ]
             },
-            # Test case 4: Below target_fps and reach minimum
-            {
-                "env_vars": {"INIT_DURATION": "10", "PIPELINE_INC": "1"},
-                "compose_files": ["docker-compose.yml"],
-                "results_dir": "/path/to/results",
-                "container_name": "below_comeback_target",
-                "target_fps": 14.0,
-                "expected_num_pipelines": 1,
-                "expected_meet_target_fps": False,
-                # Mock returns FPS below target
-                "calculate_fps_side_effect": [
-                    (100, 60.0), (190, 10.0), (220, 13.2)
-                ]
-            },
-            # Test case 5: check_non_empty_result_logs raises ValueError
+            # Test case 3: inconclusive twice at the first lane count.
             {
                 "env_vars": {"INIT_DURATION": "10"},
                 "compose_files": ["docker-compose.yml"],
                 "results_dir": "/path/to/results",
-                "container_name": "value_error",
-                "target_fps": 14.0,
-                "check_logs_side_effect": ValueError(
-                    "Expecting ValueError for check_non_empty_result_logs"),
+                "container_name": "insufficient_samples",
+                "target_fps": 15.0,
+                "expected_num_pipelines": 0,
+                "expected_status": stream_density.STATUS_INCONCLUSIVE,
+                "expected_streams_sustained": 0,
+                "measurement_window_result": (
+                    {}, {}, 200.0, {"pipeline_stream0_lane1_gst.log": 99},
+                    False),
+                "calculate_fps_side_effect": [],
+                "expect_no_fps_calculation": True,
+                "expected_window_calls": 2,
+            },
+            {
+                "env_vars": {
+                    "INIT_DURATION": "0",
+                    "CONSECUTIVE_FAIL_WINDOWS": "1",
+                },
+                "compose_files": ["docker-compose.yml"],
+                "results_dir": "/path/to/results",
+                "container_name": "first_step_failure",
+                "target_fps": 15.0,
                 "expected_num_pipelines": 1,
-                "expected_meet_target_fps": False
+                "expected_status": stream_density.STATUS_FAIL,
+                "expected_streams_sustained": 1,
+                "calculate_fps_side_effect": [
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                ],
+                "expected_window_calls": 1,
+                "expect_no_report": True,
             },
         ]
 
         for i, test_case in enumerate(test_cases):
             with self.subTest(f"Test case {i + 1}"):
-                env_vars = test_case["env_vars"]
+                # Keep a manifest left by a real run in src/pipelines out of this test
+                env_vars = dict(test_case["env_vars"],
+                                STREAM_MANIFEST_PATH="/nonexistent/pipeline_streams.json")
                 compose_files = test_case["compose_files"]
                 results_dir = test_case["results_dir"]
                 container_name = test_case["container_name"]
                 target_fps = test_case["target_fps"]
 
-                # Set up the side effect for
-                # check_non_empty_result_logs if specified
-                if "check_logs_side_effect" in test_case:
-                    mock_check_logs.side_effect = test_case[
-                        "check_logs_side_effect"]
-
-                # Set up the side effect for
-                # calculate_total_fps using a finite list
-                if "calculate_fps_side_effect" in test_case:
-                    mock_calculate_fps.side_effect = test_case[
-                        "calculate_fps_side_effect"]
-
-                # Run the function with the test case inputs
-                if "check_logs_side_effect" in test_case:
-                    num_pipelines, meet_target_fps = (
+                mock_calculate_fps.reset_mock()
+                mock_collect_window.reset_mock()
+                mock_calculate_fps.side_effect = test_case[
+                    "calculate_fps_side_effect"]
+                mock_collect_window.return_value = test_case.get(
+                    "measurement_window_result",
+                    ({}, {}, 100.0,
+                     {'pipeline_stream0_lane_gst.log': 100}, True))
+                about = {
+                    'name': 'Test lane',
+                    'summary': 'Runs a test workload',
+                }
+                with patch('stream_density.get_camera_config_about',
+                           return_value=about), \
+                        patch('stream_density.print_stream_density_report') as report:
+                    num_pipelines, status, streams_sustained = (
                         stream_density.run_pipeline_iterations(
                             env_vars, compose_files, results_dir,
                             container_name, target_fps)
                     )
+                if test_case.get("expect_no_report"):
+                    report.assert_not_called()
 
-                    # Verify the returned values after ValueError is handled
-                    self.assertEqual(
-                        num_pipelines,
-                        test_case["expected_num_pipelines"])
-                    self.assertEqual(
-                        meet_target_fps,
-                        test_case["expected_meet_target_fps"])
+                self.assertEqual(
+                    num_pipelines, test_case["expected_num_pipelines"])
+                self.assertEqual(status, test_case["expected_status"])
+                self.assertEqual(
+                    streams_sustained, test_case["expected_streams_sustained"])
+                if test_case.get("expect_no_fps_calculation"):
+                    mock_calculate_fps.assert_not_called()
+                if "expected_window_calls" in test_case:
+                    self.assertEqual(mock_collect_window.call_count,
+                                     test_case["expected_window_calls"])
+                if i < 2:
+                    report.assert_called_once()
+                    self.assertEqual(report.call_args.kwargs['about'], about)
 
-                    # Ensure that check_non_empty_result_logs was
-                    # called and raised ValueError
-                    mock_check_logs.assert_called()
+    def _run_iterations_with_windows(self, window_results, fps_responses):
+        env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',
+                    'CONSECUTIVE_FAIL_WINDOWS': '1',
+                    'CONSECUTIVE_PASS_WINDOWS': '1',
+                    'STREAM_MANIFEST_PATH': '/nonexistent/pipeline_streams.json'}
+        with patch('stream_density.measure_pipeline_memory', return_value=100), \
+                patch('stream_density.clean_up_pipeline_logs'), \
+                patch('stream_density.check_can_add_pipelines', return_value=True), \
+                patch('stream_density.benchmark.docker_compose_containers') as compose, \
+                patch('stream_density.time.sleep'), \
+                patch('stream_density.check_non_empty_result_logs'), \
+                patch('stream_density.collect_measurement_window',
+                      side_effect=window_results) as collect, \
+                patch('stream_density.calculate_multi_stream_fps',
+                      side_effect=fps_responses), \
+                patch('stream_density.calculate_pipeline_latency', return_value=(0.0, 0.0)), \
+                patch('stream_density.build_per_stream_target_fps',
+                      side_effect=lambda d, *a, **k: {n: 15.0 for n in d}), \
+                patch('stream_density.build_per_stream_camera_meta', return_value={}), \
+                patch('stream_density.print_stream_density_report'):
+            with redirect_stdout(io.StringIO()) as output:
+                result = stream_density.run_pipeline_iterations(
+                    env_vars, ['docker-compose.yml'], '/tmp/results', 'gst', 15.0)
+        return result, collect.call_count, compose.call_count, output.getvalue()
+
+    def test_inconclusive_interval_reports_last_passing_density(self):
+        enough = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
+        short = ({}, {}, 200.0, {'pipeline_stream0.log': 99}, False)
+        two_streams = {'pipeline_stream0': 15.0, 'pipeline_stream1': 15.0}
+        result, collect_calls, _, output = self._run_iterations_with_windows(
+            [enough, enough, short, short],
+            [(15.0, 15.0, {'pipeline_stream0': 15.0}, {}),
+             (30.0, 15.0, two_streams, {})])
+
+        # Passed at 1 and 2 lanes; 3 lanes was inconclusive twice
+        self.assertEqual(result, (2, stream_density.STATUS_INCONCLUSIVE, 2))
+        self.assertEqual(collect_calls, 4)
+        self.assertIn('Result: Inconclusive', output)
+        self.assertIn(
+            '\nINFO: Last passing density: 2 lane(s) (2 streams)', output)
+
+    def test_inconclusive_interval_is_retried_without_restarting(self):
+        enough = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
+        short = ({}, {}, 200.0, {'pipeline_stream0.log': 99}, False)
+        result, collect_calls, compose_calls, output = self._run_iterations_with_windows(
+            [short, enough, enough, enough],
+            [(15.0, 15.0, {'pipeline_stream0': 15.0}, {}),
+             (10.0, 10.0, {'pipeline_stream1': 10.0}, {}),
+             (15.0, 15.0, {'pipeline_stream0': 15.0}, {})])
+
+        self.assertEqual(result[1], stream_density.STATUS_PASS)
+        self.assertEqual(collect_calls, 4)
+        self.assertIn('Retrying the measurement interval at 1 lane(s)', output)
+        # Three lane steps (1, 2, 1); the retry adds no extra down/up pair
+        self.assertEqual(compose_calls, 3 * 2)
+
+    def test_validate_rejects_measurement_interval_below_sample_floor(self):
+        for seconds, should_raise in (('50', True), ('99', True), ('100', False)):
+            with self.subTest(seconds=seconds):
+                env_vars = {RESULTS_DIR_KEY: '/some/path',
+                            'MEASUREMENT_WINDOW_SECONDS': seconds}
+                if should_raise:
+                    with self.assertRaises(ArgumentError):
+                        validate_and_setup_env(env_vars, [15.0])
                 else:
-                    num_pipelines, meet_target_fps = (
-                        stream_density.run_pipeline_iterations(
-                            env_vars, compose_files, results_dir,
-                            container_name, target_fps)
-                    )
-
-                    # Verify the output
-                    self.assertEqual(
-                        num_pipelines,
-                        test_case["expected_num_pipelines"])
-                    self.assertEqual(
-                        meet_target_fps,
-                        test_case["expected_meet_target_fps"])
+                    validate_and_setup_env(env_vars, [15.0])
 
     @patch('time.sleep', return_value=None)
     @patch('stream_density.validate_and_setup_env')
@@ -453,12 +1157,12 @@ class Testing(unittest.TestCase):
                 "target_fps_list": [15.0, 25.0],
                 "container_names_list": ["container1", "container2"],
                 "run_pipeline_side_effect": [
-                    (5, True),  # For container1
-                    (7, False)  # For container2
+                    (5, stream_density.STATUS_PASS, 10),  # For container1
+                    (7, stream_density.STATUS_FAIL, 12)  # For container2
                 ],
                 "expected_results": [
-                    (15.0, "container1", 5, True),
-                    (25.0, "container2", 7, False)
+                    (15.0, "container1", 5, stream_density.STATUS_PASS, 10),
+                    (25.0, "container2", 7, stream_density.STATUS_FAIL, 12)
                 ],
                 # Expected number of compose down calls
                 "expected_down_call_count": 2
@@ -480,52 +1184,48 @@ class Testing(unittest.TestCase):
         for i, test_case in enumerate(test_cases):
             with self.subTest(f"Test case {i + 1}"):
                 mock_docker_compose.reset_mock()
-                env_vars = test_case["env_vars"].copy()
-                compose_files = test_case["compose_files"]
-                target_fps_list = test_case["target_fps_list"]
-                container_names_list = test_case["container_names_list"]
+                with tempfile.TemporaryDirectory() as results_dir:
+                    env_vars = dict(
+                        test_case["env_vars"], **{RESULTS_DIR_KEY: results_dir})
+                    compose_files = test_case["compose_files"]
+                    target_fps_list = test_case["target_fps_list"]
+                    container_names_list = test_case["container_names_list"]
 
-                # Mock the behavior of run_pipeline_iterations
-                # based on the test case
-                if isinstance(test_case["run_pipeline_side_effect"], list):
-                    mock_run_pipeline_iterations.side_effect = test_case[
-                        "run_pipeline_side_effect"]
-                else:
                     mock_run_pipeline_iterations.side_effect = test_case[
                         "run_pipeline_side_effect"]
 
-                # Run the function and verify results or exceptions
-                if test_case.get("expect_exception"):
-                    print('expecting exception test case')
-                    with self.assertRaises(Exception) as context:
-                        stream_density.run_stream_density(
+                    # Run the function and verify results or exceptions
+                    if test_case.get("expect_exception"):
+                        print('expecting exception test case')
+                        with self.assertRaises(Exception) as context:
+                            stream_density.run_stream_density(
+                                env_vars, compose_files,
+                                target_fps_list, container_names_list)
+                        self.assertTrue(isinstance(context.exception, Exception))
+                    else:
+                        results = stream_density.run_stream_density(
                             env_vars, compose_files,
                             target_fps_list, container_names_list)
-                    self.assertTrue(isinstance(context.exception, Exception))
-                else:
-                    results = stream_density.run_stream_density(
-                        env_vars, compose_files,
-                        target_fps_list, container_names_list)
-                    self.assertEqual(results, test_case["expected_results"])
+                        self.assertEqual(results, test_case["expected_results"])
 
-                # Verify that validate_and_setup_env was called correctly
-                mock_validate_env.assert_called_with(
-                    env_vars, target_fps_list
-                )
+                    # Verify that validate_and_setup_env was called correctly
+                    mock_validate_env.assert_called_with(
+                        env_vars, target_fps_list
+                    )
 
-                expected_down_call_count = test_case[
-                    "expected_down_call_count"
-                ]
-                actual_down_calls = [
-                    call for call in mock_docker_compose.call_args_list
-                    if call[0][0] == 'down'
-                ]
-                self.assertEqual(
-                    len(actual_down_calls),
-                    expected_down_call_count,
-                    f"Expected {expected_down_call_count} 'down' calls, "
-                    f"but found {len(actual_down_calls)}"
-                )
+                    expected_down_call_count = test_case[
+                        "expected_down_call_count"
+                    ]
+                    actual_down_calls = [
+                        call for call in mock_docker_compose.call_args_list
+                        if call[0][0] == 'down'
+                    ]
+                    self.assertEqual(
+                        len(actual_down_calls),
+                        expected_down_call_count,
+                        f"Expected {expected_down_call_count} 'down' calls, "
+                        f"but found {len(actual_down_calls)}"
+                    )
 
 
 if __name__ == '__main__':
