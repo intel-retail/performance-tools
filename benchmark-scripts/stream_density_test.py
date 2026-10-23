@@ -808,6 +808,24 @@ class Testing(unittest.TestCase):
                 "expect_no_fps_calculation": True,
                 "expected_window_calls": 2,
             },
+            {
+                "env_vars": {
+                    "INIT_DURATION": "0",
+                    "CONSECUTIVE_FAIL_WINDOWS": "1",
+                },
+                "compose_files": ["docker-compose.yml"],
+                "results_dir": "/path/to/results",
+                "container_name": "first_step_failure",
+                "target_fps": 15.0,
+                "expected_num_pipelines": 1,
+                "expected_status": stream_density.STATUS_FAIL,
+                "expected_streams_sustained": 1,
+                "calculate_fps_side_effect": [
+                    (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
+                ],
+                "expected_window_calls": 1,
+                "expect_no_report": True,
+            },
         ]
 
         for i, test_case in enumerate(test_cases):
@@ -840,6 +858,8 @@ class Testing(unittest.TestCase):
                             env_vars, compose_files, results_dir,
                             container_name, target_fps)
                     )
+                if test_case.get("expect_no_report"):
+                    report.assert_not_called()
 
                 self.assertEqual(
                     num_pipelines, test_case["expected_num_pipelines"])
