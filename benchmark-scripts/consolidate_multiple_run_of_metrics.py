@@ -34,7 +34,6 @@ AVG_MEM_USAGE_CONSTANT = "Memory Utilization %"
 AVG_POWER_USAGE_CONSTANT = "Power Draw W"
 AVG_MEM_BANDWIDTH_CONSTANT = "Memory Bandwidth Usage MB/s"
 AVG_FPS_CONSTANT = "FPS"
-LAST_MODIFIED_LOG = "Last log update"
 TEXT_COUNT_CONSTANT = "Total Text count"
 BARCODE_COUNT_CONSTANT = "Total Barcode count"
 PIPELINE_LATENCY_CONSTANT = "Latency"
@@ -597,22 +596,34 @@ class MemBandwidthExtractor(KPIExtractor):
 
 
 class PIPELINEFPSExtractor(KPIExtractor):
-    _FPS_KEYWORD = "avg_fps"
+    """Time-weighted FPS over the whole pipeline_stream log, matching the
+    stream_density rate (sum(fps * seconds) / sum(seconds))."""
 
     #overriding abstract method
     def extract_data(self, log_file_path):
         print("parsing fps")
-        average_fps_list = []
+        weighted_frames = 0.0
+        total_seconds = 0.0
         camera_fps = {}
         cam = re.findall(r'\d+', os.path.basename(log_file_path))
         camera_key = "Camera_{} {}".format(cam[0], AVG_FPS_CONSTANT)
         with open(log_file_path) as f:
             for row in csv.reader(f):
-                if row and row != ['fps', 'duration_seconds']:
-                    average_fps_list.append(float(row[0]))
+                if len(row) < 2:
+                    continue
+                try:
+                    fps = float(row[0])
+                    seconds = float(row[1])
+                except ValueError:
+                    continue
+                if not (np.isfinite(fps) and np.isfinite(seconds)) \
+                        or fps < 0 or seconds <= 0:
+                    continue
+                weighted_frames += fps * seconds
+                total_seconds += seconds
 
-        if len(average_fps_list) > 0:
-            camera_fps[camera_key] = round(mean(average_fps_list), 2)
+        if total_seconds > 0:
+            camera_fps[camera_key] = round(weighted_frames / total_seconds, 2)
         else:
             camera_fps[camera_key] = "NA"
 
@@ -647,100 +658,45 @@ class FPSExtractor(KPIExtractor):
     def return_blank(self):
         return {AVG_FPS_CONSTANT: "NA"}
 
-class PIPELINLastModifiedExtractor(KPIExtractor):
-    #overriding abstract method
-    def extract_data(self, log_file_path):
-        print("parsing last modified log time")
-        average_fps_list = []
-        last_modified = {}
-        cam = re.findall(r'\d+', os.path.basename(log_file_path))
-        print(log_file_path)
-        print(cam)
-        camera_key = "Camera_{} {}".format(cam[0], LAST_MODIFIED_LOG)
-        
-        #get the last file modified time
-        print(log_file_path)
-        unix_date = os.path.getmtime(log_file_path) if os.path.exists(log_file_path) else None
-        print(unix_date)
-        #convert unix time to human readable date time
-        formatted_date = datetime.datetime.fromtimestamp(unix_date) if not (unix_date is None) else None
-        print(formatted_date)
-        #convert date format to string
-        last_modified[camera_key] = formatted_date.strftime('%m/%d/%Y %H:%M:%f') if not (formatted_date is None) else {LAST_MODIFIED_LOG: "NA"}
-        print(last_modified[camera_key])
-
-        return last_modified
-
-    def return_blank(self):
-        return {LAST_MODIFIED_LOG: "NA"}
-
 class PipelineLatencyExtractor(KPIExtractor):
+    """Collect whole-log per-frame latency samples from a gst-launch log.
+
+    The samples are stored in ``self.record`` in the same shape as a
+    stream-density latency record, so both are summarised by
+    build_window_latency_metrics().
+    """
+
     #overriding abstract method
     def extract_data(self, log_file_path):
-        
         print("parsing latency")
-        # Data structure to store latency data organized by source_name and sink_name
-        latency_data_structure = {}  # {(source_name, sink_name): {frame_number: frame_latency_value}}
-        latency = {}
-        lat = re.findall(r'\d+', os.path.basename(log_file_path))
-        lat_filename = lat[0] if len(lat) > 0 else "UNKNOWN"
-        
+        # {"source -> sink": {frame_number: frame_latency_value}}
+        samples_by_channel = {}
         with open(log_file_path) as f:
             for line in f:
-                if "latency_tracer_pipeline" in line:
-                    match = re.search(r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
-                    source_name_match = re.search(r'source_name=\(string\)([^,\s]+)', line)
-                    sink_name_match = re.search(r'sink_name=\(string\)([^,\s]+)', line)
-                    frame_number_match = re.search(r'frame_num=\(uint\)(\d+)', line)
-                    
-                    if match and source_name_match and sink_name_match and frame_number_match:
-                        source_name = source_name_match.group(1)
-                        sink_name = sink_name_match.group(1)
-                        frame_number = int(frame_number_match.group(1))
-                        frame_latency_value = float(match.group(1))
-                        
-                        # Create key from source_name and sink_name
-                        source_sink_key = (source_name, sink_name)
-                        
-                        # Initialize dictionary for this source-sink pair if not exists
-                        if source_sink_key not in latency_data_structure:
-                            latency_data_structure[source_sink_key] = {}
-                        
-                        # Store frame latency value with frame number as key
-                        latency_data_structure[source_sink_key][frame_number] = frame_latency_value
+                if "latency_tracer_pipeline" not in line:
+                    continue
+                match = re.search(r'frame_latency=\(double\)([0-9]*\.?[0-9]+)', line)
+                source_name_match = re.search(r'source_name=\(string\)([^,\s]+)', line)
+                sink_name_match = re.search(r'sink_name=\(string\)([^,\s]+)', line)
+                frame_number_match = re.search(r'frame_num=\(uint\)(\d+)', line)
+                if not (match and source_name_match and sink_name_match
+                        and frame_number_match):
+                    continue
+                channel = (f"{source_name_match.group(1)} -> "
+                           f"{sink_name_match.group(1)}")
+                samples_by_channel.setdefault(channel, {})[
+                    int(frame_number_match.group(1))] = float(match.group(1))
 
-        # Process collected data and calculate statistics
-        latency_results = {}
-        channel_medians = {}
-        channel_averages = {}
-        channel_stddevs = {}
-        
-        if latency_data_structure:
-            for (source_name, sink_name), frame_data in latency_data_structure.items():
-                if frame_data:  # Check if we have frame data
-                    latency_values = list(frame_data.values())
-                    median_latency = median(latency_values)
-                    average_latency = mean(latency_values)
-                    stddev_latency = stdev(latency_values) if len(latency_values) > 1 else 0.0
-                    
-                    channel_key = f"{source_name}_{sink_name}"
-                    channel_medians[channel_key] = round(median_latency, 3)
-                    channel_averages[channel_key] = round(average_latency, 3)
-                    channel_stddevs[channel_key] = round(stddev_latency, 3)
-                    
-                    print(f"Pipeline_{lat_filename} {source_name}_{sink_name}: median = {median_latency:.3f} ms, average = {average_latency:.3f} ms, stddev = {stddev_latency:.3f} ms, frames = {len(frame_data)}")
-
-        # Store results
-        if channel_medians:
-            latency_results[f"For Pipeline_{lat_filename} run per frame Latency (ms) for Channel(source_sink)"] = channel_medians
-            
-        if channel_averages:
-            latency_results[f"For Pipeline_{lat_filename} run per frame Average Latency (ms) for Channel(source_sink)"] = channel_averages
-            
-        if channel_stddevs:
-            latency_results[f"For Pipeline_{lat_filename} run per frame Stddev Latency (ms) for Channel(source_sink)"] = channel_stddevs
-
-        return latency_results
+        container = re.sub(r'^gst-launch_?', '',
+                           os.path.splitext(os.path.basename(log_file_path))[0])
+        self.record = {
+            "container_name": container or "unknown",
+            "samples_by_stream": {
+                channel: list(frames.values())
+                for channel, frames in samples_by_channel.items() if frames
+            },
+        }
+        return {}
 
     def return_blank(self):
         return {"LATENCY": "NA"}
@@ -840,10 +796,11 @@ class PCMExtractor(KPIExtractor):
     def return_blank(self):
         return {AVG_POWER_USAGE_CONSTANT: "-", AVG_MEM_BANDWIDTH_CONSTANT: "-"}
 
+PIPELINE_FPS_LOG_PATTERN = r"^pipeline.*\.log$"
+
 KPIExtractor_OPTION = {"meta_summary.txt":MetaExtractor,
                        "camera":FPSExtractor,
-                       r"^pipeline.*\.log$":PIPELINEFPSExtractor,
-                       r"(?:^r).*\.jsonl$": PIPELINLastModifiedExtractor,
+                       PIPELINE_FPS_LOG_PATTERN:PIPELINEFPSExtractor,
                        "gst-launch":PipelineLatencyExtractor,
                        "cpu_usage.log":CPUUsageExtractor,
                        "npu_usage.csv":NPUUsageExtractor,
@@ -864,19 +821,200 @@ def add_parser():
     parser.add_argument('--output', nargs=1, help='Output file to store consolidate data', required=True)
     return parser
 
-if __name__ == '__main__':
-    parser = add_parser()
-    args = vars(parser.parse_args())
 
-    root_directory = args['root_directory'][0]
-    output = args['output'][0]
+# Calculated for internal use but not written to the summary CSV.
+CSV_EXCLUDED_METRICS = {"Per-stream Latency Sample Count"}
 
+
+def load_window_latency_records(root_directory):
+    """Load latency samples recorded for final confirming stream-density windows."""
+    records, _ = load_stream_density_records(root_directory)
+    return records
+
+
+def load_stream_density_records(root_directory):
+    """Load confirmed-window samples and terminal sweep-result records."""
+    sample_records = []
+    sweep_results = []
+    sample_filename = "stream_density_latency_samples.jsonl"
+    for sample_path in pathlib.Path(root_directory).rglob(sample_filename):
+        with open(sample_path, "r", encoding="utf-8") as sample_file:
+            for line_number, line in enumerate(sample_file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    print(
+                        f"WARN: Invalid latency sample record at "
+                        f"{sample_path}:{line_number}: {error}")
+                    continue
+                if not isinstance(record, dict):
+                    print(
+                        f"WARN: Ignoring malformed latency sample record at "
+                        f"{sample_path}:{line_number}")
+                    continue
+                if record.get("record_type") == "sweep_result":
+                    if not isinstance(record.get("status"), str) or not isinstance(
+                            record.get("lane_count"), int):
+                        print(
+                            f"WARN: Ignoring malformed sweep result at "
+                            f"{sample_path}:{line_number}")
+                        continue
+                    sweep_results.append(record)
+                elif isinstance(record.get("samples_by_stream"), dict):
+                    sample_records.append(record)
+                else:
+                    print(
+                        f"WARN: Ignoring malformed latency sample record at "
+                        f"{sample_path}:{line_number}")
+    return sample_records, sweep_results
+
+
+def has_unconfirmed_density(sweep_results):
+    """Return whether any recorded density sweep ended without confirmation."""
+    return any(result["status"] != "pass" for result in sweep_results)
+
+
+def is_fps_or_latency_metric(metric_name):
+    """Return whether a CSV metric is an FPS or latency measurement."""
+    return bool(re.search(r"\bfps\b|latency", str(metric_name), re.IGNORECASE))
+
+
+def filter_unconfirmed_fps_latency_metrics(metrics):
+    """Remove FPS and latency metrics when no density was confirmed."""
+    return {
+        key: value for key, value in metrics.items()
+        if not is_fps_or_latency_metric(key)
+    }
+
+
+def write_metrics_csv(output, metrics, no_confirmed_density=False):
+    """Write consolidated metrics, marking unconfirmed density sweeps."""
+    with open(output, 'w') as csv_file:
+        writer = csv.writer(csv_file)
+        if no_confirmed_density:
+            writer.writerow(["Result: no confirmed density"])
+        for key, value in metrics.items():
+            if key in CSV_EXCLUDED_METRICS:
+                continue
+            if isinstance(value, dict):
+                formatted_value = ', '.join(
+                    [f'{k}: {v}' for k, v in value.items()])
+                writer.writerow([key, formatted_value])
+            else:
+                writer.writerow([key, value])
+
+
+def build_window_fps_metrics(records):
+    """Build Camera_N FPS rows from final-window time-weighted stream FPS."""
+    containers = {record.get("container_name", "unknown") for record in records}
+    metric_values = {}
+    for record in records:
+        container = record.get("container_name", "unknown")
+        for stream_name, raw_fps in record.get("stream_fps", {}).items():
+            try:
+                fps = float(raw_fps)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(fps):
+                continue
+            stream_index = re.search(r"\d+", str(stream_name))
+            camera_id = stream_index.group(0) if stream_index else stream_name
+            key = f"Camera_{camera_id} {AVG_FPS_CONSTANT}"
+            if len(containers) > 1:
+                key = f"{key} ({container})"
+            metric_values[key] = round(fps, 2)
+    return metric_values
+
+
+def build_window_latency_metrics(records):
+    """Build per-stream and pooled-system stats with linear percentiles.
+
+    Records come from the final confirming stream-density window, or from
+    whole gst-launch logs when no window was saved. Each stream's samples
+    are merged into one set before its statistics are calculated.
+    """
+    per_stream_samples = defaultdict(list)
+    all_samples = []
+
+    for record in records:
+        container = record.get("container_name", "unknown")
+        for stream_name, raw_values in record["samples_by_stream"].items():
+            if not isinstance(raw_values, list):
+                continue
+            values = []
+            for raw_value in raw_values:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(value) and value >= 0:
+                    values.append(value)
+            if not values:
+                continue
+            stream_key = f"{container} | {stream_name}"
+            per_stream_samples[stream_key].extend(values)
+            all_samples.extend(values)
+
+    if not all_samples:
+        return {}
+
+    def percentile(values, p):
+        return float(np.percentile(values, p, method="linear"))
+
+    metric_values = {
+        "Per-stream Latency p50 (ms)": {},
+        "Per-stream Latency p95 (ms)": {},
+        "Per-stream Latency p99 (ms)": {},
+        "Per-stream Latency Average (ms)": {},
+        "Per-stream Latency Stddev (ms)": {},
+        "Per-stream Latency Sample Count": {},
+    }
+    for stream_key, values in sorted(per_stream_samples.items()):
+        metric_values["Per-stream Latency p50 (ms)"][stream_key] = round(
+            percentile(values, 50), 3)
+        metric_values["Per-stream Latency p95 (ms)"][stream_key] = round(
+            percentile(values, 95), 3)
+        metric_values["Per-stream Latency p99 (ms)"][stream_key] = round(
+            percentile(values, 99), 3)
+        metric_values["Per-stream Latency Average (ms)"][stream_key] = round(
+            mean(values), 3)
+        metric_values["Per-stream Latency Stddev (ms)"][stream_key] = round(
+            stdev(values) if len(values) > 1 else 0.0, 3)
+        metric_values["Per-stream Latency Sample Count"][stream_key] = len(
+            values)
+
+    metric_values["System Latency p50 (ms)"] = round(
+        percentile(all_samples, 50), 3)
+    metric_values["System Latency p95 (ms)"] = round(
+        percentile(all_samples, 95), 3)
+    metric_values["System Latency p99 (ms)"] = round(
+        percentile(all_samples, 99), 3)
+    metric_values["System Latency Sample Count"] = len(all_samples)
+    return metric_values
+
+
+def consolidate_metrics(root_directory, output):
     n = 0
     df = pd.DataFrame()
     full_kpi_dict = {}
-    all_channel_medians = []  # Collect all channel medians from all files
-    
+    # Final confirming stream-density window; empty when nothing was saved.
+    window_records, sweep_results = load_stream_density_records(root_directory)
+    has_sweep_results = bool(sweep_results)
+    no_confirmed_density = (
+        has_sweep_results and has_unconfirmed_density(sweep_results))
+    whole_log_latency_records = []
+
     for kpiExtractor in KPIExtractor_OPTION:
+        if has_sweep_results and kpiExtractor in (
+                "camera", "gst-launch", PIPELINE_FPS_LOG_PATTERN):
+            continue
+        # When the final window was saved, it replaces the whole-log FPS
+        # and latency so metrics.csv matches stream_density.log.
+        if (window_records or has_sweep_results) and kpiExtractor in (
+                "gst-launch", PIPELINE_FPS_LOG_PATTERN):
+            continue
         fileFound = False
         for dirpath, dirname, filename in os.walk(root_directory):
             for file in filename:
@@ -885,29 +1023,23 @@ if __name__ == '__main__':
                     extractor = KPIExtractor_OPTION.get(kpiExtractor)()
                     kpi_dict = extractor.extract_data(
                         os.path.join(dirpath, file))
+                    if isinstance(extractor, PipelineLatencyExtractor):
+                        whole_log_latency_records.append(extractor.record)
                     if kpi_dict:
-                        # Collect max median from each file for aggregate statistics
-                        for key, value in kpi_dict.items():
-                            if "run per frame Latency (ms) for Channel(source_sink)" in key and isinstance(value, dict):
-                                # Add only the max median from this file to all_channel_medians
-                                if value:  # Check if dictionary is not empty
-                                    max_median_for_file = max(value.values())
-                                    all_channel_medians.append(max_median_for_file)
                         full_kpi_dict.update(kpi_dict)
-    
-    # Calculate aggregate statistics of all channel medians
-    if all_channel_medians:
-        overall_median = median(all_channel_medians)
-        
-        full_kpi_dict["Overall Latency (ms)"] = round(overall_median, 3)
-       
-    # Write out summary csv file from dictionary
-    with open(output, 'w') as csv_file:
-        writer = csv.writer(csv_file)
-        for key, value in full_kpi_dict.items():
-            if isinstance(value, dict):
-                # Format dictionary values without curly braces
-                formatted_value = ', '.join([f'{k}: {v}' for k, v in value.items()])
-                writer.writerow([key, formatted_value])
-            else:
-                writer.writerow([key, value])
+
+    if window_records and not no_confirmed_density:
+        full_kpi_dict.update(build_window_fps_metrics(window_records))
+    if not no_confirmed_density:
+        full_kpi_dict.update(build_window_latency_metrics(
+            window_records or (
+                [] if has_sweep_results else whole_log_latency_records)))
+    else:
+        full_kpi_dict = filter_unconfirmed_fps_latency_metrics(full_kpi_dict)
+    write_metrics_csv(output, full_kpi_dict, no_confirmed_density)
+
+
+if __name__ == '__main__':
+    parser = add_parser()
+    args = vars(parser.parse_args())
+    consolidate_metrics(args['root_directory'][0], args['output'][0])
