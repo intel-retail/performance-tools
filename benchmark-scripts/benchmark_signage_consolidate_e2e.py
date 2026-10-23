@@ -78,7 +78,8 @@ def consolidate(results):
         rows.append(row("4. Web UI filtering (callback)", "Web UI", web_path,
                         [frame.get("callback_total_ms") for frame in web_frames]))
         rows.append(row("4b. Queue wait before ad decision", "Web UI", web_path,
-                [frame.get("queue_wait_ms") for frame in web_frames],
+                [frame.get("queue_wait_ms") for frame in web_frames
+                 if frame.get("cooldown_suppressed") is not True],
                 note="Candidate enqueue to generator dequeue; excludes cooldown suppression"))
         rows.append(row("4c. Cooldown remaining at suppression", "Web UI", web_path,
                 [frame.get("cooldown_remaining_ms") for frame in web_frames],
@@ -97,7 +98,6 @@ def consolidate(results):
         rows.append(row("9. Browser render", "Browser", web_path, ad_values("browser_render_ms"),
                         note="Requires an open Web UI page; paint-opportunity estimate, not measured display time"))
         rows.append(row("E2E frame -> ad ready", "Web UI", web_path, ad_values("frame_to_ad_ready_ms")))
-        rows.append(row("E2E frame -> ad rendered", "Web UI + Browser", web_path, ad_values("frame_to_render_ms")))
         rows.append(row("Ads generated (predefined / dynamic)", "Web UI", web_path,
                         value=f"{len(ad_values('ad_id', 'predefined'))} / {len(ad_values('ad_id', 'dynamic'))}"))
     if aig:

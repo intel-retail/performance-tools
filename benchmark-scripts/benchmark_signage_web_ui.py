@@ -36,7 +36,9 @@ FIELDS = ("timestamp", "frame_id", "recency_frames", "confidence_threshold",
           "total_selection_logic_ms")
 AD_FIELDS = ("timestamp", "ad_id", "frame_id", "item", "path", "queue_wait_ms", "ase_query_ms",
              "aig_generation_ms", "ad_generation_total_ms", "response_size_kb", "frame_to_ad_ready_ms",
-             "ready_to_served_ms", "browser_fetch_ms", "browser_render_ms", "frame_to_render_ms")
+             "ready_to_served_ms", "browser_fetch_ms", "browser_render_ms", "frame_to_render_ms",
+             "served_deliveries", "matched_deliveries", "unmatched_served_deliveries",
+             "unmatched_rendered_deliveries")
 
 
 def parse_log_line(line):
@@ -95,16 +97,41 @@ def combine_ad_events(events):
             ads[ad_id] = {field: payload.get(field) for field in AD_FIELDS}
             ads[ad_id]["timestamp"] = timestamp
         elif marker == AD_SERVED_MARKER:
-            served.setdefault(ad_id, payload)
+            served.setdefault(ad_id, []).append(payload)
         elif marker == AD_RENDERED_MARKER:
-            rendered.setdefault(ad_id, payload)
-    for ad_id, row in ads.items():
-        row.update({key: value for key, value in served.get(ad_id, {}).items() if key in AD_FIELDS})
-        row.update({key: value for key, value in rendered.get(ad_id, {}).items() if key in AD_FIELDS})
-        parts = [row[key] for key in ("frame_to_ad_ready_ms", "ready_to_served_ms",
-                                      "browser_fetch_ms", "browser_render_ms")]
-        if all(isinstance(part, (int, float)) for part in parts):
-            row["frame_to_render_ms"] = round(sum(parts), 3)
+            rendered.setdefault(ad_id, []).append(payload)
+    for ad_id in ads.keys() | served.keys() | rendered.keys():
+        row = ads.setdefault(ad_id, {field: None for field in AD_FIELDS})
+        row["ad_id"] = ad_id
+        served_events = served.get(ad_id, [])
+        rendered_events = rendered.get(ad_id, [])
+        rendered_by_delivery = {
+            event.get("delivery_id"): event for event in rendered_events
+            if event.get("delivery_id")
+        }
+        matched = [
+            (served_event, rendered_by_delivery[served_event["delivery_id"]])
+            for served_event in served_events
+            if served_event.get("delivery_id") in rendered_by_delivery
+        ]
+        row["served_deliveries"] = len(served_events)
+        row["matched_deliveries"] = len(matched)
+        row["unmatched_served_deliveries"] = len(served_events) - len(matched)
+        row["unmatched_rendered_deliveries"] = (
+            len(rendered_events) - len({served_event["delivery_id"] for served_event, _ in matched})
+        )
+
+        if served_events:
+            served_timings = [event["ready_to_served_ms"] for event in served_events
+                              if isinstance(event.get("ready_to_served_ms"), (int, float))]
+            if served_timings:
+                row["ready_to_served_ms"] = round(mean(served_timings), 3)
+        if matched:
+            for field in ("browser_fetch_ms", "browser_render_ms"):
+                values = [rendered_event[field] for _, rendered_event in matched
+                          if isinstance(rendered_event.get(field), (int, float))]
+                if values:
+                    row[field] = round(mean(values), 3)
     return list(ads.values())
 
 def run(duration, output):
@@ -157,6 +184,14 @@ def run(duration, output):
             values = [row[field] for row in frames if isinstance(row[field], (int, float))]
             summary[f"avg_{field}"] = round(mean(values), 6) if values else None
     summary["ads"] = len(ads)
+    summary["ad_served_deliveries"] = sum(row["served_deliveries"] or 0 for row in ads)
+    summary["ad_delivery_matches"] = sum(row["matched_deliveries"] or 0 for row in ads)
+    summary["ad_unmatched_served_deliveries"] = sum(
+        row["unmatched_served_deliveries"] or 0 for row in ads
+    )
+    summary["ad_unmatched_rendered_deliveries"] = sum(
+        row["unmatched_rendered_deliveries"] or 0 for row in ads
+    )
     for field in AD_FIELDS:
         if field.endswith("_ms"):
             values = [row[field] for row in ads if isinstance(row[field], (int, float))]

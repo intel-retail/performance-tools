@@ -1,3 +1,9 @@
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Unit tests for end-to-end benchmark result consolidation."""
 
 import csv
@@ -56,6 +62,8 @@ class TestConsolidate(unittest.TestCase):
             self.write_json(root, "web_ui_benchmark_20260101_000000_frames.json", [
                 {"mqtt_to_web_ui_ms": 1, "callback_total_ms": 2, "queue_wait_ms": 3,
                  "cooldown_remaining_ms": 4, "cooldown_suppressed": True, "selector_total_ms": 5},
+                {"mqtt_to_web_ui_ms": 2, "callback_total_ms": 3, "queue_wait_ms": 12,
+                 "cooldown_suppressed": False, "selector_total_ms": 6},
             ])
             self.write_json(root, "web_ui_benchmark_20260101_000000_ads.json", [
                 {"ad_id": "p", "path": "predefined", "ase_query_ms": 6,
@@ -84,13 +92,16 @@ class TestConsolidate(unittest.TestCase):
 
         stages = [entry["stage"] for entry in rows]
         self.assertIn("1. PID throughput (FPS)", stages)
-        self.assertIn("E2E frame -> ad rendered", stages)
+        self.assertNotIn("E2E frame -> ad rendered", stages)
         self.assertIn("7. AIG warm calls", stages)
         self.assertIn("Qdrant search @ 100 points", stages)
         self.assertIn("Resources during e2e: Package power W", stages)
         self.assertEqual(next(row for row in rows if row["stage"] == "Ads generated (predefined / dynamic)")["value"],
                          "1 / 1")
         self.assertEqual(next(row for row in rows if row["stage"] == "7. AIG warm calls")["avg_ms"], 10)
+        queue_wait = next(row for row in rows if row["stage"] == "4b. Queue wait before ad decision")
+        self.assertEqual(queue_wait["samples"], 1)
+        self.assertEqual(queue_wait["avg_ms"], 12)
 
     def test_empty_directory_returns_no_rows(self):
         with tempfile.TemporaryDirectory() as directory:

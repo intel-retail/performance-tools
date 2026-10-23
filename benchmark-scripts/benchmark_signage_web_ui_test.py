@@ -1,3 +1,9 @@
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Unit tests for Web UI benchmark event parsing and capture."""
 
 import json
@@ -50,9 +56,12 @@ class TestWebUiEventHelpers(unittest.TestCase):
                 "ad_id": 7, "path": "dynamic", "frame_id": 1, "ase_query_ms": 2,
                 "frame_to_ad_ready_ms": 3,
             }),
-            (web_ui.AD_SERVED_MARKER, "t2", {"ad_id": 7, "ready_to_served_ms": 3}),
+            (web_ui.AD_SERVED_MARKER, "t2", {
+                "ad_id": 7, "delivery_id": "request-a", "ready_to_served_ms": 3,
+            }),
             (web_ui.AD_RENDERED_MARKER, "t3", {
-                "ad_id": 7, "browser_fetch_ms": 4, "browser_render_ms": 5,
+                "ad_id": 7, "delivery_id": "request-a",
+                "browser_fetch_ms": 4, "browser_render_ms": 5,
             }),
             (web_ui.AD_TRACE_MARKER, "t4", {"ad_id": 8, "path": "predefined"}),
         ]
@@ -60,9 +69,73 @@ class TestWebUiEventHelpers(unittest.TestCase):
         ads = web_ui.combine_ad_events(events)
 
         self.assertEqual(len(ads), 2)
-        self.assertEqual(ads[0]["frame_to_render_ms"], 15)
+        self.assertIsNone(ads[0]["frame_to_render_ms"])
+        self.assertEqual(ads[0]["matched_deliveries"], 1)
+        self.assertEqual(ads[0]["unmatched_served_deliveries"], 0)
+        self.assertEqual(ads[0]["ready_to_served_ms"], 3)
+        self.assertEqual(ads[0]["browser_fetch_ms"], 4)
+        self.assertEqual(ads[0]["browser_render_ms"], 5)
         self.assertEqual(ads[0]["path"], "dynamic")
         self.assertIsNone(ads[1]["frame_to_render_ms"])
+
+    def test_combine_ad_events_correlates_client_deliveries_before_averaging(self):
+        events = [
+            (web_ui.AD_TRACE_MARKER, "t0", {
+                "ad_id": 7, "path": "dynamic", "frame_to_ad_ready_ms": 10,
+            }),
+            (web_ui.AD_SERVED_MARKER, "t1", {
+                "ad_id": 7, "delivery_id": "client-a", "ready_to_served_ms": 2,
+            }),
+            (web_ui.AD_SERVED_MARKER, "t2", {
+                "ad_id": 7, "delivery_id": "client-b", "ready_to_served_ms": 20,
+            }),
+            (web_ui.AD_SERVED_MARKER, "t3", {
+                "ad_id": 7, "delivery_id": "client-c", "ready_to_served_ms": 30,
+            }),
+            (web_ui.AD_RENDERED_MARKER, "t4", {
+                "ad_id": 7, "delivery_id": "client-b",
+                "browser_fetch_ms": 100, "browser_render_ms": 10,
+            }),
+            (web_ui.AD_RENDERED_MARKER, "t5", {
+                "ad_id": 7, "delivery_id": "client-a",
+                "browser_fetch_ms": 200, "browser_render_ms": 20,
+            }),
+            (web_ui.AD_RENDERED_MARKER, "t6", {
+                "ad_id": 7, "delivery_id": "orphan",
+                "browser_fetch_ms": 300, "browser_render_ms": 30,
+            }),
+        ]
+
+        ad = web_ui.combine_ad_events(events)[0]
+
+        self.assertEqual(ad["served_deliveries"], 3)
+        self.assertEqual(ad["matched_deliveries"], 2)
+        self.assertEqual(ad["unmatched_served_deliveries"], 1)
+        self.assertEqual(ad["unmatched_rendered_deliveries"], 1)
+        self.assertEqual(ad["ready_to_served_ms"], 17.333)
+        self.assertEqual(ad["browser_fetch_ms"], 150)
+        self.assertEqual(ad["browser_render_ms"], 15)
+        self.assertIsNone(ad["frame_to_render_ms"])
+
+    def test_combine_ad_events_does_not_pair_legacy_events_without_delivery_ids(self):
+        events = [
+            (web_ui.AD_TRACE_MARKER, "t0", {
+                "ad_id": 7, "path": "dynamic", "frame_to_ad_ready_ms": 10,
+            }),
+            (web_ui.AD_SERVED_MARKER, "t1", {
+                "ad_id": 7, "ready_to_served_ms": 2,
+            }),
+            (web_ui.AD_RENDERED_MARKER, "t2", {
+                "ad_id": 7, "browser_fetch_ms": 4, "browser_render_ms": 5,
+            }),
+        ]
+
+        ad = web_ui.combine_ad_events(events)[0]
+
+        self.assertEqual(ad["matched_deliveries"], 0)
+        self.assertEqual(ad["unmatched_served_deliveries"], 1)
+        self.assertEqual(ad["unmatched_rendered_deliveries"], 1)
+        self.assertIsNone(ad["frame_to_render_ms"])
 
 
 class TestWebUiRun(unittest.TestCase):
@@ -77,8 +150,13 @@ class TestWebUiRun(unittest.TestCase):
                 "ad_id": 9, "frame_id": 1, "path": "dynamic",
                 "frame_to_ad_ready_ms": 10, "ase_query_ms": 4, "aig_generation_ms": 6,
             }),
-            (web_ui.AD_SERVED_MARKER, {"ad_id": 9, "ready_to_served_ms": 2}),
-            (web_ui.AD_RENDERED_MARKER, {"ad_id": 9, "browser_fetch_ms": 3, "browser_render_ms": 4}),
+            (web_ui.AD_SERVED_MARKER, {
+                "ad_id": 9, "delivery_id": "request-9", "ready_to_served_ms": 2,
+            }),
+            (web_ui.AD_RENDERED_MARKER, {
+                "ad_id": 9, "delivery_id": "request-9",
+                "browser_fetch_ms": 3, "browser_render_ms": 4,
+            }),
         ]
         return b"".join(
             f"2026-01-01T00:00:00Z {marker}{json.dumps(payload)}\n".encode()
@@ -109,7 +187,13 @@ class TestWebUiRun(unittest.TestCase):
             self.assertEqual(summary["ads"], 1)
             self.assertEqual(summary["ads_dynamic"], 1)
             self.assertEqual(json.loads(frame_path.read_text())[0]["selector_total_ms"], 3)
-            self.assertEqual(json.loads(ad_path.read_text())[0]["frame_to_render_ms"], 19)
+            ad = json.loads(ad_path.read_text())[0]
+            self.assertIsNone(ad["frame_to_render_ms"])
+            self.assertEqual(ad["browser_fetch_ms"], 3)
+            self.assertEqual(ad["browser_render_ms"], 4)
+            self.assertEqual(summary["ad_delivery_matches"], 1)
+            self.assertEqual(summary["ad_unmatched_served_deliveries"], 0)
+            self.assertEqual(summary["ad_unmatched_rendered_deliveries"], 0)
             process.terminate.assert_called_once()
             process.communicate.assert_called_once_with(timeout=3)
 

@@ -188,7 +188,9 @@ def run(output_prefix, interval, duration, host_metrics, ready_file):
             except (OSError, subprocess.CalledProcessError) as error:
                 print(f"Docker stats sample failed: {error}", file=sys.stderr)
             wait = max(0, interval - (time.monotonic() - sample_start))
-            if wait and (deadline is None or time.monotonic() + wait < deadline):
+            if deadline is not None:
+                wait = min(wait, max(0, deadline - time.monotonic()))
+            if wait:
                 stop.wait(wait)
         return write_results(output_prefix, samples, interval, host_metrics)
     finally:

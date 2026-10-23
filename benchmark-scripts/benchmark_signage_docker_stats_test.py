@@ -1,3 +1,9 @@
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Unit tests for Docker service resource sampling."""
 
 import json
@@ -132,6 +138,23 @@ class TestDockerStatsOutputAndRun(unittest.TestCase):
             stop.wait.assert_called_once()
             write_results.assert_called_once()
             self.assertFalse(ready.exists())
+
+    def test_run_clamps_final_wait_to_remaining_duration(self):
+        stop = mock.Mock()
+        stop.is_set.side_effect = [False, False]
+        with (
+            mock.patch.object(stats, "Event", return_value=stop),
+            mock.patch.object(stats.signal, "signal"),
+            mock.patch.object(stats, "sample_services", return_value=[{"service": "api"}])
+            as sample_services,
+            mock.patch.object(stats, "write_results", return_value=True),
+            mock.patch.object(stats.time, "monotonic", side_effect=[0, 0, 0, 0, 1, 1, 10]),
+        ):
+            result = stats.run(Path("unused"), 20, 10, None, None)
+
+        self.assertTrue(result)
+        self.assertEqual(sample_services.call_count, 2)
+        stop.wait.assert_called_once_with(9)
 
     def test_run_logs_sampling_errors_and_cleans_ready_file(self):
         with tempfile.TemporaryDirectory() as directory:

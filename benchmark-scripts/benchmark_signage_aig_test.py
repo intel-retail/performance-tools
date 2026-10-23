@@ -1,3 +1,9 @@
+#
+# Apache v2 license
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Unit tests for the ASe/AIG benchmark helpers."""
 
 import base64
