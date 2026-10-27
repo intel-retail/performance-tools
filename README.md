@@ -33,6 +33,86 @@ python benchmark-scripts/benchmark.py \
 	--target_device GPU.1
 ```
 
+## Stream Density Comparison Report
+
+Stream-density runs made through `benchmark-scripts/benchmark.py` now save
+`run_metadata.json` alongside their metrics. The snapshot records the host CPU
+and PCI accelerators, OS, kernel, camera and pipeline configurations (including
+stage precision), benchmark settings, and total sweep duration.
+Accelerator names come from `lspci`; when unavailable, Linux sysfs supplies
+PCI address, vendor/device IDs, class and driver. If neither source is accessible
+(for example, in a restricted container), the report explicitly marks accelerator
+identity as unavailable instead of silently omitting it.
+
+From the loss-prevention repository root, after running the same configuration
+on the desired accelerators:
+
+```bash
+python3 performance-tools/benchmark-scripts/compare_stream_density.py
+```
+
+When using the loss-prevention Makefile, the equivalent command also prepares
+the benchmark virtual environment and dependencies:
+
+```bash
+make combined-report
+make combined-report RESULTS_DIR=/path/to/benchmark
+make combined-report REPORT_ARGS='--since 2026-10-01 --until 2026-10-27'
+```
+
+`REPORT_ARGS` forwards optional generator arguments such as `--config`,
+`--output`, date filters, or explicit run directories. Relative paths are
+resolved from the loss-prevention repository root.
+The target retains the same single-configuration selection described below.
+
+This writes `benchmark/stream_density_report.md` without prompts. `RESULTS_DIR`
+overrides the default search directory. The report picks the newest completed
+run for each accelerator, using the configuration of the newest completed run.
+It groups runs by camera configuration, active model stages (including
+precision), and benchmark settings, ignoring device assignments. Heterogeneous
+device combinations are separate comparison targets. Each selected run is
+identified in the table and in its hardware/configuration details.
+
+```bash
+python3 performance-tools/benchmark-scripts/compare_stream_density.py \
+	benchmark/run-a benchmark/run-b --output comparison.md
+python3 performance-tools/benchmark-scripts/compare_stream_density.py \
+	--results-dir benchmark --since 2026-10-01 --until 2026-10-27
+```
+
+Explicit directories and date ranges use the same latest-per-accelerator rule.
+Dates filter run start times, default to UTC, and `--until YYYY-MM-DD` includes
+the whole day. `--config ID` selects a configuration ID from `run_metadata.json`
+instead of the newest configuration. No matching completed runs returns a
+nonzero exit code for CI. Interrupted runs are ignored; completed failed or
+inconclusive sweeps are shown as having no confirmed density.
+
+The report description is read from the camera configuration's `_about` block.
+The report uses final confirming-window FPS and latency, not averages across
+the density ramp. New confirmed-window records also save hardware metrics
+from CPU/power logs, PCM/NPU CSVs and supported GPU JSON/qmassa collectors.
+Collector files must contain readable samples at both window boundaries;
+unsupported, buffered, reset or unavailable samples are not estimated.
+Power per stream divides aligned window power by the stream count from that
+same window. CPU-package power retains its package scope and is not labelled
+accelerator-only power. Indexed GPU targets exclude other GPUs' measurements.
+For multiple containers, power values are labelled per container and divided
+by that container's stream count.
+
+Utilisation prefers confirming-window samples. Its fallback comes from each
+run's `metrics.csv`, or the existing consolidation function when that CSV has
+not been generated (requires `benchmark-scripts/requirements.txt`), and is
+explicitly labelled as not window-aligned. Missing measurements show `N/A`.
+Historical runs without aligned hardware samples show `N/A` power per stream;
+whole-run power averages are never substituted. The existing consolidation
+script is unchanged. Malformed run metadata is skipped with a warning so one
+damaged run does not prevent reporting other valid runs.
+Older runs without metadata are not discovered (explicit legacy directories
+produce a warning) because historical hardware and precision cannot be
+reconstructed reliably. Metadata capture failures warn without blocking the
+benchmark; applications without these configuration files keep their existing
+benchmark behavior.
+
 ## Smart Kiosk Voice-to-Voice (V2V) Benchmark
 
 `benchmark-scripts/benchmark_smart_kiosk_v2v.py` measures end-to-end
