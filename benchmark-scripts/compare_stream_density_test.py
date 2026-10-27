@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import compare_stream_density as report
 
@@ -121,6 +122,7 @@ class ComparisonTest(unittest.TestCase):
 
     def test_gpu_collector_power_and_utilisation(self):
         path, metadata = self.make_run("gpu", "GPU.0")
+        metadata["gpu_metric_devices"] = {"GPU.0": "GPU_1"}
         (path / "metrics.csv").write_text(
             "GPU_0 GPU Power (W),12\nGPU_0 Compute[CCS] Utilization %,75\n"
             "GPU_1 GPU Power (W),90\nGPU_1 Compute[CCS] Utilization %,99\n")
@@ -129,8 +131,58 @@ class ComparisonTest(unittest.TestCase):
         records[0]["hardware_metrics"] = report.read_metrics(path / "metrics.csv")
         sample_path.write_text("\n".join(json.dumps(record) for record in records))
         metrics = report.run_metrics(path, metadata)
-        self.assertEqual(metrics["power"], {"GPU_0 GPU Power (W)": 6})
-        self.assertEqual(metrics["utilisation"], {"GPU_0 Compute[CCS] Utilization %": 75})
+        self.assertEqual(metrics["power"], {"GPU_1 GPU Power (W)": 45})
+        self.assertEqual(metrics["utilisation"], {"GPU_1 Compute[CCS] Utilization %": 99})
+        metadata.pop("gpu_metric_devices")
+        metrics = report.run_metrics(path, metadata)
+        self.assertEqual(metrics["power"], {})
+        self.assertEqual(metrics["utilisation"], {})
+
+    def test_gpu_mapping_matches_pci_identity_not_card_index(self):
+        card = self.root / "card1" / "device"
+        card.parent.mkdir()
+        pci = self.root / "0000:03:00.0"
+        pci.mkdir()
+        card.symlink_to(pci, target_is_directory=True)
+        core = SimpleNamespace(available_devices=["GPU.0"],
+            get_property=lambda device, key: SimpleNamespace(domain=0, bus=3, device=0, function=0))
+        with patch.dict("sys.modules", {"openvino": SimpleNamespace(Core=lambda: core)}), \
+                patch.object(Path, "glob", return_value=[card]):
+            self.assertEqual(report.gpu_metric_devices(), {"GPU.0": "GPU_1"})
+
+    def test_invalid_hardware_is_skipped(self):
+        valid, _ = self.make_run("valid")
+        for index, hardware in enumerate((None, {}, {"cpu": ""}, {"cpu": "Test", "accelerators": None})):
+            with self.subTest(hardware=hardware):
+                path, metadata = self.make_run(f"invalid{index}", day=3)
+                metadata["hardware"] = hardware
+                (path / report.METADATA_FILE).write_text(json.dumps(metadata))
+                self.assertEqual(report.select_runs([valid, path])[0][0], valid)
+
+    def test_vlm_targets_and_component_details_are_preserved(self):
+        configs = self.root / "configs"
+        configs.mkdir()
+        (configs / "camera.json").write_text(json.dumps(self.camera))
+        paths = []
+        for device in ("GPU", "NPU"):
+            path, template = self.make_run(device)
+            stage = {"type": "vlm", "model": "detector", "device": "CPU", "precision": "FP16",
+                     "vlm_model": "language-model", "vlm_device": device, "vlm_precision": "INT8"}
+            pipeline = {"workload_pipeline_map": {"detect": [stage]}}
+            (configs / "pipeline.json").write_text(json.dumps(pipeline))
+            with patch.object(report, "gpu_metric_devices", return_value={}), \
+                    patch.object(report.subprocess, "run", side_effect=FileNotFoundError):
+                metadata = report.capture_run(path, self.root, {
+                    "CAMERA_STREAM": "camera.json", "WORKLOAD_DIST": "pipeline.json"}, {})
+            self.assertEqual(metadata["accelerator"], f"CPU+{device}")
+            report.finish_run(path, metadata)
+            paths.append(path)
+        selected = report.select_runs(paths)
+        self.assertEqual(len(selected), 2)
+        text = report.generate_report(selected)
+        self.assertIn("| detect | vlm | detector | CPU | FP16 |", text)
+        self.assertIn("| detect | vlm | language-model | GPU | INT8 |", text)
+        self.assertIn("| detect | vlm | language-model | NPU | INT8 |", text)
 
     def test_missing_container_window_cannot_report_partial_density(self):
         path, metadata = self.make_run("partial")

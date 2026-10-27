@@ -63,15 +63,39 @@ def pci_hardware(root=Path("/sys/bus/pci/devices")):
     return devices
 
 
+def gpu_metric_devices():
+    mapping = {}
+    try:
+        from openvino import Core
+        core = Core()
+        cards = {path.resolve().name.lower(): path.parent.name.removeprefix("card")
+                 for path in Path("/sys/class/drm").glob("card[0-9]*/device")}
+        for device in core.available_devices:
+            if not device.startswith("GPU."):
+                continue
+            try:
+                pci = core.get_property(device, "PCI_INFO")
+                address = (pci if isinstance(pci, str) else
+                           f"{pci.domain:04x}:{pci.bus:02x}:{pci.device:02x}.{pci.function:x}")
+                if address.lower() in cards:
+                    mapping[device] = f"GPU_{cards[address.lower()]}"
+            except (RuntimeError, AttributeError, TypeError, ValueError):
+                continue
+    except (ImportError, RuntimeError, OSError):
+        pass
+    return mapping
+
+
 def capture_run(results_dir, repo_root, env, settings):
     """Snapshot inputs before execution; never infer historical data from the host."""
     configs = Path(repo_root) / "configs"
     camera = read_json(configs / env.get("CAMERA_STREAM", "camera_to_workload.json"))
     pipeline = read_json(configs / env.get("WORKLOAD_DIST", "workload_to_pipeline.json"))
     stages = active_stages(camera, pipeline)
-    devices = sorted({str(stage.get("device") or stage.get("vlm_device")).upper()
+    devices = sorted({str(device).upper()
                       for entries in stages.values() for stage in entries
-                      if stage.get("device") or stage.get("vlm_device")})
+                      for device in (stage.get("device"), stage.get("vlm_device"))
+                      if device})
     cpu = platform.processor() or platform.machine()
     cpuinfo = Path("/proc/cpuinfo")
     if cpuinfo.exists():
@@ -100,6 +124,7 @@ def capture_run(results_dir, repo_root, env, settings):
         "config_id": configuration_id(camera, pipeline, settings),
         "accelerator": "+".join(devices) or env.get("DEVICE", "unknown"),
         "hardware": {"cpu": cpu, "accelerators": hardware},
+        "gpu_metric_devices": gpu_metric_devices(),
         "os": os_info.get("PRETTY_NAME", platform.system()),
         "kernel": platform.release(),
         "camera_config": camera,
@@ -148,6 +173,12 @@ def select_runs(paths, config_id=None, since=None, until=None):
                         "camera_config", "pipeline_config", "settings"):
                 if key not in metadata:
                     raise ValueError(f"missing {key}")
+            hardware = metadata["hardware"]
+            if (not isinstance(hardware, dict)
+                    or not isinstance(hardware.get("cpu"), str)
+                    or not hardware["cpu"].strip()
+                    or not isinstance(hardware.get("accelerators", []), list)):
+                raise ValueError("hardware must contain a CPU identity and an accelerator list")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             print(f"WARNING: skipping {path}: invalid metadata: {error}", file=sys.stderr)
             continue
@@ -177,13 +208,13 @@ def number(value):
         return None
 
 
-def matches_accelerator(metric, accelerator):
+def matches_accelerator(metric, accelerator, gpu_devices=None):
     indexed = re.search(r"\bGPU_(\d+)\b", metric, re.IGNORECASE)
     for device in accelerator.upper().split("+"):
         if device == "GPU" and "GPU" in metric.upper():
             return True
         if device.startswith("GPU."):
-            if indexed and indexed.group(1) == device.partition(".")[2]:
+            if indexed and (gpu_devices or {}).get(device) == f"GPU_{indexed.group(1)}":
                 return True
         elif device in ("CPU", "NPU") and device in metric.upper():
             return True
@@ -305,6 +336,7 @@ def run_metrics(path, metadata):
     else:
         metrics = read_metrics(metric_path)
     accelerator = metadata["accelerator"]
+    gpu_devices = metadata.get("gpu_metric_devices", {})
     power = {}
     window_utilisation = {}
     for container, record in windows.items():
@@ -318,13 +350,13 @@ def run_metrics(path, metadata):
                 continue
             label = f"{container}: {key}" if len(windows) > 1 else key
             if (("Power Draw W" in key or "GPU Power (W)" in key)
-                    and ("GPU" not in key.upper() or matches_accelerator(key, accelerator))):
+                    and ("GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices))):
                 power[label] = value / stream_count
-            if "Utilization %" in key and "Memory" not in key and matches_accelerator(key, accelerator):
+            if "Utilization %" in key and "Memory" not in key and matches_accelerator(key, accelerator, gpu_devices):
                 window_utilisation[label] = value
     utilisation = {key: value for key, raw in metrics.items()
                    if "Utilization %" in key and "Memory" not in key
-                   and matches_accelerator(key, accelerator)
+                   and matches_accelerator(key, accelerator, gpu_devices)
                    and (value := number(raw)) is not None}
     return {
         "status": "pass" if confirmed and fps else "no confirmed density",
@@ -392,6 +424,10 @@ def generate_report(runs):
                 values = [workload, stage.get("type"), stage.get("model"),
                           stage.get("device") or stage.get("vlm_device"), stage.get("precision")]
                 lines.append("| " + " | ".join(cell(value) for value in values) + " |")
+                if stage.get("vlm_model"):
+                    values = [workload, "vlm", stage["vlm_model"],
+                              stage.get("vlm_device"), stage.get("vlm_precision")]
+                    lines.append("| " + " | ".join(cell(value) for value in values) + " |")
         lines.extend(["", "### Test Configuration", "", "```json",
                       json.dumps({"camera": run["camera_config"], "settings": run["settings"]}, indent=2),
                       "```", ""])

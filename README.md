@@ -96,6 +96,11 @@ unsupported, buffered, reset or unavailable samples are not estimated.
 Power per stream divides aligned window power by the stream count from that
 same window. CPU-package power retains its package scope and is not labelled
 accelerator-only power. Indexed GPU targets exclude other GPUs' measurements.
+Run metadata saves a mapping from OpenVINO GPU devices to DRM collector indices
+only when their PCI addresses match. This optional discovery uses an installed
+OpenVINO Python runtime; unavailable PCI properties or missing runtime leave
+indexed GPU measurements as `N/A`, never inferred from matching numeric indices.
+VLM stages report detector and language-model devices and precisions separately.
 For multiple containers, power values are labelled per container and divided
 by that container's stream count.
 
