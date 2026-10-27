@@ -13,6 +13,7 @@ import traceback
 import csv
 import json
 import stream_density
+from compare_stream_density import capture_run, finish_run
 from device_validation import validate_target_device, resolve_target_device_default
 
 
@@ -258,6 +259,25 @@ def main():
     env_vars["INIT_DURATION"] = str(my_args.init_duration)
     if my_args.density_increment:
         env_vars["PIPELINE_INC"] = str(my_args.density_increment)
+    run_metadata = None
+    if target_fps_list:
+        settings = {
+            "target_fps": my_args.target_fps,
+            "container_names": container_names_list,
+            "init_duration": my_args.init_duration,
+            "measurement_window_seconds": my_args.measurement_window_seconds,
+            "density_increment": my_args.density_increment,
+            "environment": {key: env_vars[key] for key in (
+                "TARGET_FPS", "CONSECUTIVE_PASS_WINDOWS", "CONSECUTIVE_FAIL_WINDOWS",
+                "PASS_TOLERANCE_RATIO", "BATCH_SIZE_DETECT", "BATCH_SIZE_CLASSIFY",
+                "INFERENCE_INTERVAL", "STREAM_LOOP", "ROI_COORDINATES",
+                "DETECTION_THRESHOLD", "THRESHOLD") if key in env_vars},
+        }
+        try:
+            run_metadata = capture_run(results_dir, retail_use_case_root, env_vars, settings)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"WARNING: Cannot capture comparison metadata: {error}. "
+                  "This run will not be available to the comparison report.")
     if len(target_fps_list) > 1 and container_names_list:
         # stream density for multiple target FPS values and containers
         print('starting stream density for multiple running pipelines...')
@@ -323,6 +343,9 @@ def main():
         # stop all containers and camera-simulator
         docker_compose_containers("down", compose_files=compose_files,
                                   env_vars=env_vars)
+
+    if run_metadata is not None:
+        finish_run(results_dir, run_metadata)
 
     # collect metrics using copy-platform-metrics
     print("workloads finished...")

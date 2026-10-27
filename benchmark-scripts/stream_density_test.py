@@ -542,7 +542,7 @@ class Testing(unittest.TestCase):
         self.assertEqual(extract_latency.call_count, 3)
         save_latency.assert_called_once_with(
             '/tmp/results', 'gst', 1, {'cam1 -> sink0': [10.0]},
-            stream_fps={'pipeline_stream0': 15.0})
+            stream_fps={'pipeline_stream0': 15.0}, hardware_metrics={})
         self.assertEqual(output.getvalue().count('System latency: p50:'), 3)
         self.assertIn(
             'Lanes: 2 | measurement interval: 2 | status: fail',

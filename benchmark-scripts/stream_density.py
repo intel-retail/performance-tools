@@ -17,6 +17,7 @@ import json
 import math
 import csv
 from datetime import datetime
+from compare_stream_density import snapshot_hardware_logs, window_hardware_metrics
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -1131,11 +1132,13 @@ def run_pipeline_iterations(
         # during the measurement interval feed the decision
         inconclusive_retries = 0
         while True:
+            hardware_start = snapshot_hardware_logs(results_dir)
             (window_start_offsets, window_end_offsets,
              actual_measurement_seconds, sample_counts,
              enough_samples) = collect_measurement_window(
                 num_pipelines, results_dir, container_name,
                 measurement_window_seconds)
+            hardware_end = snapshot_hardware_logs(results_dir)
             window_number += 1
             if enough_samples:
                 break
@@ -1284,7 +1287,8 @@ def run_pipeline_iterations(
                     save_window_latency_samples(
                         results_dir, container_name, num_pipelines,
                         latency_samples_by_stream,
-                        stream_fps=stream_fps_dict)
+                        stream_fps=stream_fps_dict,
+                        hardware_metrics=window_hardware_metrics(hardware_start, hardware_end))
                     latency_sample_count = sum(
                         len(samples)
                         for samples in latency_samples_by_stream.values())
@@ -1582,7 +1586,7 @@ def extract_window_latency_samples(results_dir, container_name,
 
 
 def save_window_latency_samples(results_dir, container_name, num_pipelines,
-                                samples_by_stream, stream_fps):
+                                samples_by_stream, stream_fps, hardware_metrics=None):
     """Append raw latency samples and time-weighted per-stream FPS from the
     final confirming FPS window."""
     os.makedirs(results_dir, exist_ok=True)
@@ -1593,6 +1597,7 @@ def save_window_latency_samples(results_dir, container_name, num_pipelines,
         "window_id": datetime.now().astimezone().isoformat(),
         "stream_fps": dict(stream_fps),
         "samples_by_stream": samples_by_stream,
+        "hardware_metrics": hardware_metrics or {},
     }
     with open(output_path, "a", encoding="utf-8") as output_file:
         json.dump(record, output_file, separators=(",", ":"))
