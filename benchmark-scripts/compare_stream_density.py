@@ -71,10 +71,12 @@ def gpu_metric_devices():
         cards = {path.resolve().name.lower(): path.parent.name.removeprefix("card")
                  for path in Path("/sys/class/drm").glob("card[0-9]*/device")}
         for device in core.available_devices:
+            if device == "GPU":
+                device = "GPU.0"
             if not device.startswith("GPU."):
                 continue
             try:
-                pci = core.get_property(device, "PCI_INFO")
+                pci = core.get_property(device, "DEVICE_PCI_INFO")
                 address = (pci if isinstance(pci, str) else
                            f"{pci.domain:04x}:{pci.bus:02x}:{pci.device:02x}.{pci.function:x}")
                 if address.lower() in cards:

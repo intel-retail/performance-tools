@@ -144,11 +144,17 @@ class ComparisonTest(unittest.TestCase):
         pci = self.root / "0000:03:00.0"
         pci.mkdir()
         card.symlink_to(pci, target_is_directory=True)
-        core = SimpleNamespace(available_devices=["GPU.0"],
-            get_property=lambda device, key: SimpleNamespace(domain=0, bus=3, device=0, function=0))
-        with patch.dict("sys.modules", {"openvino": SimpleNamespace(Core=lambda: core)}), \
-                patch.object(Path, "glob", return_value=[card]):
-            self.assertEqual(report.gpu_metric_devices(), {"GPU.0": "GPU_1"})
+        def get_property(device, key):
+            self.assertEqual(device, "GPU.0")
+            self.assertEqual(key, "DEVICE_PCI_INFO")
+            return SimpleNamespace(domain=0, bus=3, device=0, function=0)
+
+        for alias in ("GPU.0", "GPU"):
+            with self.subTest(alias=alias):
+                core = SimpleNamespace(available_devices=[alias], get_property=get_property)
+                with patch.dict("sys.modules", {"openvino": SimpleNamespace(Core=lambda: core)}), \
+                        patch.object(Path, "glob", return_value=[card]):
+                    self.assertEqual(report.gpu_metric_devices(), {"GPU.0": "GPU_1"})
 
     def test_invalid_hardware_is_skipped(self):
         valid, _ = self.make_run("valid")
