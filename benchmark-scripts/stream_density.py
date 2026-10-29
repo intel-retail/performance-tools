@@ -36,11 +36,9 @@ MEASUREMENT_WINDOW_SECONDS_KEY = "MEASUREMENT_WINDOW_SECONDS"
 DEFAULT_MEASUREMENT_WINDOW_SECONDS = 100
 MIN_SAMPLES_PER_STREAM = 100
 MEASUREMENT_SAMPLE_POLL_SECONDS = 1
-MAX_INCONCLUSIVE_RETRIES = 1
 LATENCY_SAMPLES_FILENAME = "stream_density_latency_samples.jsonl"
 STATUS_PASS = "pass"
 STATUS_FAIL = "fail"
-STATUS_INCONCLUSIVE = "inconclusive"
 CAMERA_STREAM_KEY = "CAMERA_STREAM"
 STREAM_MANIFEST_PATH_KEY = "STREAM_MANIFEST_PATH"
 
@@ -1011,6 +1009,34 @@ def print_stream_density_report(num_pipelines, stream_fps_dict,
             f"({relative_headroom:.1f}% relative headroom).")
 
 
+def describe_last_passing(last_passing_pipelines, last_passing_streams):
+    if last_passing_pipelines:
+        return (
+            f"Last passing density: {last_passing_pipelines} lane(s) "
+            f"({last_passing_streams} streams), not yet confirmed.")
+    return "No measurement interval has passed yet."
+
+
+def describe_step_down(num_pipelines, last_passing_pipelines,
+                       consecutive_fail_windows, consecutive_pass_windows):
+    next_pipelines = num_pipelines - 1
+    message = (
+        f"INFO: Stepping down from {num_pipelines} to {next_pipelines} lane(s) "
+        f"after {consecutive_fail_windows} consecutive failing or "
+        f"inconclusive interval(s); {next_pipelines} lane(s) need "
+        f"{consecutive_pass_windows} new consecutive passing interval(s) "
+        f"to be confirmed.")
+    if last_passing_pipelines and next_pipelines == last_passing_pipelines:
+        message += (
+            f" Retesting the last passing density of "
+            f"{last_passing_pipelines} lane(s).")
+    elif last_passing_pipelines and next_pipelines < last_passing_pipelines:
+        message += (
+            f" The last passing density of {last_passing_pipelines} lane(s) "
+            f"did not hold; continuing the step-down.")
+    return message
+
+
 def run_pipeline_iterations( 
         env_vars, compose_files, results_dir,
         container_name, target_fps, explicit_target_fps=True):
@@ -1024,10 +1050,11 @@ def run_pipeline_iterations(
         container_name: Name of the container to run.
         target_fps: Target FPS to achieve.
     Returns:
-        num_pipelines: Number of pipelines used; for STATUS_INCONCLUSIVE, the
-            last lane count whose interval passed (0 if none did).
-        status: STATUS_PASS, STATUS_FAIL or STATUS_INCONCLUSIVE.
+        num_pipelines: Number of pipelines used.
+        status: STATUS_PASS or STATUS_FAIL.
         streams_sustained: Streams with valid FPS data at num_pipelines.
+        limit_note: Why the confirmed count could not go higher when that
+            was not the FPS target (for example memory), otherwise None.
     '''
     INIT_DURATION = int(env_vars[INIT_DURATION_KEY])
     num_pipelines = 1
@@ -1064,6 +1091,11 @@ def run_pipeline_iterations(
     last_passing_pipelines = 0
     last_passing_streams = 0
     window_number = 0
+    # Count held back by something other than FPS, and why; reported as a
+    # note only if that count is the one finally confirmed.
+    limit_pipelines = 0
+    limit_reason = None
+    limit_note = None
 
     # Measure memory usage of a single pipeline
     per_pipeline_memory_mb = measure_pipeline_memory(
@@ -1083,18 +1115,41 @@ def run_pipeline_iterations(
         f"{consecutive_fail_windows} consecutive failing intervals to decrement")
 
     while not meet_target_fps:
-        # --- Memory check before scaling up ---
-        pipelines_to_add = increments if increments > 0 else 0
-        
-        if pipelines_to_add > 0 and not check_can_add_pipelines(pipelines_to_add, per_pipeline_memory_mb, env_vars=env_vars):
-            print(
-                f"INFO: Aborting: Cannot add {pipelines_to_add} more pipelines due to memory constraints or pressure. "
-                f"Current successful count: {num_pipelines - increments if num_pipelines > increments else num_pipelines}"
-            )
-            num_pipelines = num_pipelines - increments
-            if num_pipelines < 1:
-                num_pipelines = 1
-            return num_pipelines, STATUS_FAIL, streams_sustained
+        # --- Memory check before scaling up: shrink the increment until it fits ---
+        if increments > 0:
+            base_pipelines = num_pipelines - increments
+            step = increments
+            while step >= 1 and not check_can_add_pipelines(
+                    step, per_pipeline_memory_mb, env_vars=env_vars):
+                print(
+                    f"INFO: Memory cannot fit {step} more pipeline(s) beyond "
+                    f"{base_pipelines} lane(s).")
+                step -= 1
+            if step < 1:
+                if base_pipelines < 1:
+                    print(
+                        "INFO: Aborting: not enough memory to start even 1 pipeline.")
+                    return 1, STATUS_FAIL, streams_sustained, None
+                print(
+                    f"INFO: Memory limit reached: cannot add even 1 more pipeline "
+                    f"beyond {base_pipelines} lane(s). Confirming {base_pipelines} "
+                    f"lane(s); it needs {consecutive_pass_windows} new consecutive "
+                    f"passing interval(s) to be confirmed.")
+                num_pipelines = base_pipelines
+                increments = 0
+                in_decrement = True
+                pass_window_count = 0
+                fail_window_count = 0
+                limit_pipelines = base_pipelines
+                limit_reason = (
+                    f"available memory set the limit; one more pipeline beyond "
+                    f"{base_pipelines} lane(s) did not fit")
+            elif step < increments:
+                print(
+                    f"INFO: Memory cannot fit the full increment of {increments}; "
+                    f"reducing it to {step} and trying {base_pipelines + step} lane(s).")
+                increments = step
+                num_pipelines = base_pipelines + step
 
         # Bring down previous iteration's containers before starting new ones
         print("INFO: Stopping previous containers before scaling...")
@@ -1117,53 +1172,80 @@ def run_pipeline_iterations(
         try:
             check_non_empty_result_logs(
                 num_pipelines, results_dir, container_name, 50)
+            logs_ready = True
         except ValueError as e:
             print(f"ERROR: {e}")
-            # since we are not able to get all non-empty log
-            # the best we can do is to use the previous num_pipelines
-            # before this current num_pipelines
-            num_pipelines = num_pipelines - increments
-            if num_pipelines < 1:
-                num_pipelines = 1
-            return num_pipelines, STATUS_FAIL, streams_sustained
-        # once we have all non-empty pipeline log files
-        # capture where each stream log ends so only samples produced
-        # during the measurement interval feed the decision
-        inconclusive_retries = 0
-        while True:
+            logs_ready = False
+            base_pipelines = num_pipelines - increments
+            if not in_decrement and increments > 0 and base_pipelines >= 1:
+                failed_pipelines = num_pipelines
+                print(
+                    f"INFO: Pipeline logs at {num_pipelines} lane(s) were not "
+                    f"ready; returning to the last passing count of "
+                    f"{base_pipelines} lane(s). It needs "
+                    f"{consecutive_pass_windows} new consecutive passing "
+                    f"interval(s) to be confirmed.")
+                num_pipelines = base_pipelines
+                increments = 0
+                in_decrement = True
+                pass_window_count = 0
+                fail_window_count = 0
+                limit_pipelines = base_pipelines
+                limit_reason = (
+                    f"pipeline logs were not ready at {failed_pipelines} lane(s)")
+                continue
+
+        # Only samples produced during the measurement interval feed the
+        # decision. An interval without enough samples (inconclusive), or
+        # without ready logs, counts as a failing interval.
+        invalid_reason = None
+        if logs_ready:
             (window_start_offsets, window_end_offsets,
              actual_measurement_seconds, sample_counts,
              enough_samples) = collect_measurement_window(
                 num_pipelines, results_dir, container_name,
                 measurement_window_seconds)
             window_number += 1
-            if enough_samples:
-                break
-            print(
-                "INFO: INCONCLUSIVE: Measurement interval did not collect "
-                f"{MIN_SAMPLES_PER_STREAM} samples from every pipeline log "
-                f"after {actual_measurement_seconds:.1f} s "
-                f"(limit {measurement_window_seconds * 2} s).")
-            for log_file, count in sorted(sample_counts.items()):
-                print(f"  {os.path.basename(log_file)}: {count} samples")
-            if inconclusive_retries >= MAX_INCONCLUSIVE_RETRIES:
+            if not enough_samples:
+                invalid_reason = "Inconclusive"
                 print(
-                    f"INFO: Result: Inconclusive - {inconclusive_retries + 1} consecutive "
-                    f"measurement intervals at {num_pipelines} lane(s) were inconclusive "
-                    f"and were not used for a pass/fail decision.")
-                if last_passing_pipelines:
-                    print(
-                        f"INFO: Last passing density: {last_passing_pipelines} lane(s) "
-                        f"({last_passing_streams} streams), not confirmed by the run "
-                        f"acceptance criterion.")
-                else:
-                    print("INFO: No measurement interval had passed.")
-                return last_passing_pipelines, STATUS_INCONCLUSIVE, last_passing_streams
-            inconclusive_retries += 1
+                    "INFO: INCONCLUSIVE: Measurement interval did not collect "
+                    f"{MIN_SAMPLES_PER_STREAM} samples from every pipeline log "
+                    f"after {actual_measurement_seconds:.1f} s "
+                    f"(limit {measurement_window_seconds * 2} s).")
+                for log_file, count in sorted(sample_counts.items()):
+                    print(f"  {os.path.basename(log_file)}: {count} samples")
+        else:
+            invalid_reason = "Pipeline-logs-not-ready"
+
+        if invalid_reason:
+            pass_window_count = 0
+            fail_window_count += 1
             print(
-                f"INFO: Retrying the measurement interval at {num_pipelines} lane(s) "
-                f"without restarting the pipelines "
-                f"(retry {inconclusive_retries}/{MAX_INCONCLUSIVE_RETRIES}).")
+                f"INFO: {invalid_reason} interval at {num_pipelines} lane(s) "
+                f"counted as a failing interval "
+                f"({fail_window_count}/{consecutive_fail_windows}). "
+                f"{describe_last_passing(last_passing_pipelines, last_passing_streams)}")
+            if fail_window_count < consecutive_fail_windows:
+                increments = 0
+                print(
+                    f"INFO: Holding pipeline count at {num_pipelines} "
+                    f"for another interval.")
+            elif num_pipelines <= 1:
+                print(
+                    f"INFO: Already at 1 lane after {consecutive_fail_windows} "
+                    f"consecutive failing or inconclusive interval(s); stopping.")
+                break
+            else:
+                fail_window_count = 0
+                in_decrement = True
+                increments = -1
+                print(describe_step_down(
+                    num_pipelines, last_passing_pipelines,
+                    consecutive_fail_windows, consecutive_pass_windows))
+            num_pipelines += increments
+            continue
+
         # --- Calculate FPS and latency metrics ---
         total_fps, min_stream_fps, stream_fps_dict, stream_samples_dict = calculate_multi_stream_fps(
             num_pipelines, results_dir, container_name, env_vars,
@@ -1253,6 +1335,10 @@ def run_pipeline_iterations(
                         f"Observed {consecutive_fail_windows} consecutive "
                         f"below throughput threshold intervals; starting to decrement pipelines by 1..."
                     )
+                    if num_pipelines > 1:
+                        print(describe_step_down(
+                            num_pipelines, last_passing_pipelines,
+                            consecutive_fail_windows, consecutive_pass_windows))
                 else:
                     increments = 0
                     print(
@@ -1279,6 +1365,9 @@ def run_pipeline_iterations(
                     print(
                         f"INFO: Use case density (lanes): {num_pipelines}"
                     )
+                    if limit_reason and num_pipelines == limit_pipelines:
+                        limit_note = limit_reason
+                        print(f"INFO: Note: {limit_note}.")
                     increments = 0
                     # Latency uses the same window as the final FPS report.
                     save_window_latency_samples(
@@ -1347,6 +1436,9 @@ def run_pipeline_iterations(
                         f"because streams stayed below throughput thresholds "
                         f"for {consecutive_fail_windows} intervals."
                     )
+                    print(describe_step_down(
+                        num_pipelines, last_passing_pipelines,
+                        consecutive_fail_windows, consecutive_pass_windows))
                 else:
                     increments = 0
                     print(
@@ -1362,11 +1454,8 @@ def run_pipeline_iterations(
             print(f"INFO: already reached min. pipeline number, stopping...")
             break
 
-        
-        
-    
     status = STATUS_PASS if meet_target_fps else STATUS_FAIL
-    return num_pipelines, status, streams_sustained
+    return num_pipelines, status, streams_sustained, limit_note
 
 
 def run_stream_density(env_vars, compose_files, target_fps_list,
@@ -1384,12 +1473,13 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
     Returns:
         results as a list of tuples (target_fps, container_name,
                                      num_pipelines, status,
-                                     streams_sustained) where
+                                     streams_sustained, limit_note) where
         target_fps: the desire frames per second to maintain for pipeline
         container_name: the corresponding container name for the pipeline
-        num_pipelines: maximum number of pipelines to achieve TARGET_FPS,
-        or the last passing count when status is STATUS_INCONCLUSIVE
-        status: STATUS_PASS, STATUS_FAIL or STATUS_INCONCLUSIVE
+        num_pipelines: maximum number of pipelines to achieve TARGET_FPS
+        status: STATUS_PASS or STATUS_FAIL
+        limit_note: why the confirmed count was capped by something other
+                    than the FPS target (for example memory), otherwise None
     '''
     results = []
     validate_and_setup_env(env_vars, target_fps_list)
@@ -1420,19 +1510,22 @@ def run_stream_density(env_vars, compose_files, target_fps_list,
                 env_vars["PIPELINE_COUNT"] = "0"
                 # stream density main logic:
                 try:
-                    num_pipelines, status, streams_sustained = run_pipeline_iterations(
+                    (num_pipelines, status, streams_sustained,
+                     limit_note) = run_pipeline_iterations(
                         env_vars, compose_files, results_dir,
                         container_name, target_fps, explicit_target_fps
                     )
                     save_sweep_result(
-                        results_dir, container_name, status, num_pipelines)
+                        results_dir, container_name, status, num_pipelines,
+                        limit_note=limit_note)
                     results.append(
                         (
                             target_fps,
                             container_name,
                             num_pipelines,
                             status,
-                            streams_sustained
+                            streams_sustained,
+                            limit_note
                         )
                     )
                 except KeyboardInterrupt:
@@ -1599,7 +1692,8 @@ def save_window_latency_samples(results_dir, container_name, num_pipelines,
         output_file.write("\n")
 
 
-def save_sweep_result(results_dir, container_name, status, lane_count):
+def save_sweep_result(results_dir, container_name, status, lane_count,
+                      limit_note=None):
     """Append the terminal status and lane count for one density sweep."""
     os.makedirs(results_dir, exist_ok=True)
     output_path = os.path.join(results_dir, LATENCY_SAMPLES_FILENAME)
@@ -1610,6 +1704,8 @@ def save_sweep_result(results_dir, container_name, status, lane_count):
         "lane_count": lane_count,
         "result_id": datetime.now().astimezone().isoformat(),
     }
+    if limit_note:
+        record["limit_note"] = limit_note
     with open(output_path, "a", encoding="utf-8") as output_file:
         json.dump(record, output_file, separators=(",", ":"))
         output_file.write("\n")

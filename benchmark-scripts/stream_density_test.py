@@ -24,18 +24,20 @@ from datetime import datetime
 
 class Testing(unittest.TestCase):
     def test_run_stream_density_records_terminal_status_and_lane_count(self):
+        memory_note = "available memory set the limit"
         outcomes = [
-            (stream_density.STATUS_PASS, 4, 8),
-            (stream_density.STATUS_FAIL, 3, 6),
-            (stream_density.STATUS_INCONCLUSIVE, 2, 4),
+            (stream_density.STATUS_PASS, 4, 8, None),
+            (stream_density.STATUS_FAIL, 3, 6, None),
+            (stream_density.STATUS_PASS, 2, 4, memory_note),
         ]
-        for status, lane_count, streams in outcomes:
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as results_dir:
+        for status, lane_count, streams, limit_note in outcomes:
+            with self.subTest(status=status, limit_note=limit_note), \
+                    tempfile.TemporaryDirectory() as results_dir:
                 env_vars = {RESULTS_DIR_KEY: results_dir}
                 with patch('stream_density.validate_and_setup_env'), \
                         patch(
                             'stream_density.run_pipeline_iterations',
-                            return_value=(lane_count, status, streams)), \
+                            return_value=(lane_count, status, streams, limit_note)), \
                         patch('stream_density.clean_up_pipeline_logs'), \
                         patch('stream_density.benchmark.docker_compose_containers'), \
                         patch('stream_density.time.sleep'):
@@ -48,9 +50,11 @@ class Testing(unittest.TestCase):
                     record = json.loads(sample_file.readline())
 
                 self.assertEqual(result[0][3], status)
+                self.assertEqual(result[0][5], limit_note)
                 self.assertEqual(record["record_type"], "sweep_result")
                 self.assertEqual(record["status"], status)
                 self.assertEqual(record["lane_count"], lane_count)
+                self.assertEqual(record.get("limit_note"), limit_note)
 
     def test_run_stream_density_records_interrupt(self):
         with tempfile.TemporaryDirectory() as results_dir:
@@ -533,7 +537,7 @@ class Testing(unittest.TestCase):
                 patch('stream_density.print_stream_density_report') as report:
             output = io.StringIO()
             with redirect_stdout(output):
-                num_pipelines, passed, _ = stream_density.run_pipeline_iterations(
+                num_pipelines, passed, _, _ = stream_density.run_pipeline_iterations(
                     env_vars, ['docker-compose.yml'], '/tmp/results', 'gst', 15.0)
 
         self.assertEqual((num_pipelines, passed), (1, stream_density.STATUS_PASS))
@@ -985,15 +989,16 @@ class Testing(unittest.TestCase):
                     (10.0, 10.0, {"pipeline_stream0": 10.0}, {}),
                 ]
             },
-            # Test case 3: inconclusive twice at the first lane count.
+            # Test case 3: inconclusive twice at the first lane count counts
+            # as two failing intervals at 1 lane, so the sweep fails.
             {
                 "env_vars": {"INIT_DURATION": "10"},
                 "compose_files": ["docker-compose.yml"],
                 "results_dir": "/path/to/results",
                 "container_name": "insufficient_samples",
                 "target_fps": 15.0,
-                "expected_num_pipelines": 0,
-                "expected_status": stream_density.STATUS_INCONCLUSIVE,
+                "expected_num_pipelines": 1,
+                "expected_status": stream_density.STATUS_FAIL,
                 "expected_streams_sustained": 0,
                 "measurement_window_result": (
                     {}, {}, 200.0, {"pipeline_stream0_lane1_gst.log": 99},
@@ -1047,7 +1052,7 @@ class Testing(unittest.TestCase):
                 with patch('stream_density.get_camera_config_about',
                            return_value=about), \
                         patch('stream_density.print_stream_density_report') as report:
-                    num_pipelines, status, streams_sustained = (
+                    num_pipelines, status, streams_sustained, _ = (
                         stream_density.run_pipeline_iterations(
                             env_vars, compose_files, results_dir,
                             container_name, target_fps)
@@ -1069,17 +1074,25 @@ class Testing(unittest.TestCase):
                     report.assert_called_once()
                     self.assertEqual(report.call_args.kwargs['about'], about)
 
-    def _run_iterations_with_windows(self, window_results, fps_responses):
+    def _run_iterations_with_windows(self, window_results, fps_responses,
+                                     env_overrides=None, can_add=True,
+                                     logs_side_effect=None):
         env_vars = {'INIT_DURATION': '0', 'PIPELINE_INC': '1',
                     'CONSECUTIVE_FAIL_WINDOWS': '1',
                     'CONSECUTIVE_PASS_WINDOWS': '1',
                     'STREAM_MANIFEST_PATH': '/nonexistent/pipeline_streams.json'}
+        env_vars.update(env_overrides or {})
+        can_add_kwargs = (
+            {'side_effect': can_add} if isinstance(can_add, list)
+            else {'return_value': can_add})
         with patch('stream_density.measure_pipeline_memory', return_value=100), \
                 patch('stream_density.clean_up_pipeline_logs'), \
-                patch('stream_density.check_can_add_pipelines', return_value=True), \
+                patch('stream_density.check_can_add_pipelines',
+                      **can_add_kwargs) as can_add_mock, \
                 patch('stream_density.benchmark.docker_compose_containers') as compose, \
                 patch('stream_density.time.sleep'), \
-                patch('stream_density.check_non_empty_result_logs'), \
+                patch('stream_density.check_non_empty_result_logs',
+                      side_effect=logs_side_effect), \
                 patch('stream_density.collect_measurement_window',
                       side_effect=window_results) as collect, \
                 patch('stream_density.calculate_multi_stream_fps',
@@ -1088,42 +1101,138 @@ class Testing(unittest.TestCase):
                 patch('stream_density.build_per_stream_target_fps',
                       side_effect=lambda d, *a, **k: {n: 15.0 for n in d}), \
                 patch('stream_density.build_per_stream_camera_meta', return_value={}), \
+                patch('stream_density.save_window_latency_samples'), \
                 patch('stream_density.print_stream_density_report'):
             with redirect_stdout(io.StringIO()) as output:
                 result = stream_density.run_pipeline_iterations(
                     env_vars, ['docker-compose.yml'], '/tmp/results', 'gst', 15.0)
+        self.last_can_add_calls = [c.args[0] for c in can_add_mock.call_args_list]
         return result, collect.call_count, compose.call_count, output.getvalue()
 
-    def test_inconclusive_interval_reports_last_passing_density(self):
-        enough = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
-        short = ({}, {}, 200.0, {'pipeline_stream0.log': 99}, False)
-        two_streams = {'pipeline_stream0': 15.0, 'pipeline_stream1': 15.0}
+    ENOUGH = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
+    SHORT = ({}, {}, 200.0, {'pipeline_stream0.log': 99}, False)
+    PASS_FPS = (15.0, 15.0, {'pipeline_stream0': 15.0}, {})
+    FAIL_FPS = (10.0, 10.0, {'pipeline_stream0': 10.0}, {})
+
+    def test_inconclusive_steps_down_by_one_to_last_passing_density(self):
+        # Pass at 1, jump to 4; 4 is inconclusive twice, 3 and 2 fail twice,
+        # then the last passing density (1) is retested and needs two passes.
+        windows = [self.ENOUGH] + [self.SHORT] * 2 + [self.ENOUGH] * 6
+        fps = [self.PASS_FPS] + [self.FAIL_FPS] * 4 + [self.PASS_FPS] * 2
         result, collect_calls, _, output = self._run_iterations_with_windows(
-            [enough, enough, short, short],
-            [(15.0, 15.0, {'pipeline_stream0': 15.0}, {}),
-             (30.0, 15.0, two_streams, {})])
+            windows, fps,
+            env_overrides={'PIPELINE_INC': '3',
+                           'CONSECUTIVE_FAIL_WINDOWS': '2',
+                           'CONSECUTIVE_PASS_WINDOWS': '2'})
 
-        # Passed at 1 and 2 lanes; 3 lanes was inconclusive twice
-        self.assertEqual(result, (2, stream_density.STATUS_INCONCLUSIVE, 2))
-        self.assertEqual(collect_calls, 4)
-        self.assertIn('Result: Inconclusive', output)
+        self.assertEqual(result, (1, stream_density.STATUS_PASS, 1, None))
+        self.assertEqual(collect_calls, 9)
+        self.assertNotIn('Result: Inconclusive', output)
         self.assertIn(
-            '\nINFO: Last passing density: 2 lane(s) (2 streams)', output)
+            'INFO: Inconclusive interval at 4 lane(s) counted as a failing '
+            'interval (1/2). Last passing density: 1 lane(s)', output)
+        self.assertIn('Inconclusive interval at 4 lane(s) counted as a '
+                      'failing interval (2/2)', output)
+        self.assertIn('INFO: Stepping down from 4 to 3 lane(s)', output)
+        self.assertIn('INFO: Stepping down from 3 to 2 lane(s)', output)
+        self.assertIn(
+            'INFO: Stepping down from 2 to 1 lane(s) after 2 consecutive '
+            'failing or inconclusive interval(s); 1 lane(s) need 2 new '
+            'consecutive passing interval(s) to be confirmed. Retesting the '
+            'last passing density of 1 lane(s).', output)
 
-    def test_inconclusive_interval_is_retried_without_restarting(self):
-        enough = ({}, {}, 100.0, {'pipeline_stream0.log': 100}, True)
-        short = ({}, {}, 200.0, {'pipeline_stream0.log': 99}, False)
-        result, collect_calls, compose_calls, output = self._run_iterations_with_windows(
-            [short, enough, enough, enough],
-            [(15.0, 15.0, {'pipeline_stream0': 15.0}, {}),
-             (10.0, 10.0, {'pipeline_stream1': 10.0}, {}),
-             (15.0, 15.0, {'pipeline_stream0': 15.0}, {})])
+    def test_inconclusive_during_step_down_counts_as_fail(self):
+        # 1, 2 pass; 3 fails -> step to 2; 2 is inconclusive -> step to 1.
+        windows = [self.ENOUGH] * 3 + [self.SHORT] + [self.ENOUGH]
+        fps = [self.PASS_FPS, self.PASS_FPS, self.FAIL_FPS, self.PASS_FPS]
+        result, _, _, output = self._run_iterations_with_windows(windows, fps)
 
-        self.assertEqual(result[1], stream_density.STATUS_PASS)
+        self.assertEqual(result, (1, stream_density.STATUS_PASS, 1, None))
+        self.assertIn('Inconclusive interval at 2 lane(s) counted as a '
+                      'failing interval (1/1)', output)
+        self.assertIn(
+            'Stepping down from 2 to 1 lane(s)', output)
+        self.assertIn('The last passing density of 2 lane(s) did not hold; '
+                      'continuing the step-down.', output)
+
+    def test_inconclusive_at_one_lane_fails_after_fail_window_count(self):
+        result, collect_calls, _, output = self._run_iterations_with_windows(
+            [self.SHORT] * 2, [],
+            env_overrides={'CONSECUTIVE_FAIL_WINDOWS': '2'})
+
+        self.assertEqual(result[:2], (1, stream_density.STATUS_FAIL))
+        self.assertEqual(collect_calls, 2)
+        self.assertIn('No measurement interval has passed yet.', output)
+        self.assertIn('Already at 1 lane after 2 consecutive failing or '
+                      'inconclusive interval(s); stopping.', output)
+
+    def test_memory_reduces_increment_then_confirms_memory_limit(self):
+        # 1 pass; increment 4 does not fit, 2 does -> 3; at 3 nothing fits,
+        # so 3 must pass two new intervals and is confirmed with a note.
+        can_add = [True, False, False, True, False, False, False, False]
+        result, collect_calls, _, output = self._run_iterations_with_windows(
+            [self.ENOUGH] * 4, [self.PASS_FPS] * 4,
+            env_overrides={'PIPELINE_INC': '4',
+                           'CONSECUTIVE_PASS_WINDOWS': '2'},
+            can_add=can_add)
+
+        self.assertEqual(self.last_can_add_calls, [1, 4, 3, 2, 4, 3, 2, 1])
+        self.assertEqual(result[:3], (3, stream_density.STATUS_PASS, 1))
+        self.assertIn('available memory set the limit', result[3])
         self.assertEqual(collect_calls, 4)
-        self.assertIn('Retrying the measurement interval at 1 lane(s)', output)
-        # Three lane steps (1, 2, 1); the retry adds no extra down/up pair
-        self.assertEqual(compose_calls, 3 * 2)
+        self.assertIn('reducing it to 2 and trying 3 lane(s)', output)
+        self.assertIn('INFO: Memory limit reached: cannot add even 1 more '
+                      'pipeline beyond 3 lane(s). Confirming 3 lane(s); it '
+                      'needs 2 new consecutive passing interval(s)', output)
+        self.assertIn('INFO: Use case density (lanes): 3', output)
+        self.assertIn('INFO: Note: available memory set the limit', output)
+
+    def test_memory_limited_count_that_fails_retest_keeps_stepping_down(self):
+        result, _, _, output = self._run_iterations_with_windows(
+            [self.ENOUGH] * 6,
+            [self.PASS_FPS, self.PASS_FPS, self.FAIL_FPS, self.FAIL_FPS,
+             self.PASS_FPS, self.PASS_FPS],
+            env_overrides={'CONSECUTIVE_FAIL_WINDOWS': '2',
+                           'CONSECUTIVE_PASS_WINDOWS': '2'},
+            can_add=[True, True, False])
+
+        # 1 and 2 pass; 3 does not fit; 2 fails its retest -> 1 is confirmed.
+        self.assertEqual(result, (1, stream_density.STATUS_PASS, 1, None))
+        self.assertIn('Memory limit reached', output)
+        self.assertIn('Stepping down from 2 to 1 lane(s)', output)
+        self.assertNotIn('INFO: Note:', output)
+
+    def test_memory_blocks_first_pipeline(self):
+        result, collect_calls, _, _ = self._run_iterations_with_windows(
+            [], [], can_add=False)
+        self.assertEqual(result[:2], (1, stream_density.STATUS_FAIL))
+        self.assertEqual(collect_calls, 0)
+
+    def test_logs_not_ready_on_ramp_up_confirms_last_passing_count(self):
+        result, collect_calls, _, output = self._run_iterations_with_windows(
+            [self.ENOUGH] * 3, [self.PASS_FPS] * 3,
+            env_overrides={'PIPELINE_INC': '2',
+                           'CONSECUTIVE_PASS_WINDOWS': '2'},
+            logs_side_effect=[None, ValueError('logs empty'), None, None])
+
+        self.assertEqual(result[:3], (1, stream_density.STATUS_PASS, 1))
+        self.assertEqual(
+            result[3], 'pipeline logs were not ready at 3 lane(s)')
+        self.assertEqual(collect_calls, 3)
+        self.assertIn('Pipeline logs at 3 lane(s) were not ready; returning '
+                      'to the last passing count of 1 lane(s)', output)
+
+    def test_logs_not_ready_during_step_down_counts_as_fail(self):
+        # 1, 2 pass; 3 fails -> 2; logs at 2 not ready -> 1 passes.
+        result, collect_calls, _, output = self._run_iterations_with_windows(
+            [self.ENOUGH] * 4,
+            [self.PASS_FPS, self.PASS_FPS, self.FAIL_FPS, self.PASS_FPS],
+            logs_side_effect=[None, None, None, ValueError('logs empty'), None])
+
+        self.assertEqual(result, (1, stream_density.STATUS_PASS, 1, None))
+        self.assertEqual(collect_calls, 4)
+        self.assertIn('Pipeline-logs-not-ready interval at 2 lane(s) counted '
+                      'as a failing interval (1/1)', output)
 
     def test_validate_rejects_measurement_interval_below_sample_floor(self):
         for seconds, should_raise in (('50', True), ('99', True), ('100', False)):
@@ -1157,12 +1266,12 @@ class Testing(unittest.TestCase):
                 "target_fps_list": [15.0, 25.0],
                 "container_names_list": ["container1", "container2"],
                 "run_pipeline_side_effect": [
-                    (5, stream_density.STATUS_PASS, 10),  # For container1
-                    (7, stream_density.STATUS_FAIL, 12)  # For container2
+                    (5, stream_density.STATUS_PASS, 10, None),  # For container1
+                    (7, stream_density.STATUS_FAIL, 12, None)  # For container2
                 ],
                 "expected_results": [
-                    (15.0, "container1", 5, stream_density.STATUS_PASS, 10),
-                    (25.0, "container2", 7, stream_density.STATUS_FAIL, 12)
+                    (15.0, "container1", 5, stream_density.STATUS_PASS, 10, None),
+                    (25.0, "container2", 7, stream_density.STATUS_FAIL, 12, None)
                 ],
                 # Expected number of compose down calls
                 "expected_down_call_count": 2
