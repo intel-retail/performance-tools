@@ -76,13 +76,13 @@ class Testing(unittest.TestCase):
     def test_print_stream_density_result_pass_with_limit_note(self):
         output = self._result_output(
             stream_density.STATUS_PASS, 3, 6,
-            'available memory set the limit; one more pipeline beyond '
+            'available memory set the limit; one more lane beyond '
             '3 lane(s) did not fit')
         self.assertIn('Result: Pass', output)
         self.assertIn(
             'use case density 3 lanes, stream density 6 streams', output)
         self.assertIn(
-            'Note: available memory set the limit; one more pipeline beyond '
+            'Note: available memory set the limit; one more lane beyond '
             '3 lane(s) did not fit.', output)
 
     def test_print_stream_density_result_fail(self):

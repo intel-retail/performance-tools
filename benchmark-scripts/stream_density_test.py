@@ -1182,7 +1182,7 @@ class Testing(unittest.TestCase):
         self.assertEqual(collect_calls, 4)
         self.assertIn('reducing it to 2 and trying 3 lane(s)', output)
         self.assertIn('INFO: Memory limit reached: cannot add even 1 more '
-                      'pipeline beyond 3 lane(s). Confirming 3 lane(s); it '
+                      'lane beyond 3 lane(s). Confirming 3 lane(s); it '
                       'needs 2 new consecutive passing interval(s)', output)
         self.assertIn('INFO: Use case density (lanes): 3', output)
         self.assertIn('INFO: Note: available memory set the limit', output)
@@ -1208,19 +1208,47 @@ class Testing(unittest.TestCase):
         self.assertEqual(result[:2], (1, stream_density.STATUS_FAIL))
         self.assertEqual(collect_calls, 0)
 
-    def test_logs_not_ready_on_ramp_up_confirms_last_passing_count(self):
-        result, collect_calls, _, output = self._run_iterations_with_windows(
-            [self.ENOUGH] * 3, [self.PASS_FPS] * 3,
-            env_overrides={'PIPELINE_INC': '2',
-                           'CONSECUTIVE_PASS_WINDOWS': '2'},
+    def test_logs_not_ready_on_ramp_up_steps_down_by_one(self):
+        # 1 passes; jump to 3; logs at 3 not ready twice -> step down to 2,
+        # which is tested (not skipped) and confirmed by two passes.
+        result, collect_calls, compose_calls, output = (
+            self._run_iterations_with_windows(
+                [self.ENOUGH] * 3, [self.PASS_FPS] * 3,
+                env_overrides={'PIPELINE_INC': '2',
+                               'CONSECUTIVE_FAIL_WINDOWS': '2',
+                               'CONSECUTIVE_PASS_WINDOWS': '2'},
+                logs_side_effect=[None, ValueError('logs empty'),
+                                  ValueError('logs empty'), None, None]))
+
+        self.assertEqual(result, (2, stream_density.STATUS_PASS, 1, None))
+        self.assertEqual(collect_calls, 3)
+        # Lane counts started: 1, 3, 3, 2, 2 (each is one down/up pair).
+        self.assertEqual(compose_calls, 5 * 2)
+        self.assertIn('Pipeline-logs-not-ready interval at 3 lane(s) counted '
+                      'as a failing interval (1/2). Last passing density: '
+                      '1 lane(s)', output)
+        self.assertIn('INFO: Holding pipeline count at 3 for another '
+                      'interval.', output)
+        self.assertIn('Pipeline-logs-not-ready interval at 3 lane(s) counted '
+                      'as a failing interval (2/2)', output)
+        self.assertIn('INFO: Stepping down from 3 to 2 lane(s)', output)
+        self.assertNotIn('returning to the last passing count', output)
+        self.assertNotIn('INFO: Note:', output)
+
+    def test_logs_not_ready_on_ramp_up_reaches_last_passing_density(self):
+        # 1 passes; jump to 3; logs not ready at 3, 2 fails FPS, then the
+        # last passing density (1) is retested and confirmed.
+        result, _, _, output = self._run_iterations_with_windows(
+            [self.ENOUGH] * 3,
+            [self.PASS_FPS, self.FAIL_FPS, self.PASS_FPS],
+            env_overrides={'PIPELINE_INC': '2'},
             logs_side_effect=[None, ValueError('logs empty'), None, None])
 
-        self.assertEqual(result[:3], (1, stream_density.STATUS_PASS, 1))
-        self.assertEqual(
-            result[3], 'pipeline logs were not ready at 3 lane(s)')
-        self.assertEqual(collect_calls, 3)
-        self.assertIn('Pipeline logs at 3 lane(s) were not ready; returning '
-                      'to the last passing count of 1 lane(s)', output)
+        self.assertEqual(result, (1, stream_density.STATUS_PASS, 1, None))
+        self.assertIn('Stepping down from 3 to 2 lane(s)', output)
+        self.assertIn('Stepping down from 2 to 1 lane(s)', output)
+        self.assertIn('Retesting the last passing density of 1 lane(s).',
+                      output)
 
     def test_logs_not_ready_during_step_down_counts_as_fail(self):
         # 1, 2 pass; 3 fails -> 2; logs at 2 not ready -> 1 passes.

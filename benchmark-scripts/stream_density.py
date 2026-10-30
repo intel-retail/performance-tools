@@ -374,10 +374,10 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, e
         return True
 
     """
-    Checks if the system has enough available memory to add 'increment' more pipelines.
+    Checks if the system has enough available memory to add 'increment' more lanes.
     Args:
-        increment: Number of new pipelines to add.
-        per_pipeline_mb: Memory required per pipeline (in MB).
+        increment: Number of new lanes to add.
+        per_pipeline_mb: Memory required per lane (in MB).
         safety_buffer_mb: Safety buffer in MB (default 3072 MB).
     Returns:
         True if enough memory is available, False otherwise.
@@ -394,12 +394,12 @@ def check_can_add_pipelines(increment, per_pipeline_mb, safety_buffer_mb=3072, e
     
     if monitor_memory_pressure():
         print(
-            f"INFO: Memory pressure detected. Not safe to add {increment} more pipelines."
+            f"INFO: Memory pressure detected. Not safe to add {increment} more lane(s)."
         )
         return False
     
     print(
-        f"INFO: Memory check passed: {available_mb}MB available for {increment} new pipelines"
+        f"INFO: Memory check passed: {available_mb}MB available for {increment} new lane(s)"
     )
     return True
 
@@ -1122,16 +1122,16 @@ def run_pipeline_iterations(
             while step >= 1 and not check_can_add_pipelines(
                     step, per_pipeline_memory_mb, env_vars=env_vars):
                 print(
-                    f"INFO: Memory cannot fit {step} more pipeline(s) beyond "
+                    f"INFO: Memory cannot fit {step} more lane(s) beyond "
                     f"{base_pipelines} lane(s).")
                 step -= 1
             if step < 1:
                 if base_pipelines < 1:
                     print(
-                        "INFO: Aborting: not enough memory to start even 1 pipeline.")
+                        "INFO: Aborting: not enough memory to start even 1 lane.")
                     return 1, STATUS_FAIL, streams_sustained, None
                 print(
-                    f"INFO: Memory limit reached: cannot add even 1 more pipeline "
+                    f"INFO: Memory limit reached: cannot add even 1 more lane "
                     f"beyond {base_pipelines} lane(s). Confirming {base_pipelines} "
                     f"lane(s); it needs {consecutive_pass_windows} new consecutive "
                     f"passing interval(s) to be confirmed.")
@@ -1142,7 +1142,7 @@ def run_pipeline_iterations(
                 fail_window_count = 0
                 limit_pipelines = base_pipelines
                 limit_reason = (
-                    f"available memory set the limit; one more pipeline beyond "
+                    f"available memory set the limit; one more lane beyond "
                     f"{base_pipelines} lane(s) did not fit")
             elif step < increments:
                 print(
@@ -1176,24 +1176,6 @@ def run_pipeline_iterations(
         except ValueError as e:
             print(f"ERROR: {e}")
             logs_ready = False
-            base_pipelines = num_pipelines - increments
-            if not in_decrement and increments > 0 and base_pipelines >= 1:
-                failed_pipelines = num_pipelines
-                print(
-                    f"INFO: Pipeline logs at {num_pipelines} lane(s) were not "
-                    f"ready; returning to the last passing count of "
-                    f"{base_pipelines} lane(s). It needs "
-                    f"{consecutive_pass_windows} new consecutive passing "
-                    f"interval(s) to be confirmed.")
-                num_pipelines = base_pipelines
-                increments = 0
-                in_decrement = True
-                pass_window_count = 0
-                fail_window_count = 0
-                limit_pipelines = base_pipelines
-                limit_reason = (
-                    f"pipeline logs were not ready at {failed_pipelines} lane(s)")
-                continue
 
         # Only samples produced during the measurement interval feed the
         # decision. An interval without enough samples (inconclusive), or
