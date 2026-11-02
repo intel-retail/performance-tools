@@ -126,13 +126,15 @@ def consolidate(results):
         metrics = load(metrics_path)
         if not metrics:
             continue
-        for key, label, column in (("cpu_utilization", "Host CPU %", 1), ("gpu_utilization", "GPU busy %", 1),
-                                   ("npu_utilization", "NPU %", 1), ("memory", "Host memory %", 4),
+        for key, label, column in (("cpu_utilization", "CPU %", 1), ("gpu_utilization", "GPU busy %", 1),
+                                   ("npu_utilization", "NPU %", 1), ("memory", "Memory %", 4),
                                    ("power", "Package power W", 1)):
             values = [sample[column] for sample in metrics.get(key, []) if len(sample) > column]
             if values:
-                rows.append(row(f"Resources during {prefix}: {label}", "performance-tools", metrics_path,
-                                value=round(statistics.mean(values), 2)))
+                rows.append(row(f"System usage during {prefix} test: {label}", "performance-tools", metrics_path,
+                                value=round(statistics.mean(values), 2),
+                                note="Whole-machine value over this test window (all containers); "
+                                     "not usage of the service being tested"))
     return rows
 
 

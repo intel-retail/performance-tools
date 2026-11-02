@@ -95,7 +95,7 @@ class TestConsolidate(unittest.TestCase):
         self.assertNotIn("E2E frame -> ad rendered", stages)
         self.assertIn("7. AIG warm calls", stages)
         self.assertIn("Qdrant search @ 100 points", stages)
-        self.assertIn("Resources during e2e: Package power W", stages)
+        self.assertIn("System usage during e2e test: Package power W", stages)
         self.assertEqual(next(row for row in rows if row["stage"] == "Ads generated (predefined / dynamic)")["value"],
                          "1 / 1")
         self.assertEqual(next(row for row in rows if row["stage"] == "7. AIG warm calls")["avg_ms"], 10)
