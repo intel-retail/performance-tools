@@ -236,8 +236,8 @@ def main():
         benchmark_compose = os.path.abspath(os.path.join(
             os.curdir, '..', 'docker', 'docker-compose.yaml'))
     
-    # Replace the hardcoded compose file addition
-    compose_files.append(benchmark_compose)
+    if os.environ.get('WSL2', '').lower() != 'true':
+        compose_files.append(benchmark_compose)
 
     env_vars = os.environ.copy()
     env_vars["log_dir"] = results_dir
@@ -289,9 +289,13 @@ def main():
         stream_density.clean_up_pipeline_logs(results_dir)
         if my_args.pipelines > 0:
             env_vars["PIPELINE_COUNT"] = str(my_args.pipelines)
-        docker_compose_containers("up", compose_files=compose_files,
-                                  compose_post_args="-d",
-                                  env_vars=env_vars)
+        _, _, returncode = docker_compose_containers(
+            "up", compose_files=compose_files,
+            compose_post_args="-d", env_vars=env_vars)
+        if returncode:
+            docker_compose_containers(
+                "down", compose_files=compose_files, env_vars=env_vars)
+            raise SystemExit(returncode)
         print("Waiting for %ds init duration to complete" % my_args.init_duration)
         time.sleep(my_args.init_duration)
 

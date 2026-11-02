@@ -182,6 +182,73 @@ class WindowsMetricsTesting(unittest.TestCase):
             collector.stop.assert_not_called()
 
 
+class BenchmarkStartupTesting(unittest.TestCase):
+    def run_main(self, wsl2, benchmark_type='default', density=False,
+                 startup_code=0):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                target_fps=[15.0] if density else [], container_names=[],
+                results_dir=directory, compose_file=['workload.yml'],
+                benchmark_type=benchmark_type, init_duration=10,
+                target_device='CPU', retail_use_case_root=directory,
+                measurement_window_seconds=100, density_increment=None,
+                pipelines=1, duration=30, docker_log=None,
+                parser_script='parser.py', parser_args='')
+            with mock.patch.object(benchmark, 'parse_args', return_value=args), \
+                    mock.patch.dict(os.environ, {'WSL2': wsl2}), \
+                    mock.patch.object(benchmark, 'docker_compose_containers',
+                                      side_effect=[('', '', startup_code),
+                                                   ('', '', 0)]) as compose, \
+                    mock.patch.object(benchmark.time, 'sleep') as sleep, \
+                    mock.patch.object(benchmark.subprocess, 'run') as parser, \
+                    mock.patch.object(benchmark.stream_density,
+                                      'clean_up_pipeline_logs'), \
+                    mock.patch.object(benchmark.stream_density,
+                                      'run_stream_density', return_value=[(
+                                          15.0, 'gst', 1,
+                                          stream_density.STATUS_PASS,
+                                          1, None)]) as sweep:
+                if startup_code:
+                    with self.assertRaises(SystemExit) as error:
+                        benchmark.main()
+                    self.assertEqual(error.exception.code, startup_code)
+                    sleep.assert_not_called()
+                    parser.assert_not_called()
+                    self.assertEqual(
+                        [call.args[0] for call in compose.call_args_list],
+                        ['up', 'down'])
+                else:
+                    benchmark.main()
+                return (sweep.call_args.args[1] if density else
+                        compose.call_args_list[0].kwargs['compose_files'])
+
+    def test_wsl_omits_linux_collector_in_both_registry_modes(self):
+        for mode in ('default', 'reg'):
+            with self.subTest(mode=mode):
+                files = self.run_main('TRUE', benchmark_type=mode)
+                self.assertEqual(files, [os.path.abspath('workload.yml')])
+
+    def test_native_preserves_linux_collector_in_both_registry_modes(self):
+        for mode, filename in (
+                ('default', 'docker-compose.yaml'),
+                ('reg', 'docker-compose-reg.yaml')):
+            with self.subTest(mode=mode):
+                files = self.run_main('false', benchmark_type=mode)
+                self.assertEqual(len(files), 2)
+                self.assertEqual(files[0], os.path.abspath('workload.yml'))
+                self.assertEqual(os.path.basename(files[1]), filename)
+
+    def test_stream_density_uses_platform_specific_compose_files(self):
+        for wsl2, count in (('true', 1), ('false', 2)):
+            with self.subTest(wsl2=wsl2):
+                self.assertEqual(len(self.run_main(wsl2, density=True)), count)
+
+    def test_failed_startup_cleans_up_and_exits_before_measurement(self):
+        for wsl2 in ('true', 'false'):
+            with self.subTest(wsl2=wsl2):
+                self.run_main(wsl2, startup_code=17)
+
+
 class Testing(unittest.TestCase):
 
     class MockPopen(object):
