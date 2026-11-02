@@ -167,28 +167,15 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
 
 
 def print_stream_density_result(status, num_pipelines, streams_sustained,
-                                results_dir):
+                                results_dir, limit_note=None):
     if status == stream_density.STATUS_PASS:
         print("Result: Pass")
         print(
             f"Stream density completed: use case density {num_pipelines} lanes, "
             f"stream density {streams_sustained} streams. "
             f"For the detailed report, see {results_dir}/stream_density.log")
-    elif status == stream_density.STATUS_INCONCLUSIVE:
-        print("Result: Inconclusive")
-        print(
-            f"Measurement intervals did not collect "
-            f"{stream_density.MIN_SAMPLES_PER_STREAM} samples from every "
-            f"pipeline log, so they were not used for a pass/fail decision.")
-        if num_pipelines:
-            print(
-                f"Last passing density: use case density {num_pipelines} lanes, "
-                f"stream density {streams_sustained} streams, not confirmed by "
-                f"the run acceptance criterion.")
-        else:
-            print("No measurement interval had passed.")
-        print(
-            f"Per-log sample counts are in {results_dir}/stream_density.log")
+        if limit_note:
+            print(f"Note: {limit_note}.")
     else:
         print("Result: Fail")
         print(
@@ -273,9 +260,11 @@ def main():
                                                     container_names_list,
                                                     explicit_target_fps)
         for result in results:
-            target_fps, container_name, num_pipelines, status, streams_sustained = result
+            (target_fps, container_name, num_pipelines, status,
+             streams_sustained, limit_note) = result
             print_stream_density_result(
-                status, num_pipelines, streams_sustained, results_dir)
+                status, num_pipelines, streams_sustained, results_dir,
+                limit_note)
     elif len(target_fps_list) == 1:
         # single target_fps stream density mode:
         print('starting stream density...')
@@ -290,9 +279,11 @@ def main():
         results = stream_density.run_stream_density(
             env_vars, compose_files, [target_fps_list[0]], [container_name],
             explicit_target_fps)
-        target_fps, container_name, num_pipelines, status, streams_sustained = results[0]
+        (target_fps, container_name, num_pipelines, status,
+         streams_sustained, limit_note) = results[0]
         print_stream_density_result(
-            status, num_pipelines, streams_sustained, results_dir)
+            status, num_pipelines, streams_sustained, results_dir,
+            limit_note)
     else:
         # regular --pipelines mode:
         stream_density.clean_up_pipeline_logs(results_dir)
