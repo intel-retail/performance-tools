@@ -9,8 +9,114 @@ import os
 import csv
 import tempfile
 import unittest
+from unittest import mock
 
 import consolidate_multiple_run_of_metrics as metrics
+from windows_metrics import blank_metrics
+
+
+class WSLConsolidationTest(unittest.TestCase):
+    def consolidate(self, wsl2, windows_metrics=None, records=None):
+        with tempfile.TemporaryDirectory() as results_dir:
+            if windows_metrics is not None:
+                with open(os.path.join(results_dir, "windows_metrics.json"),
+                          "w", encoding="utf-8-sig") as metrics_file:
+                    json.dump(windows_metrics, metrics_file)
+            if records is not None:
+                with open(os.path.join(
+                        results_dir, "stream_density_latency_samples.jsonl"),
+                        "w", encoding="utf-8") as samples_file:
+                    samples_file.writelines(
+                        json.dumps(record) + "\n" for record in records)
+            output = os.path.join(results_dir, "metrics.csv")
+            with mock.patch.dict(os.environ, {"WSL2": wsl2}), \
+                    mock.patch.object(metrics, "write_metrics_csv",
+                                      wraps=metrics.write_metrics_csv) as writer:
+                metrics.consolidate_metrics(results_dir, output)
+                writer.assert_called_once()
+            with open(output, newline="", encoding="utf-8") as csv_file:
+                return list(csv.reader(csv_file))
+
+    def test_native_ignores_windows_metrics(self):
+        rows = self.consolidate("false", {
+            "metrics": {"GPU_1 GPU Power (W)": 12.5}})
+        self.assertEqual(rows, [])
+
+    def test_wsl_missing_windows_metrics_uses_na(self):
+        rows = dict(self.consolidate("true"))
+        self.assertEqual(rows, {
+            **blank_metrics(), metrics.AVG_NPU_USAGE_CONSTANT: "NA"})
+
+    def test_wsl_merges_valid_hardware_metrics_only(self):
+        rows = dict(self.consolidate("TRUE", {"metrics": {
+            "GPU_1 GPU Power (W)": 12.345,
+            "GPU_1 Compute[CCS] Utilization %": 0,
+            "GPU_1 Render/3D[RCS] Utilization %": -1,
+            "GPU_1 Video[VCS] Utilization %": True,
+            "GPU_1 VideoEnhance[VECS] Utilization %": float("nan"),
+            "GPU_1 Blitter Copy Engine %": "NA",
+            "S0 Power Draw W": float("inf"),
+            "S1 Memory Bandwidth Usage MB/s": 1234.567,
+            "Camera_0 FPS": 999,
+        }}))
+        self.assertEqual(rows["GPU_1 GPU Power (W)"], "12.35")
+        self.assertEqual(rows["GPU_1 Compute[CCS] Utilization %"], "0")
+        self.assertEqual(rows["S1 Memory Bandwidth Usage MB/s"], "1234.57")
+        self.assertNotIn("Camera_0 FPS", rows)
+        for key in (
+                "GPU_1 Render/3D[RCS] Utilization %",
+                "GPU_1 Video[VCS] Utilization %",
+                "GPU_1 VideoEnhance[VECS] Utilization %",
+                "GPU_1 Blitter Copy Engine %", "S0 Power Draw W"):
+            self.assertEqual(rows[key], "NA")
+
+    def test_wsl_invalid_metrics_object_uses_na(self):
+        with mock.patch("builtins.print") as warning:
+            rows = dict(self.consolidate("true", {"metrics": []}))
+        self.assertEqual(rows["GPU_1 GPU Power (W)"], "NA")
+        warning.assert_called_once()
+
+    def test_wsl_skips_unsupported_extractors(self):
+        unsupported = (
+            metrics.NPUUsageExtractor, metrics.PCMExtractor,
+            metrics.MemBandwidthExtractor, metrics.PowerUsageExtractor,
+            metrics.QMASSAGPUUsageExtractor, metrics.XPUMUsageExtractor)
+        with mock.patch.object(metrics, "KPIExtractor_OPTION", {
+                extractor.__name__: extractor for extractor in unsupported}):
+            with mock.patch.object(metrics.os, "walk") as walk:
+                self.consolidate("true")
+                walk.assert_not_called()
+                self.consolidate("false")
+                self.assertEqual(walk.call_count, len(unsupported))
+
+    def test_wsl_preserves_confirmed_window_and_csv_exclusions(self):
+        rows = dict(self.consolidate("true", records=[{
+            "container_name": "gst",
+            "stream_fps": {"pipeline_stream0": 15.0},
+            "samples_by_stream": {"source0 -> sink0": [10, 20]},
+        }, {
+            "record_type": "sweep_result", "container_name": "gst",
+            "status": "pass", "lane_count": 1,
+        }]))
+        self.assertEqual(rows["Camera_0 FPS"], "15.0")
+        self.assertEqual(rows["System Latency p99 (ms)"], "19.9")
+        self.assertNotIn("Per-stream Latency Sample Count", rows)
+        self.assertEqual(rows["GPU_1 GPU Power (W)"], "NA")
+
+    def test_wsl_preserves_unconfirmed_marker_and_hardware_metrics(self):
+        rows = self.consolidate("true", {
+            "metrics": {"GPU_1 GPU Power (W)": 12.5}}, records=[{
+                "container_name": "gst",
+                "stream_fps": {"pipeline_stream0": 999},
+                "samples_by_stream": {"source0 -> sink0": [999]},
+            }, {
+                "record_type": "sweep_result", "container_name": "gst",
+                "status": "inconclusive", "lane_count": 1,
+            }])
+        self.assertEqual(rows[0], ["Result: no confirmed density"])
+        self.assertIn(["GPU_1 GPU Power (W)", "12.5"], rows)
+        self.assertFalse(any(metrics.is_fps_or_latency_metric(row[0])
+                             for row in rows))
 
 
 class WindowLatencyMetricsTest(unittest.TestCase):

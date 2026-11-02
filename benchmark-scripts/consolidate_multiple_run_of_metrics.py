@@ -995,7 +995,8 @@ def build_window_latency_metrics(records):
     return metric_values
 
 
-def consolidate_metrics(root_directory, output):    wsl2 = os.environ.get('WSL2', '').lower() == 'true'
+def consolidate_metrics(root_directory, output):
+    wsl2 = os.environ.get('WSL2', '').lower() == 'true'
 
     n = 0
     df = pd.DataFrame()
@@ -1032,13 +1033,16 @@ def consolidate_metrics(root_directory, output):    wsl2 = os.environ.get('WSL2'
                         whole_log_latency_records.append(extractor.record)
                     if kpi_dict:
                         full_kpi_dict.update(kpi_dict)
-    
-    # Calculate aggregate statistics of all channel medians
-    if all_channel_medians:
-        overall_median = median(all_channel_medians)
-        
-        full_kpi_dict["Overall Latency (ms)"] = round(overall_median, 3)
-       
+
+    if window_records and not no_confirmed_density:
+        full_kpi_dict.update(build_window_fps_metrics(window_records))
+    if not no_confirmed_density:
+        full_kpi_dict.update(build_window_latency_metrics(
+            window_records or (
+                [] if has_sweep_results else whole_log_latency_records)))
+    else:
+        full_kpi_dict = filter_unconfirmed_fps_latency_metrics(full_kpi_dict)
+
     if wsl2:
         from windows_metrics import blank_metrics
         full_kpi_dict.update(blank_metrics())
@@ -1065,25 +1069,6 @@ def consolidate_metrics(root_directory, output):    wsl2 = os.environ.get('WSL2'
             except (OSError, ValueError, KeyError, TypeError) as error:
                 print(f'WARN: Windows hardware metrics unavailable: {error}')
 
-    # Write out summary csv file from dictionary
-    with open(output, 'w') as csv_file:
-        writer = csv.writer(csv_file)
-        for key, value in full_kpi_dict.items():
-            if isinstance(value, dict):
-                # Format dictionary values without curly braces
-                formatted_value = ', '.join([f'{k}: {v}' for k, v in value.items()])
-                writer.writerow([key, formatted_value])
-            else:
-                writer.writerow([key, value])
-
-    if window_records and not no_confirmed_density:
-        full_kpi_dict.update(build_window_fps_metrics(window_records))
-    if not no_confirmed_density:
-        full_kpi_dict.update(build_window_latency_metrics(
-            window_records or (
-                [] if has_sweep_results else whole_log_latency_records)))
-    else:
-        full_kpi_dict = filter_unconfirmed_fps_latency_metrics(full_kpi_dict)
     write_metrics_csv(output, full_kpi_dict, no_confirmed_density)
 
 
