@@ -854,6 +854,8 @@ def load_stream_density_records(root_directory):
                         f"WARN: Ignoring malformed latency sample record at "
                         f"{sample_path}:{line_number}")
                     continue
+                if record.get("record_type") == "measurement_interval":
+                    continue
                 if record.get("record_type") == "sweep_result":
                     if not isinstance(record.get("status"), str) or not isinstance(
                             record.get("lane_count"), int):

@@ -1149,6 +1149,9 @@ def run_pipeline_iterations(
                 f"(limit {measurement_window_seconds * 2} s).")
             for log_file, count in sorted(sample_counts.items()):
                 print(f"  {os.path.basename(log_file)}: {count} samples")
+            save_measurement_interval(
+                results_dir, container_name, num_pipelines, window_number,
+                STATUS_INCONCLUSIVE, {}, actual_measurement_seconds)
             if inconclusive_retries >= MAX_INCONCLUSIVE_RETRIES:
                 print(
                     f"INFO: Result: Inconclusive - {inconclusive_retries + 1} consecutive "
@@ -1195,6 +1198,10 @@ def run_pipeline_iterations(
             if fps >= pass_thresholds[name]
         }
         all_streams_meet_target = bool(stream_fps_dict) and len(passing_streams) == len(stream_fps_dict)
+        save_measurement_interval(
+            results_dir, container_name, num_pipelines, window_number,
+            STATUS_PASS if all_streams_meet_target else STATUS_FAIL,
+            stream_fps_dict, actual_measurement_seconds)
         latency_samples_by_stream = extract_window_latency_samples(
             results_dir, container_name,
             window_start_offsets, window_end_offsets)
@@ -1583,6 +1590,21 @@ def extract_window_latency_samples(results_dir, container_name,
                 frame_values.values())
 
     return samples_by_stream
+
+
+def save_measurement_interval(results_dir, container_name, lane_count,
+                              interval_id, status, stream_fps, duration_seconds):
+    """Append interval history separately from final confirmed latency samples."""
+    os.makedirs(results_dir, exist_ok=True)
+    record = {
+        "record_type": "measurement_interval", "container_name": container_name,
+        "lane_count": lane_count, "interval_id": interval_id, "status": status,
+        "stream_fps": dict(stream_fps), "duration_seconds": duration_seconds,
+        "recorded_at": datetime.now().astimezone().isoformat(),
+    }
+    with open(os.path.join(results_dir, LATENCY_SAMPLES_FILENAME), "a",
+              encoding="utf-8") as output_file:
+        output_file.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def save_window_latency_samples(results_dir, container_name, num_pipelines,

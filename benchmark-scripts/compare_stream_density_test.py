@@ -37,7 +37,7 @@ class ComparisonTest(unittest.TestCase):
              "samples_by_stream": {"stream0": [10, 20], "stream1": [30]}},
             {"record_type": "sweep_result", "container_name": "gst", "status": "pass", "lane_count": 2},
         ]
-        (path / report.SAMPLES_FILE).write_text("\n".join(json.dumps(record) for record in records))
+        (path / report.SAMPLES_FILE).write_text("\n".join(json.dumps(record) for record in records) + "\n")
         (path / "metrics.csv").write_text("S0 Power Draw W,20\nCPU Utilization %,50\nGPU Utilization %,80\n")
         return path, metadata
 
@@ -61,7 +61,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(metrics["streams"], 2)
         self.assertEqual(metrics["throughput"], 60)
         self.assertEqual(metrics["rate"], 30)
-        self.assertEqual(metrics["latency"], 20)
+        self.assertEqual(metrics["latency_p50"], 20)
         self.assertEqual(metrics["power"], {"S0 Power Draw W": 10})
         self.assertEqual(metrics["utilisation"], {"CPU Utilization %": 50})
         text = report.generate_report([(path, metadata)])
@@ -82,7 +82,155 @@ class ComparisonTest(unittest.TestCase):
         sample_path.write_text(sample_path.read_text().replace('"pass"', '"inconclusive"'))
         metrics = report.run_metrics(path, metadata)
         self.assertIsNone(metrics["streams"])
-        self.assertIsNone(metrics["latency"])
+        self.assertIsNone(metrics["latency_p50"])
+
+    def test_csv_percentiles_are_not_replaced_by_mean_latency(self):
+        path, metadata = self.make_run("percentiles")
+        with (path / "metrics.csv").open("a") as source:
+            source.write(
+                'System Latency p50 (ms),11\n'
+                'System Latency p95 (ms),91\n'
+                'System Latency p99 (ms),99\n'
+                'Per-stream Latency p95 (ms),"gst | source0 -> sink0: 80, gst | source1 -> sink1: 110"\n')
+        metrics = report.run_metrics(path, metadata)
+        self.assertEqual(metrics["latency_p50"], 11)
+        self.assertEqual(metrics["latency_p95"], 91)
+        self.assertEqual(metrics["latency_p99"], 99)
+        self.assertEqual(metrics["highest_stream_p95"], 110)
+        markdown = report.generate_report([(path, metadata)])
+        self.assertIn("Pooled latency p95 (ms)", markdown)
+        self.assertNotIn("Mean latency", markdown)
+        self.assertNotIn("confirming window", markdown)
+
+    def test_inconclusive_retains_last_passing_lanes_but_not_fps_or_latency(self):
+        path, metadata = self.make_run("inconclusive")
+        sample_path = path / report.SAMPLES_FILE
+        sample_path.write_text(sample_path.read_text().replace('"pass"', '"inconclusive"'))
+        metrics = report.run_metrics(path, metadata)
+        self.assertEqual(metrics["status"], "inconclusive")
+        self.assertEqual(metrics["last_passing_lanes"], {"gst": 2})
+        for key in ("streams", "throughput", "rate", "latency_p50",
+                    "latency_p95", "latency_p99", "highest_stream_p95"):
+            self.assertIsNone(metrics[key])
+        self.assertIn("not confirmed", report.generate_report([(path, metadata)]))
+        sample_path.write_text(sample_path.read_text().replace('"inconclusive"', '"fail"'))
+        failed = report.run_metrics(path, metadata)
+        self.assertEqual(failed["status"], "fail")
+        self.assertEqual(failed["last_passing_lanes"], {})
+
+    def test_history_is_persisted_without_contaminating_final_metrics(self):
+        import stream_density
+        from consolidate_multiple_run_of_metrics import load_stream_density_records
+
+        path, metadata = self.make_run("history")
+        for interval, status, fps in ((1, "pass", 999), (2, "fail", 3)):
+            stream_density.save_measurement_interval(
+                path, "gst", 2, interval, status,
+                {"pipeline_stream0": fps}, 100)
+        stream_density.save_measurement_interval(path, "gst", 3, 3, "inconclusive", {}, 200)
+        records = [json.loads(line) for line in (path / report.SAMPLES_FILE).read_text().splitlines()]
+        history = [record for record in records if record.get("record_type") == "measurement_interval"]
+        self.assertEqual([record["interval_id"] for record in history], [1, 2, 3])
+        self.assertEqual([record["status"] for record in history], ["pass", "fail", "inconclusive"])
+        samples, sweeps = load_stream_density_records(path)
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(len(sweeps), 1)
+        self.assertEqual(report.run_metrics(path, metadata)["throughput"], 60)
+
+    def test_capture_records_hardware_and_resolved_acceptance_defaults(self):
+        import psutil
+
+        path, template = self.make_run("metadata")
+        configs = self.root / "configs"
+        configs.mkdir()
+        (configs / "camera.json").write_text(json.dumps(self.camera))
+        (configs / "pipeline.json").write_text(json.dumps(template["pipeline_config"]))
+        core = SimpleNamespace(available_devices=["GPU.0", "NPU"],
+                               get_property=lambda device, key: f"Test {device}")
+        with patch.object(report.platform, "node", return_value="lab-host"), \
+                patch.object(report.subprocess, "run", side_effect=FileNotFoundError), \
+                patch.object(report, "gpu_metric_devices", return_value={}), \
+                patch.dict("sys.modules", {"openvino": SimpleNamespace(Core=lambda: core)}), \
+                patch.object(psutil, "cpu_count", side_effect=lambda logical=True: 16 if logical else 8), \
+                patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(total=32 * 1024 ** 3)):
+            metadata = report.capture_run(path, self.root, {
+                "CAMERA_STREAM": "camera.json", "WORKLOAD_DIST": "pipeline.json"}, {})
+        self.assertEqual(metadata["hardware"]["hostname"], "lab-host")
+        self.assertEqual(metadata["hardware"]["cpu_cores"], 8)
+        self.assertEqual(metadata["hardware"]["logical_cpus"], 16)
+        self.assertEqual(metadata["hardware"]["ram_bytes"], 32 * 1024 ** 3)
+        self.assertIn("GPU.0: Test GPU.0", metadata["hardware"]["gpu_names"])
+        self.assertIn("NPU: Test NPU", metadata["hardware"]["npu_names"])
+        self.assertEqual(metadata["settings"]["pass_tolerance_ratio"], 0.95)
+        self.assertEqual(metadata["settings"]["consecutive_passes"], 2)
+        self.assertEqual(metadata["settings"]["consecutive_fails"], 2)
+        self.assertEqual(report.test_configuration(metadata)["Throughput threshold (FPS)"], "28.50")
+
+    def test_test_configuration_preserves_per_camera_targets_and_unknown_history(self):
+        _, metadata = self.make_run("targets")
+        metadata["camera_config"]["lane_config"]["cameras"] = [
+            {"camera_id": "cam1", "fps": 15},
+            {"camera_id": "cam2", "fps": 15, "targetFps": 30}]
+        self.assertIsNone(report.test_configuration(metadata)["Pass tolerance ratio"])
+        metadata["settings"].update(pass_tolerance_ratio=0.9, consecutive_passes=3)
+        settings = report.test_configuration(metadata)
+        self.assertEqual(settings["Target FPS per camera"], "cam1: 15; cam2: 30")
+        self.assertEqual(settings["Throughput threshold (FPS)"], "cam1: 13.50; cam2: 27.00")
+        self.assertEqual(settings["Run acceptance criterion"], "3 consecutive passes")
+
+    def test_html_is_self_contained_escaped_and_contains_five_charts_and_heatmap(self):
+        import base64
+        from html.parser import HTMLParser
+        from io import BytesIO
+        from PIL import Image
+        from stream_density_report_html import generate_html_report
+        import stream_density
+
+        path, metadata = self.make_run("html")
+        metadata["hardware"]["hostname"] = '<script>alert("host")</script>'
+        stream_density.save_measurement_interval(
+            path, "gst", 2, 1, "pass", {"stream0": 29, "stream1": 31}, 100)
+        document = generate_html_report([(path, metadata)])
+        self.assertIn("&lt;script&gt;", document)
+        self.assertNotIn("<script>", document)
+        self.assertNotIn("threshold-note", document)
+        self.assertNotIn("Avg latency", document)
+        for title in ("Hardware", "Test &amp; Software", "Stream Density Summary",
+                      "KPI Comparison Table", "Highest per-stream p95", "Per-Stream FPS Heatmaps"):
+            self.assertIn(title, document)
+
+        class Images(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.sources = []
+
+            def handle_starttag(self, tag, attributes):
+                if tag == "img":
+                    self.sources.append(dict(attributes)["src"])
+
+        images = Images()
+        images.feed(document)
+        self.assertEqual(len(images.sources), 6)
+        for source in images.sources:
+            self.assertTrue(source.startswith("data:image/png;base64,"))
+            bitmap = Image.open(BytesIO(base64.b64decode(source.split(",", 1)[1])))
+            self.assertGreater(bitmap.width, 100)
+            self.assertIsNotNone(bitmap.convert("RGB").getextrema())
+
+    def test_html_output_option_also_writes_markdown(self):
+        self.make_run("cpu")
+        output = self.root / "comparison.html"
+        report.main(["--results-dir", str(self.root), "--output", str(output)])
+        self.assertTrue(output.exists())
+        self.assertTrue(output.with_suffix(".md").exists())
+
+    def test_old_html_runs_show_missing_metadata_and_history(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("legacy")
+        document = generate_html_report([(path, metadata)])
+        self.assertIn("No measurement interval history recorded", document)
+        self.assertIn("N/A", document)
 
     def test_cli_discovers_runs_without_positional_arguments(self):
         self.make_run("cpu")
@@ -116,7 +264,7 @@ class ComparisonTest(unittest.TestCase):
         records[0]["hardware_metrics"] = {}
         sample_path.write_text("\n".join(json.dumps(record) for record in records))
         metrics = report.run_metrics(path, metadata)
-        self.assertIsNone(metrics["latency"])
+        self.assertIsNone(metrics["latency_p50"])
         self.assertEqual(metrics["power"], {})
         self.assertIn("N/A", report.generate_report([(path, metadata)]))
 

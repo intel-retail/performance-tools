@@ -1,4 +1,4 @@
-"""Capture run provenance and generate a cross-accelerator Markdown report."""
+"""Capture run provenance and generate cross-accelerator HTML and Markdown reports."""
 
 import argparse
 import csv
@@ -94,6 +94,23 @@ def capture_run(results_dir, repo_root, env, settings):
     camera = read_json(configs / env.get("CAMERA_STREAM", "camera_to_workload.json"))
     pipeline = read_json(configs / env.get("WORKLOAD_DIST", "workload_to_pipeline.json"))
     stages = active_stages(camera, pipeline)
+    import psutil
+    import stream_density
+
+    settings = dict(settings)
+    for key, environment_key, default, convert in (
+            ("pass_tolerance_ratio", stream_density.PASS_TOLERANCE_RATIO_KEY,
+             stream_density.DEFAULT_PASS_TOLERANCE_RATIO, float),
+            ("consecutive_passes", stream_density.CONSECUTIVE_PASS_WINDOWS_KEY,
+             stream_density.DEFAULT_CONSECUTIVE_PASS_WINDOWS, int),
+            ("consecutive_fails", stream_density.CONSECUTIVE_FAIL_WINDOWS_KEY,
+             stream_density.DEFAULT_CONSECUTIVE_FAIL_WINDOWS, int)):
+        settings[key] = convert(env.get(environment_key) or default)
+    settings["camera_target_fps"] = {
+        str(entry.get("camera_id", f"camera_{index + 1}")):
+            entry.get("targetFps", entry.get("fps"))
+        for index, entry in enumerate(camera.get("lane_config", {}).get("cameras", []))
+    }
     devices = sorted({str(device).upper()
                       for entries in stages.values() for stage in entries
                       for device in (stage.get("device"), stage.get("vlm_device"))
@@ -117,6 +134,31 @@ def capture_run(results_dir, repo_root, env, settings):
         hardware = pci_hardware()
     if not hardware and any(device != "CPU" for device in devices):
         hardware = ["Accelerator hardware identity unavailable: neither PCI names nor sysfs IDs were accessible"]
+    accelerator_names = {"gpu": [], "npu": []}
+    for line in hardware:
+        if any(kind in line.lower() for kind in ("vga", "display", "3d controller")):
+            accelerator_names["gpu"].append(line)
+        if any(kind in line.lower() for kind in ("neural", "processing accelerators", "signal processing")):
+            accelerator_names["npu"].append(line)
+    try:
+        from openvino import Core
+        core = Core()
+        for device in core.available_devices:
+            kind = device.split(".")[0].lower()
+            if kind in accelerator_names:
+                try:
+                    name = str(core.get_property(device, "FULL_DEVICE_NAME"))
+                    accelerator_names[kind].append(f"{device}: {name}")
+                except RuntimeError:
+                    continue
+    except (ImportError, RuntimeError, OSError):
+        pass
+    system = {}
+    for key, filename in (("vendor", "sys_vendor"), ("model", "product_name")):
+        try:
+            system[key] = (Path("/sys/class/dmi/id") / filename).read_text().strip() or None
+        except OSError:
+            system[key] = None
     try:
         os_info = platform.freedesktop_os_release() if hasattr(platform, "freedesktop_os_release") else {}
     except OSError:
@@ -125,7 +167,13 @@ def capture_run(results_dir, repo_root, env, settings):
         "started_at": datetime.now(timezone.utc).isoformat(),
         "config_id": configuration_id(camera, pipeline, settings),
         "accelerator": "+".join(devices) or env.get("DEVICE", "unknown"),
-        "hardware": {"cpu": cpu, "accelerators": hardware},
+        "hardware": {
+            "cpu": cpu, "accelerators": hardware,
+            "hostname": platform.node(), "system_vendor": system["vendor"],
+            "system_model": system["model"], "cpu_cores": psutil.cpu_count(logical=False),
+            "logical_cpus": psutil.cpu_count(), "ram_bytes": psutil.virtual_memory().total,
+            "gpu_names": accelerator_names["gpu"], "npu_names": accelerator_names["npu"],
+        },
         "gpu_metric_devices": gpu_metric_devices(),
         "os": os_info.get("PRETTY_NAME", platform.system()),
         "kernel": platform.release(),
@@ -316,7 +364,8 @@ def run_metrics(path, metadata):
     windows = {}
     for record in records:
         container = record.get("container_name")
-        if (confirmed and "stream_fps" in record
+        if (confirmed and record.get("record_type") != "measurement_interval"
+            and "stream_fps" in record
                 and record.get("pipeline_count") == sweeps.get(container, {}).get("lane_count")):
             windows[container] = record
     if windows.keys() != sweeps.keys():
@@ -325,9 +374,6 @@ def run_metrics(path, metadata):
     fps = [value for record in windows.values()
            for raw in record.get("stream_fps", {}).values()
            if (value := number(raw)) is not None and value > 0]
-    latency = [value for record in windows.values()
-               for values in record.get("samples_by_stream", {}).values() for raw in values
-               if (value := number(raw)) is not None and value >= 0]
     metric_path = path / "metrics.csv"
     if not metric_path.exists():
         from consolidate_multiple_run_of_metrics import consolidate_metrics
@@ -337,9 +383,31 @@ def run_metrics(path, metadata):
             metrics = read_metrics(metric_path)
     else:
         metrics = read_metrics(metric_path)
+    from consolidate_multiple_run_of_metrics import build_window_latency_metrics
+
+    latency_metrics = build_window_latency_metrics(list(windows.values())) if windows else {}
+    latency_metrics.update(metrics)
+    percentiles = {
+        f"latency_p{percentile}": number(latency_metrics.get(
+            f"System Latency p{percentile} (ms)")) if confirmed else None
+        for percentile in (50, 95, 99)
+    }
+    stream_p95 = latency_metrics.get("Per-stream Latency p95 (ms)", {})
+    if isinstance(stream_p95, str):
+        stream_p95 = {
+            label: value for entry in stream_p95.split(", ")
+            if ": " in entry for label, value in [entry.rsplit(": ", 1)]
+        }
+    highest_p95 = max((value for raw in stream_p95.values()
+                       if (value := number(raw)) is not None), default=None) if confirmed else None
+    statuses = {record.get("status") for record in sweeps.values()}
+    status = ("fail" if "fail" in statuses else
+              "inconclusive" if "inconclusive" in statuses else
+              "pass" if statuses == {"pass"} else "unknown")
     accelerator = metadata["accelerator"]
     gpu_devices = metadata.get("gpu_metric_devices", {})
     power = {}
+    package_power = {}
     window_utilisation = {}
     for container, record in windows.items():
         stream_count = sum(number(raw) is not None and number(raw) > 0
@@ -351,6 +419,8 @@ def run_metrics(path, metadata):
             if value is None:
                 continue
             label = f"{container}: {key}" if len(windows) > 1 else key
+            if "Power Draw W" in key and "GPU" not in key.upper():
+                package_power[label] = value
             if (("Power Draw W" in key or "GPU Power (W)" in key)
                     and ("GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices))):
                 power[label] = value / stream_count
@@ -361,14 +431,21 @@ def run_metrics(path, metadata):
                    and matches_accelerator(key, accelerator, gpu_devices)
                    and (value := number(raw)) is not None}
     return {
-        "status": "pass" if confirmed and fps else "no confirmed density",
+        "status": status,
+        "confirmed": bool(confirmed and fps),
+        "last_passing_lanes": {
+            container: record.get("lane_count") for container, record in sweeps.items()
+            if record.get("status") == "inconclusive" and record.get("lane_count", 0) > 0
+        },
         "streams": len(fps) if fps else None,
         "throughput": sum(fps) if fps else None,
         "rate": statistics.mean(fps) if fps else None,
-        "latency": statistics.mean(latency) if latency else None,
+        **percentiles,
+        "highest_stream_p95": highest_p95,
         "power": power,
+        "package_power": package_power,
         "utilisation": window_utilisation or utilisation,
-        "utilisation_period": "confirming window" if window_utilisation else "collector period (not window-aligned)",
+        "utilisation_period": "measurement interval" if window_utilisation else "collector period (not interval-aligned)",
     }
 
 
@@ -389,6 +466,62 @@ def labelled(values):
     return "; ".join(f"{cell(key)}: {cell(value)}" for key, value in values.items()) or "N/A"
 
 
+def test_configuration(metadata):
+    settings = metadata["settings"]
+    environment = settings.get("environment", {})
+    targets = settings.get("camera_target_fps") or {
+        str(camera.get("camera_id", f"camera_{index + 1}")):
+            camera.get("targetFps", camera.get("fps"))
+        for index, camera in enumerate(metadata["camera_config"].get(
+            "lane_config", {}).get("cameras", []))
+    }
+    ratio = number(settings.get("pass_tolerance_ratio", environment.get("PASS_TOLERANCE_RATIO")))
+    thresholds = {name: value * ratio if ratio is not None and
+                  (value := number(raw)) is not None else None
+                  for name, raw in targets.items()}
+
+    def compact(values):
+        unique = {cell(value) for value in values.values()}
+        return next(iter(unique)) if len(unique) == 1 else labelled(values)
+
+    passes = settings.get("consecutive_passes", environment.get("CONSECUTIVE_PASS_WINDOWS"))
+    return {
+        "Target FPS per camera": compact(targets),
+        "Throughput threshold (FPS)": compact(thresholds),
+        "Pass tolerance ratio": ratio,
+        "Warmup period (s)": settings.get("init_duration"),
+        "Measurement interval (s)": settings.get("measurement_window_seconds"),
+        "Run acceptance criterion": (
+            "two consecutive passes" if str(passes) == "2" else
+            f"{passes} consecutive passes" if passes is not None else None),
+        "Consecutive failing intervals": settings.get(
+            "consecutive_fails", environment.get("CONSECUTIVE_FAIL_WINDOWS")),
+    }
+
+
+def hardware_details(metadata):
+    hardware = metadata["hardware"]
+    ram = number(hardware.get("ram_bytes"))
+    return {
+        "Host": hardware.get("hostname"), "System vendor": hardware.get("system_vendor"),
+        "System model": hardware.get("system_model"), "CPU": hardware["cpu"],
+        "CPU cores (physical)": hardware.get("cpu_cores"),
+        "Logical CPUs": hardware.get("logical_cpus"),
+        "RAM (GiB)": ram / 1024 ** 3 if ram is not None else None,
+        "GPU": "; ".join(hardware.get("gpu_names", [])) or None,
+        "NPU": "; ".join(hardware.get("npu_names", [])) or None,
+        "Accelerator identities": "; ".join(hardware.get("accelerators", [])) or None,
+    }
+
+
+def density_result(metrics):
+    if metrics["confirmed"]:
+        return cell(metrics["streams"])
+    if metrics["last_passing_lanes"]:
+        return f"N/A; last passing lanes: {labelled(metrics['last_passing_lanes'])} (not confirmed)"
+    return "N/A"
+
+
 def generate_report(runs):
     metadata = runs[0][1]
     about = metadata["camera_config"].get("_about", metadata["camera_config"].get("about", {}))
@@ -399,17 +532,18 @@ def generate_report(runs):
     elif about:
         lines.append(cell(about))
     lines.extend(["", "## Comparison", "",
-                  "| Accelerator | Source run | Duration (s) | Max confirmed streams | Throughput (FPS) | FPS/stream | Mean latency (ms) | Power/stream (W, source scope) | Utilisation (%, period) | Result |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
+                  "| Accelerator | Source run | Duration (s) | Stream density (streams) | Throughput (FPS) | FPS/stream | Pooled latency p50 (ms) | Pooled latency p95 (ms) | Pooled latency p99 (ms) | Highest per-stream p95 (ms) | Power/stream (W, source scope) | Utilisation (%, period) | Result |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
     for path, run in runs:
         metrics = run_metrics(path, run)
         values = [run["accelerator"], path.name, run.get("duration_seconds"),
-                  metrics["streams"], metrics["throughput"], metrics["rate"],
-                  metrics["latency"], labelled(metrics["power"]),
+                  density_result(metrics), metrics["throughput"], metrics["rate"],
+                  metrics["latency_p50"], metrics["latency_p95"], metrics["latency_p99"],
+                  metrics["highest_stream_p95"], labelled(metrics["power"]),
                   f"{labelled(metrics['utilisation'])} ({metrics['utilisation_period']})", metrics["status"]]
         lines.append("| " + " | ".join(cell(value) for value in values) + " |")
-    lines.extend(["", "FPS and latency use the final confirming measurement window. N/A means not recorded.",
-                  "Power per stream uses only confirming-window samples and retains the collector's scope; package power is not accelerator-only power.",
+    lines.extend(["", "FPS and latency use the final confirmed measurement interval. N/A means not recorded or not confirmed.",
+                  "Power per stream uses only measurement interval samples and retains the collector's scope; package power is not accelerator-only power.",
                   "N/A power means no aligned power samples were saved; whole-run averages are not substituted.", ""])
     for path, run in runs:
         lines.extend([f"## {cell(run['accelerator'])}", "",
@@ -417,6 +551,9 @@ def generate_report(runs):
                       f"Started: {cell(run['started_at'])}; finished: {cell(run['finished_at'])}", "",
                       f"Hardware: {cell(run['hardware']['cpu'])}"])
         lines.extend(cell(device) for device in run["hardware"].get("accelerators", []))
+        lines.extend(f"{key}: {cell(value)}" for key, value in hardware_details(run).items())
+        lines.extend(["", "### Test & Software", ""])
+        lines.extend(f"{key}: {cell(value)}" for key, value in test_configuration(run).items())
         lines.extend([f"OS: {cell(run['os'])}", f"Kernel: {cell(run['kernel'])}", "",
                       "### Pipeline Stages", "",
                       "| Workload | Stage | Model | Device | Precision |",
@@ -444,7 +581,7 @@ def main(argv=None):
     parser.add_argument("--config", help="Configuration ID from run_metadata.json")
     parser.add_argument("--since", type=parse_date, help="Inclusive ISO date/time (UTC by default)")
     parser.add_argument("--until", type=parse_until, help="Inclusive ISO date/time; a date includes the whole UTC day")
-    parser.add_argument("--output", type=Path, help="Markdown output; default: results-dir/stream_density_report.md")
+    parser.add_argument("--output", type=Path, help="Output .md or .html path; both formats are written with the same stem")
     args = parser.parse_args(argv)
     if args.since and args.until and args.since > args.until:
         parser.error("--since must not be after --until")
@@ -453,11 +590,17 @@ def main(argv=None):
         runs = select_runs(paths, args.config, args.since, args.until)
         report = generate_report(runs)
         output = args.output or args.results_dir / "stream_density_report.md"
+        if output.suffix.lower() not in (".md", ".html"):
+            raise ValueError("Output must use a .md or .html extension")
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(report, encoding="utf-8")
+        from stream_density_report_html import generate_html_report
+        html = generate_html_report(runs)
+        output.with_suffix(".md").write_text(report, encoding="utf-8")
+        output.with_suffix(".html").write_text(html, encoding="utf-8")
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Report generation failed: {error}\n")
-    print(f"Report: {output}")
+    print(f"Report: {output.with_suffix('.html')}")
+    print(f"Markdown: {output.with_suffix('.md')}")
 
 
 if __name__ == "__main__":

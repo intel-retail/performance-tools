@@ -1046,6 +1046,7 @@ class Testing(unittest.TestCase):
                 }
                 with patch('stream_density.get_camera_config_about',
                            return_value=about), \
+                    patch('stream_density.save_measurement_interval'), \
                         patch('stream_density.print_stream_density_report') as report:
                     num_pipelines, status, streams_sustained = (
                         stream_density.run_pipeline_iterations(

@@ -65,7 +65,9 @@ make combined-report REPORT_ARGS='--since 2026-10-01 --until 2026-10-27'
 resolved from the loss-prevention repository root.
 The target retains the same single-configuration selection described below.
 
-This writes `benchmark/stream_density_report.md` without prompts. `RESULTS_DIR`
+This writes self-contained `benchmark/stream_density_report.html` and
+`benchmark/stream_density_report.md` without prompts. The HTML embeds all chart
+images and styles, so it can be opened offline without companion assets. `RESULTS_DIR`
 overrides the default search directory. The report picks the newest completed
 run for each accelerator, using the configuration of the newest completed run.
 It groups runs by camera configuration, active model stages (including
@@ -85,16 +87,24 @@ Dates filter run start times, default to UTC, and `--until YYYY-MM-DD` includes
 the whole day. `--config ID` selects a configuration ID from `run_metadata.json`
 instead of the newest configuration. No matching completed runs returns a
 nonzero exit code for CI. Interrupted runs are ignored; completed failed or
-inconclusive sweeps are shown as having no confirmed density.
+inconclusive sweeps retain their terminal status. Inconclusive sweeps show their
+last passing lane count, when available, explicitly marked as not confirmed;
+their stream density, FPS and latency remain `N/A`. A lane count is never
+presented as a stream count. Failed sweeps remain distinguishable from
+inconclusive sweeps.
 
 The report description is read from the camera configuration's `_about` block.
-The report uses final confirming-window FPS and latency, not averages across
-the density ramp. New confirmed-window records also save hardware metrics
+The report uses FPS from the final confirmed measurement interval, not averages
+across the density ramp. Latency is reported as pooled p50, p95 and p99 plus the
+highest per-stream p95, using the consolidated CSV values when available or the
+same confirmed sample calculations when those rows are absent. It does not
+average per-stream percentiles or substitute mean latency. New confirmed
+measurement interval records also save hardware metrics
 from CPU/power logs, PCM/NPU CSVs and supported GPU JSON/qmassa collectors.
-Collector files must contain readable samples at both window boundaries;
+Collector files must contain readable samples at both measurement interval boundaries;
 unsupported, buffered, reset or unavailable samples are not estimated.
-Power per stream divides aligned window power by the stream count from that
-same window. CPU-package power retains its package scope and is not labelled
+Power per stream divides aligned measurement interval power by the stream count
+from that same interval. CPU-package power retains its package scope and is not labelled
 accelerator-only power. Indexed GPU targets exclude other GPUs' measurements.
 Run metadata saves a mapping from OpenVINO GPU devices to DRM collector indices
 only when their PCI addresses match. This optional discovery uses an installed
@@ -104,19 +114,43 @@ VLM stages report detector and language-model devices and precisions separately.
 For multiple containers, power values are labelled per container and divided
 by that container's stream count.
 
-Utilisation prefers confirming-window samples. Its fallback comes from each
+Utilisation prefers measurement interval samples. Its fallback comes from each
 run's `metrics.csv`, or the existing consolidation function when that CSV has
 not been generated (requires `benchmark-scripts/requirements.txt`), and is
-explicitly labelled as not window-aligned. Missing measurements show `N/A`.
+explicitly labelled as not interval-aligned. Missing measurements show `N/A`.
 Historical runs without aligned hardware samples show `N/A` power per stream;
-whole-run power averages are never substituted. The existing consolidation
-script is unchanged. Malformed run metadata is skipped with a warning so one
+whole-run power averages are never substituted. Interval history is explicitly
+excluded from final FPS/latency consolidation. Malformed run metadata is skipped with a warning so one
 damaged run does not prevent reporting other valid runs.
 Older runs without metadata are not discovered (explicit legacy directories
 produce a warning) because historical hardware and precision cannot be
 reconstructed reliably. Metadata capture failures warn without blocking the
 benchmark; applications without these configuration files keep their existing
 benchmark behavior.
+
+The HTML contains a hardware block and a Test & Software block for each selected
+run, an accelerator summary card with model-stage precision, a KPI comparison
+table, five comparison charts (stream density, package power, power per stream,
+utilisation and latency percentiles), and per-stream FPS progression heatmaps.
+`--output comparison.html` or `--output comparison.md` writes both formats with
+that basename. Missing chart values are labelled `N/A`, never drawn as zero.
+
+New run metadata captures the hostname, system vendor/model, CPU identity,
+physical core and logical CPU counts, total RAM, and available GPU/NPU names.
+Metadata also saves per-camera target FPS, the effective pass tolerance ratio,
+consecutive pass/fail counts, warmup period and measurement interval. The
+Test & Software block displays the throughput threshold (target times tolerance)
+and the run acceptance criterion; there is no separate pass-rule banner.
+Unavailable host fields are `N/A`. Rendering never discovers hardware from the
+report-generation host or invents missing settings for historical runs.
+
+Each new measurement interval appends a `measurement_interval` record to
+`stream_density_latency_samples.jsonl`, with container, lane count, interval ID,
+status, duration and actual per-stream FPS. Inconclusive intervals have no FPS
+values. Heatmaps retain repeated lane counts and retries in recorded order;
+grey cells mean no measurement, not zero FPS. Historical runs without these
+records display an explicit missing-history message instead of reconstructed
+or fabricated heatmaps.
 
 ## Smart Kiosk Voice-to-Voice (V2V) Benchmark
 
