@@ -88,6 +88,29 @@ def gpu_metric_devices():
     return mapping
 
 
+def camera_targets(camera):
+    targets = {}
+    for index, entry in enumerate(camera.get("lane_config", {}).get("cameras", [])):
+        value = next((entry[key] for key in ("targetFps", "fps")
+                      if number(entry.get(key)) is not None and number(entry[key]) > 0), None)
+        targets[str(entry.get("camera_id", f"camera_{index + 1}"))] = value
+    return targets
+
+
+def effective_targets(targets, settings, environment, fallback=None):
+    explicit = settings.get("target_fps") or []
+    containers = settings.get("container_names") or []
+    if explicit:
+        if len(explicit) == 1:
+            return {name: explicit[0] for name in targets}
+        return {f"{container} / {name}": target
+                for container, target in zip(containers, explicit) for name in targets}
+    override = number(environment.get("TARGET_FPS"))
+    if override is not None and override > 0:
+        return {name: override for name in targets}
+    return {name: value if value is not None else fallback for name, value in targets.items()}
+
+
 def capture_run(results_dir, repo_root, env, settings):
     """Snapshot inputs before execution; never infer historical data from the host."""
     configs = Path(repo_root) / "configs"
@@ -106,11 +129,9 @@ def capture_run(results_dir, repo_root, env, settings):
             ("consecutive_fails", stream_density.CONSECUTIVE_FAIL_WINDOWS_KEY,
              stream_density.DEFAULT_CONSECUTIVE_FAIL_WINDOWS, int)):
         settings[key] = convert(env.get(environment_key) or default)
-    settings["camera_target_fps"] = {
-        str(entry.get("camera_id", f"camera_{index + 1}")):
-            entry.get("targetFps", entry.get("fps"))
-        for index, entry in enumerate(camera.get("lane_config", {}).get("cameras", []))
-    }
+    settings["camera_target_fps"] = camera_targets(camera)
+    settings["effective_target_fps"] = effective_targets(
+        settings["camera_target_fps"], settings, env, stream_density.DEFAULT_TARGET_FPS)
     devices = sorted({str(device).upper()
                       for entries in stages.values() for stage in entries
                       for device in (stage.get("device"), stage.get("vlm_device"))
@@ -469,16 +490,13 @@ def labelled(values):
 def test_configuration(metadata):
     settings = metadata["settings"]
     environment = settings.get("environment", {})
-    targets = settings.get("camera_target_fps") or {
-        str(camera.get("camera_id", f"camera_{index + 1}")):
-            camera.get("targetFps", camera.get("fps"))
-        for index, camera in enumerate(metadata["camera_config"].get(
-            "lane_config", {}).get("cameras", []))
-    }
+    targets = settings.get("camera_target_fps") or camera_targets(metadata["camera_config"])
+    resolved = settings.get("effective_target_fps") or effective_targets(
+        targets, settings, environment)
     ratio = number(settings.get("pass_tolerance_ratio", environment.get("PASS_TOLERANCE_RATIO")))
     thresholds = {name: value * ratio if ratio is not None and
                   (value := number(raw)) is not None else None
-                  for name, raw in targets.items()}
+                  for name, raw in resolved.items()}
 
     def compact(values):
         unique = {cell(value) for value in values.values()}
@@ -487,6 +505,7 @@ def test_configuration(metadata):
     passes = settings.get("consecutive_passes", environment.get("CONSECUTIVE_PASS_WINDOWS"))
     return {
         "Target FPS per camera": compact(targets),
+        "Effective target FPS per camera": compact(resolved),
         "Throughput threshold (FPS)": compact(thresholds),
         "Pass tolerance ratio": ratio,
         "Warmup period (s)": settings.get("init_duration"),

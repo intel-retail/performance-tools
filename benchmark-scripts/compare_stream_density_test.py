@@ -178,6 +178,29 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(settings["Throughput threshold (FPS)"], "cam1: 13.50; cam2: 27.00")
         self.assertEqual(settings["Run acceptance criterion"], "3 consecutive passes")
 
+    def test_effective_targets_follow_camera_fallback_and_override_precedence(self):
+        _, metadata = self.make_run("override-targets")
+        metadata["camera_config"]["lane_config"]["cameras"] = [
+            {"camera_id": "cam1", "targetFps": 0, "fps": 15},
+            {"camera_id": "cam2", "targetFps": "bad", "fps": 20},
+            {"camera_id": "cam3", "targetFps": None, "fps": 25}]
+        targets = report.camera_targets(metadata["camera_config"])
+        self.assertEqual(targets, {"cam1": 15, "cam2": 20, "cam3": 25})
+        metadata["settings"] = {
+            "pass_tolerance_ratio": 0.9, "environment": {"TARGET_FPS": "10"}}
+        display = report.test_configuration(metadata)
+        self.assertEqual(display["Effective target FPS per camera"], "10.00")
+        self.assertEqual(display["Throughput threshold (FPS)"], "9.00")
+        metadata["settings"]["target_fps"] = [30]
+        self.assertEqual(report.test_configuration(metadata)["Throughput threshold (FPS)"], "27.00")
+        metadata["settings"].update(target_fps=[30, 40], container_names=["gst0", "gst1"])
+        resolved = report.effective_targets(targets, metadata["settings"], {"TARGET_FPS": "10"})
+        self.assertEqual(resolved["gst0 / cam1"], 30)
+        self.assertEqual(resolved["gst1 / cam3"], 40)
+        metadata["settings"] = {"pass_tolerance_ratio": 0.9, "environment": {"TARGET_FPS": "-1"}}
+        self.assertEqual(report.test_configuration(metadata)["Effective target FPS per camera"],
+                         "cam1: 15; cam2: 20; cam3: 25")
+
     def test_html_is_self_contained_escaped_and_contains_five_charts_and_heatmap(self):
         import base64
         from html.parser import HTMLParser

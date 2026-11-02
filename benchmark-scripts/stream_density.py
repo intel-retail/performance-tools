@@ -1183,6 +1183,7 @@ def run_pipeline_iterations(
         # without ready logs, counts as a failing interval.
         invalid_reason = None
         if logs_ready:
+            hardware_start = snapshot_hardware_logs(results_dir)
             (window_start_offsets, window_end_offsets,
              actual_measurement_seconds, sample_counts,
              enough_samples) = collect_measurement_window(

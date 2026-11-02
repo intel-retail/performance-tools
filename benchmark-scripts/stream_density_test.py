@@ -1115,6 +1115,34 @@ class Testing(unittest.TestCase):
     PASS_FPS = (15.0, 15.0, {'pipeline_stream0': 15.0}, {})
     FAIL_FPS = (10.0, 10.0, {'pipeline_stream0': 10.0}, {})
 
+    def test_hardware_snapshots_bracket_each_collected_interval(self):
+        events = []
+
+        def snapshot(results_dir):
+            boundary = {"boundary": len(events)}
+            events.append(boundary)
+            return boundary
+
+        class Intervals(list):
+            def __iter__(self):
+                for interval in super().__iter__():
+                    events.append("measurement")
+                    yield interval
+
+        with patch('stream_density.snapshot_hardware_logs', side_effect=snapshot), \
+                patch('stream_density.window_hardware_metrics', return_value={}) as hardware, \
+                patch('stream_density.save_measurement_interval'):
+            result, _, _, _ = self._run_iterations_with_windows(
+                Intervals([self.ENOUGH] * 3),
+                [self.PASS_FPS, self.FAIL_FPS, self.PASS_FPS])
+        self.assertEqual(result[1], stream_density.STATUS_PASS)
+        self.assertEqual(len(events), 9)
+        for offset in range(0, len(events), 3):
+            self.assertIsInstance(events[offset], dict)
+            self.assertEqual(events[offset + 1], "measurement")
+            self.assertIsInstance(events[offset + 2], dict)
+        hardware.assert_called_once_with(events[-3], events[-1])
+
     def test_inconclusive_steps_down_by_one_to_last_passing_density(self):
         # Pass at 1, jump to 4; 4 is inconclusive twice, 3 and 2 fail twice,
         # then the last passing density (1) is retested and needs two passes.

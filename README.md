@@ -141,6 +141,9 @@ Metadata also saves per-camera target FPS, the effective pass tolerance ratio,
 consecutive pass/fail counts, warmup period and measurement interval. The
 Test & Software block displays the throughput threshold (target times tolerance)
 and the run acceptance criterion; there is no separate pass-rule banner.
+Configured camera targets use a valid positive `targetFps`, falling back to
+`fps`. Effective targets are displayed separately when CLI or `TARGET_FPS`
+environment overrides apply; throughput thresholds use those effective targets.
 Unavailable host fields are `N/A`. Rendering never discovers hardware from the
 report-generation host or invents missing settings for historical runs.
 
