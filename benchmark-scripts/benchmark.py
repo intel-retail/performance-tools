@@ -14,6 +14,7 @@ import csv
 import json
 import stream_density
 from device_validation import validate_target_device, resolve_target_device_default
+from windows_metrics import collector as windows_collector
 
 
 def parse_args(print=False):
@@ -139,6 +140,8 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
         returncode: Popen return code
     '''
     try:
+        if env_vars.get('WSL2', '').lower() == 'true' and command in ('down', 'stop'):
+            windows_collector.stop()
         files = " -f ".join(compose_files)
         compose_string = ("docker compose %s -f %s %s %s" %
                           (compose_pre_args, files, command,
@@ -151,6 +154,8 @@ def docker_compose_containers(command, compose_files=[], compose_pre_args="",
                              env=env_vars)  # nosec B404, B603
         stdout, stderr = p.communicate()
 
+        if env_vars.get('WSL2', '').lower() == 'true' and command == 'up' and p.returncode == 0:
+            windows_collector.start(env_vars)
         if p.returncode and stderr:
             print("Error bringing %s the compose files: %s" %
                   (command, stderr))
@@ -231,12 +236,14 @@ def main():
         benchmark_compose = os.path.abspath(os.path.join(
             os.curdir, '..', 'docker', 'docker-compose.yaml'))
     
-    # Replace the hardcoded compose file addition
-    compose_files.append(benchmark_compose)
+    if os.environ.get('WSL2', '').lower() != 'true':
+        compose_files.append(benchmark_compose)
 
     env_vars = os.environ.copy()
     env_vars["log_dir"] = results_dir
     env_vars["RESULTS_DIR"] = results_dir
+    if env_vars.get('WSL2', '').lower() == 'true':
+        env_vars["INIT_DURATION"] = str(my_args.init_duration)
     env_vars["DEVICE"] = my_args.target_device
     retail_use_case_root = os.path.abspath(my_args.retail_use_case_root)
     env_vars["RETAIL_USE_CASE_ROOT"] = retail_use_case_root
@@ -282,9 +289,13 @@ def main():
         stream_density.clean_up_pipeline_logs(results_dir)
         if my_args.pipelines > 0:
             env_vars["PIPELINE_COUNT"] = str(my_args.pipelines)
-        docker_compose_containers("up", compose_files=compose_files,
-                                  compose_post_args="-d",
-                                  env_vars=env_vars)
+        _, _, returncode = docker_compose_containers(
+            "up", compose_files=compose_files,
+            compose_post_args="-d", env_vars=env_vars)
+        if returncode:
+            docker_compose_containers(
+                "down", compose_files=compose_files, env_vars=env_vars)
+            raise SystemExit(returncode)
         print("Waiting for %ds init duration to complete" % my_args.init_duration)
         time.sleep(my_args.init_duration)
 
