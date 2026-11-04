@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -150,6 +151,10 @@ class ComparisonTest(unittest.TestCase):
         with patch.object(report.platform, "node", return_value="lab-host"), \
                 patch.object(report.subprocess, "run", side_effect=FileNotFoundError), \
                 patch.object(report, "gpu_metric_devices", return_value={}), \
+                patch.object(report.platform, "machine", return_value="x86_64"), \
+                patch.object(report, "read_npu_driver", return_value="intel_vpu v1.2.3"), \
+                patch.object(report, "read_memory_details", return_value={
+                    "mem_channels": "2-channel", "mem_per_dimm": "32 GB", "mem_speed": "5600 MT/s"}), \
                 patch.object(report, "read_power_limits", return_value={
                     "constraint_0_power_limit_uw": 30000000,
                     "constraint_1_power_limit_uw": 64000000}), \
@@ -162,6 +167,13 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(metadata["hardware"]["cpu_cores"], 8)
         self.assertEqual(metadata["hardware"]["logical_cpus"], 16)
         self.assertEqual(metadata["hardware"]["ram_bytes"], 32 * 1024 ** 3)
+        self.assertEqual(metadata["hardware"]["arch"], "x86_64")
+        self.assertEqual(metadata["hardware"]["npu_driver"], "intel_vpu v1.2.3")
+        self.assertEqual(metadata["hardware"]["mem_speed"], "5600 MT/s")
+        self.assertEqual(metadata["hardware"]["mem_per_dimm"], "32 GB")
+        self.assertEqual(metadata["hardware"]["mem_channels"], "2-channel")
+        saved = json.loads((path / report.METADATA_FILE).read_text())
+        self.assertEqual(saved["hardware"], metadata["hardware"])
         self.assertIn("GPU.0: Test GPU.0", metadata["hardware"]["gpu_names"])
         self.assertIn("NPU: Test NPU", metadata["hardware"]["npu_names"])
         self.assertEqual(metadata["hardware"]["constraint_0_power_limit_uw"], 30000000)
@@ -170,6 +182,47 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(metadata["settings"]["consecutive_passes"], 2)
         self.assertEqual(metadata["settings"]["consecutive_fails"], 2)
         self.assertEqual(report.test_configuration(metadata)["Throughput threshold (FPS)"], "28.50")
+
+    def test_memory_dmi_ignores_empty_slots_and_counts_channels_not_dimms(self):
+        blocks = []
+        for locator, size in (("ChannelA-DIMM0", "32 GB"), ("ChannelA-DIMM1", "16 GB"),
+                              ("ChannelB-DIMM0", "32 GB"), ("ChannelB-DIMM1", "No Module Installed")):
+            blocks.append(f'Memory Device\n\tSize: {size}\n\tLocator: {locator}\n'
+                          '\tConfigured Memory Speed: 5600 MT/s\n')
+        with patch.object(report.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout="\n".join(blocks))) as launch:
+            result = report.read_memory_details(self.root / "missing")
+        self.assertEqual(result["mem_channels"], "2-channel")
+        self.assertEqual(len(result["memory_devices"]), 3)
+        self.assertEqual(result["mem_per_dimm"], "16 GB; 32 GB")
+        self.assertEqual(result["mem_speed"], "5600 MT/s")
+        self.assertEqual(launch.call_args.args[0], ["dmidecode", "--type", "17"])
+
+    def test_memory_edac_fallback_and_unavailable_sources(self):
+        dimm = self.root / "edac" / "mc0" / "dimm0"
+        dimm.mkdir(parents=True)
+        (dimm / "size").write_text("8192")
+        (dimm / "dimm_location").write_text("channel 0 slot 0")
+        with patch.object(report.subprocess, "run", side_effect=FileNotFoundError):
+            result = report.read_memory_details(self.root / "edac")
+            absent = report.read_memory_details(self.root / "missing")
+        self.assertEqual(result["mem_channels"], "1-channel (EDAC logical)")
+        self.assertEqual(result["mem_per_dimm"], "8 GB (EDAC device)")
+        self.assertIsNone(result["mem_speed"])
+        self.assertEqual(absent["memory_devices"], [])
+        self.assertIsNone(absent["mem_channels"])
+        with patch.object(report.subprocess, "run", side_effect=report.subprocess.TimeoutExpired("dmidecode", 10)):
+            self.assertIsNone(report.read_memory_details(self.root / "missing")["mem_speed"])
+
+    def test_npu_driver_version_and_builtin_module_fallback(self):
+        module = self.root / "intel_vpu"
+        self.assertIsNone(report.read_npu_driver(module))
+        module.mkdir()
+        with patch.object(report.platform, "release", return_value="6.8-test"):
+            self.assertEqual(report.read_npu_driver(module),
+                             "intel_vpu (kernel 6.8-test; module version unavailable)")
+        (module / "version").write_text("1.0.0 6.8-test\n")
+        self.assertEqual(report.read_npu_driver(module), "intel_vpu v1.0.0")
 
     def test_power_limits_are_read_and_displayed_in_watts(self):
         path, metadata = self.make_run("power-limits")
@@ -233,6 +286,8 @@ class ComparisonTest(unittest.TestCase):
         metadata["hardware"]["gpu_names"] = ["Test GPU"]
         records = [json.loads(line) for line in (path / report.SAMPLES_FILE).read_text().splitlines()]
         records[0]["hardware_metrics"]["GPU_1 GPU Power (W)"] = 12.5
+        records[0]["hardware_metrics"]["GPU_1 Compute[CCS] Utilization %"] = 75
+        (path / "qmassa-parsed.json").write_text("[]")
         (path / report.SAMPLES_FILE).write_text(
             "\n".join(json.dumps(record) for record in records) + "\n")
         stream_density.save_measurement_interval(
@@ -240,12 +295,19 @@ class ComparisonTest(unittest.TestCase):
         document = generate_html_report([(path, metadata)])
         self.assertIn("&lt;script&gt;", document)
         self.assertNotIn("<script>", document)
-        self.assertNotIn("threshold-note", document)
+        self.assertNotIn('<div class="threshold-note">', document)
         self.assertNotIn("Avg latency", document)
         for title in ("Hardware", "Test &amp; Software", "Stream Density Summary",
-                      "KPI Comparison Table", "Highest per-stream p95",
-                      "GPU power reported by qmassa (W)", "Per-Stream FPS Heatmaps"):
+                      "KPI Comparison Table", "FPS/stream",
+                      "GPU power (reported source)", "Stream Density FPS Progression Heatmaps",
+                      "Per-Frame Latency Percentiles", "stream density (streams)"):
             self.assertIn(title, document)
+        self.assertIn("Pooled latency", document)
+        self.assertNotIn("Mean p90", document)
+        self.assertNotIn("30% warm-up discarded", document)
+        self.assertNotIn("Recorded value", document)
+        self.assertIn("#f28e2b", document)
+        self.assertIn("qmassa: GPU_1 GPU Power (W): 12.50", document)
 
         class Images(HTMLParser):
             def __init__(self):
@@ -272,13 +334,279 @@ class ComparisonTest(unittest.TestCase):
         self.assertTrue(output.exists())
         self.assertTrue(output.with_suffix(".md").exists())
 
+    def test_html_matches_reference_kpi_rows_and_section_order(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("reference")
+        document = generate_html_report([(path, metadata)])
+        self.assertEqual(re.findall(r"<strong>(.*?)</strong>", document), [
+            "Stream density", "Throughput", "FPS/stream", "Pooled latency p50",
+            "Pooled latency p95", "Pooled latency p99", "Highest per-stream p95",
+            "Avg CPU Utilization", "Avg NPU Utilization",
+            "Avg GPU Engine Utilization", "GPU power (reported source)",
+            "Avg Processor Package Power", "Power/stream (source scope)",
+            "Utilisation (source scope)", "Sweep status", "Last passing lanes (not confirmed)",
+        ])
+        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", document), [
+            "Stream Density Summary", "KPI Comparison Table", "Comparison Charts",
+            "Stream Density FPS Progression Heatmaps",
+        ])
+        for label in ("Host", "CPU", "CPU Cores", "Total RAM", "GPU", "NPU",
+                      "PL1 / PL2", "OS", "Kernel", "Target FPS per camera",
+                      "Throughput threshold (FPS)", "Test configuration", "Archive", "Generated",
+                      "System vendor", "System model", "Warmup period (s)",
+                      "Measurement interval (s)", "Run acceptance criterion", "Run duration", "Source run"):
+            self.assertIn(f"<b>{label}:</b>", document)
+
+    def test_reference_metrics_do_not_relabel_average_fps_or_gpu_power(self):
+        from stream_density_report_html import presentation_metrics
+
+        path, metadata = self.make_run("reference-metrics")
+        result = presentation_metrics(path, metadata, report.run_metrics(path, metadata))
+        self.assertEqual(result["latency_p50"], 20)
+        self.assertEqual(result["proc_power_w"], 20)
+        self.assertEqual(result["power_per_stream_w"], 10)
+        self.assertEqual(result["cpu_util_pct"], 50)
+        self.assertEqual(result["avg_fps"], 30)
+        self.assertEqual(result["gpu_power_reported"], "N/A")
+        sample_path = path / report.SAMPLES_FILE
+        sample_path.write_text(sample_path.read_text().replace('"pass"', '"fail"'))
+        result = presentation_metrics(path, metadata, report.run_metrics(path, metadata))
+        for key in ("stream_density", "total_fps", "avg_fps", "latency_p50",
+                    "proc_power_w", "power_per_stream_w"):
+            self.assertIsNone(result[key])
+
+    def test_reference_chart_colors_and_dimensions(self):
+        import asc_benchmark_report as presentation
+        from matplotlib.figure import Figure
+        from matplotlib.colors import to_rgba
+        from stream_density_report_html import hardware_target
+
+        for target, color in (("CPU", "#4e79a7"), ("GPU.0", "#f28e2b"),
+                              ("NPU", "#59a14f"), ("CPU+GPU", "#b07aa1"),
+                              ("HETERO:GPU,CPU", "#b07aa1")):
+            self.assertEqual(presentation.HW_COLORS[hardware_target(target).lower()], color)
+        with patch.object(Figure, "savefig", autospec=True) as save:
+            presentation.plot_charts([{"hw": "CPU", "stream_density": 2},
+                                      {"hw": "GPU", "stream_density": 4}], str(self.root))
+        self.assertEqual(save.call_count, 1)
+        figure = save.call_args.args[0]
+        self.assertEqual(list(figure.get_size_inches()), [6, 3.5])
+        self.assertEqual(figure.axes[0].get_xlabel(), "Streams")
+        self.assertTrue(figure.axes[0].yaxis_inverted())
+        self.assertEqual(figure.axes[0].get_title(),
+                         "Stream density (streams) @ Target FPS (higher is better)")
+        self.assertEqual([bar.get_facecolor() for bar in figure.axes[0].patches],
+                         [to_rgba("#4e79a7"), to_rgba("#f28e2b")])
+        self.assertEqual(save.call_args.kwargs, {"dpi": 150})
+
+    def test_missing_measurements_are_not_plotted_as_zero(self):
+        import asc_benchmark_report as presentation
+        from matplotlib.figure import Figure
+
+        with patch.object(Figure, "savefig", autospec=True) as save:
+            presentation.plot_charts([
+                {"hw": "CPU", "stream_density": 2, "proc_power_w": None},
+                {"hw": "GPU", "stream_density": 4, "proc_power_w": 20},
+            ], str(self.root))
+        figure = next(call.args[0] for call in save.call_args_list
+                      if str(call.args[1]).endswith("compare_power.png"))
+        bars = figure.axes[0].patches
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0].get_width(), 20)
+        self.assertEqual(bars[0].get_y() + bars[0].get_height() / 2, 1)
+
+    def test_gpu_run_keeps_interval_cpu_npu_and_only_matching_gpu(self):
+        from stream_density_report_html import presentation_metrics, system_info
+
+        path, metadata = self.make_run("all-interval-devices", "GPU.0")
+        metadata["gpu_metric_devices"] = {"GPU.0": "GPU_1"}
+        metadata["hardware"].update(cpu_cores=16, logical_cpus=22)
+        sample_path = path / report.SAMPLES_FILE
+        records = [json.loads(line) for line in sample_path.read_text().splitlines()]
+        records[0]["hardware_metrics"].update({
+            "CPU Utilization %": 20.68, "NPU Utilization %": 0,
+            "GPU_0 Compute[CCS] Utilization %": 99,
+            "GPU_1 Compute[CCS] Utilization %": 56.63})
+        sample_path.write_text("\n".join(json.dumps(record) for record in records))
+        metrics = report.run_metrics(path, metadata)
+        result = presentation_metrics(path, metadata, metrics)
+        self.assertEqual(result["cpu_util_pct"], 20.68)
+        self.assertEqual(result["npu_util_pct"], 0)
+        self.assertEqual(result["gpu_engine_pct"], 56.63)
+        self.assertNotIn("GPU_0", result["utilisation_scope"])
+        self.assertEqual(system_info(metadata)["cpu_cores"], "16")
+        self.assertEqual(system_info(metadata)["logical_cpus"], "22")
+
+    def test_reference_css_and_metadata_markup(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("css")
+        metadata["settings"]["environment"] = {"CAMERA_STREAM": "camera.json"}
+        metadata["hardware"]["arch"] = "x86_64"
+        document = generate_html_report([(path, metadata)])
+        expected = (Path(__file__).parent / "test_src" / "asc_reference_report.css").read_text()
+        actual = re.search(r"<style>(.*?)</style>", document, re.DOTALL).group(1)
+        self.assertEqual(re.sub(r"\s+", "", actual), re.sub(r"\s+", "", expected))
+        self.assertIn('<b>Test configuration:</b></td><td>Checkout</td>', document)
+        self.assertIn('<td><code>' + self.root.name + '</code></td>', document)
+        self.assertIn('6.8 (x86_64)', document)
+        self.assertIn('<span style="color:#888;font-size:12px;">(N/A)</span>', document)
+        self.assertNotIn('algorithm internal', document)
+        self.assertIn('<footer>Generated by compare_stream_density.py &nbsp;|&nbsp; Intel Corporation</footer>', document)
+        self.assertNotIn('table-scroll', document)
+
+    def test_reference_heatmap_keeps_sparse_ids_and_last_event_per_count(self):
+        import asc_benchmark_report as presentation
+        from matplotlib.figure import Figure
+        import numpy as np
+
+        steps = [
+            {"n_streams": 2, "fps_map": {2: 12, 10: 13}},
+            {"n_streams": 1, "fps_map": {2: 15}},
+            {"n_streams": 2, "fps_map": {2: 14, 10: 14.5}},
+        ]
+        with patch.object(Figure, "savefig", autospec=True) as save:
+            self.assertTrue(presentation.plot_fps_heatmap(
+                steps, "cpu", str(self.root / "heatmap.png"), target_fps=15))
+        figure = save.call_args.args[0]
+        axis = figure.axes[0]
+        plotted = axis.images[0]
+        matrix = plotted.get_array()
+        self.assertEqual(matrix.shape, (11, 2))
+        self.assertEqual(matrix[2, 0], 15)
+        self.assertEqual(matrix[2, 1], 14)
+        self.assertEqual(matrix[10, 1], 14.5)
+        self.assertTrue(np.ma.is_masked(matrix[0, 0]))
+        self.assertEqual([label.get_text() for label in axis.get_xticklabels()], ["1", "2"])
+        self.assertEqual(plotted.get_clim(), (15 * 0.945 * 0.85, 15))
+        self.assertEqual(list(figure.axes[1].lines[0].get_ydata()), [1, 1])
+        self.assertEqual(save.call_args.kwargs, {"dpi": 150, "bbox_inches": "tight"})
+
+    def test_progression_adapter_preserves_numeric_stream_ids(self):
+        import stream_density
+        from stream_density_report_html import fps_progression
+
+        path, _ = self.make_run("sparse-streams")
+        stream_density.save_measurement_interval(
+            path, "gst", 2, 1, "pass", {"pipeline_stream2": 14, "pipeline_stream10": 15}, 100)
+        self.assertEqual(fps_progression(path), [
+            {"n_streams": 2, "fps_map": {2: 14, 10: 15}, "status": "pass"},
+        ])
+
+    def test_reference_does_not_draw_empty_charts_or_unconfirmed_heatmaps(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("empty")
+        sample_path = path / report.SAMPLES_FILE
+        sample_path.write_text(sample_path.read_text().replace('"pass"', '"fail"'))
+        document = generate_html_report([(path, metadata)])
+        self.assertNotIn('<img ', document)
+
+    def test_report_supports_recorded_per_camera_targets_and_thresholds(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("different-threshold")
+        metadata["settings"]["pass_tolerance_ratio"] = 0.9
+        metadata["settings"]["effective_target_fps"] = {"cam1": 15, "cam2": 30}
+        document = generate_html_report([(path, metadata)])
+        self.assertIn("cam1: 15; cam2: 30", document)
+        self.assertIn("cam1: 13.50; cam2: 27.00", document)
+        self.assertNotIn('95% of target', document)
+
     def test_old_html_runs_show_missing_metadata_and_history(self):
         from stream_density_report_html import generate_html_report
 
         path, metadata = self.make_run("legacy")
         document = generate_html_report([(path, metadata)])
-        self.assertIn("No measurement interval history recorded", document)
+        self.assertNotIn("No measurement interval history recorded", document)
         self.assertIn("N/A", document)
+
+    def test_issue_249_inconclusive_status_and_source_runs(self):
+        from stream_density_report_html import generate_html_report
+
+        cpu_path, cpu = self.make_run("cpu-source")
+        gpu_path, gpu = self.make_run("gpu-source", "GPU+NPU")
+        sample_path = gpu_path / report.SAMPLES_FILE
+        sample_path.write_text(sample_path.read_text().replace('"pass"', '"inconclusive"'))
+        gpu["settings"].update(init_duration=12, measurement_window_seconds=80,
+                               pass_tolerance_ratio=0.9, consecutive_passes=3)
+        gpu["hardware"].update(system_vendor="Test Vendor", system_model="Test Model")
+        document = generate_html_report([(cpu_path, cpu), (gpu_path, gpu)])
+        self.assertIn('Sweep status: <b>pass</b>', document)
+        self.assertIn('Sweep status: <b>inconclusive</b>', document)
+        self.assertIn('Last passing lanes: <b>gst: 2</b> (not confirmed)', document)
+        self.assertIn('style="color:#b07aa1;">GPU+NPU</h3>', document)
+        self.assertIn('style="color:#b07aa1;">N/A</div>', document)
+        for expected in (str(cpu_path), str(gpu_path), "Checkout", "Test Vendor", "Test Model",
+                         "3 consecutive passes", "27.00", "INT8"):
+            self.assertIn(expected, document)
+        self.assertEqual(document.count('<th>CPU</th>'), 1)
+        self.assertEqual(document.count('<th>GPU+NPU</th>'), 1)
+
+    def test_issue_249_uses_percentiles_and_interval_only_metrics(self):
+        from stream_density_report_html import presentation_metrics, generate_html_report
+
+        path, metadata = self.make_run("interval-only")
+        (path / "metrics.csv").write_text(
+            'System Latency p50 (ms),11\nSystem Latency p95 (ms),91\n'
+            'System Latency p99 (ms),99\nCPU Utilization %,99\nS0 Power Draw W,999\n')
+        result = presentation_metrics(path, metadata, report.run_metrics(path, metadata))
+        self.assertEqual([result[key] for key in ("latency_p50", "latency_p95", "latency_p99")],
+                         [11, 91, 99])
+        self.assertEqual(result["highest_stream_p95"], 30)
+        self.assertEqual(result["cpu_util_pct"], 50)
+        self.assertEqual(result["proc_power_w"], 20)
+        sample_path = path / report.SAMPLES_FILE
+        records = [json.loads(line) for line in sample_path.read_text().splitlines()]
+        records[0]["hardware_metrics"] = {}
+        sample_path.write_text("\n".join(json.dumps(record) for record in records))
+        result = presentation_metrics(path, metadata, report.run_metrics(path, metadata))
+        self.assertIsNone(result["cpu_util_pct"])
+        self.assertIsNone(result["proc_power_w"])
+        self.assertEqual(result["utilisation_scope"], "N/A")
+        document = generate_html_report([(path, metadata)])
+        self.assertNotIn("999.0", document)
+        self.assertIn("Pooled latency p95", document)
+
+    def test_issue_249_mixed_camera_targets_still_render_heatmaps(self):
+        import stream_density
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("mixed-targets")
+        metadata["settings"].update(
+            effective_target_fps={"cam1": 15, "cam2": 30}, pass_tolerance_ratio=0.9)
+        stream_density.save_measurement_interval(
+            path, "gst", 2, 1, "pass", {"pipeline_stream0": 15, "pipeline_stream1": 30}, 100)
+        document = generate_html_report([(path, metadata)])
+        self.assertIn('alt="CPU \u2014 Stream FPS Progression"', document)
+        self.assertIn("cam1: 13.50; cam2: 27.00", document)
+
+    def test_issue_249_configuration_description_is_escaped(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("description")
+        metadata["camera_config"]["_about"] = {
+            "name": "Checkout", "summary": '<script>alert("description")</script>'}
+        document = generate_html_report([(path, metadata)])
+        self.assertIn("&lt;script&gt;", document)
+        self.assertNotIn("<script>", document)
+        self.assertLess(document.index("<b>Summary:</b>"), document.index('<div class="meta">'))
+
+    def test_test_configuration_uses_saved_name_or_filename_not_hash(self):
+        from stream_density_report_html import generate_html_report
+
+        path, metadata = self.make_run("configuration-name")
+        metadata["camera_config"]["_about"] = {"name": "Saved checkout name"}
+        document = generate_html_report([(path, metadata)])
+        self.assertIn('<b>Test configuration:</b></td><td>Saved checkout name</td>', document)
+        metadata["camera_config"]["_about"] = {}
+        metadata["settings"]["environment"] = {"CAMERA_STREAM": "camera.json"}
+        document = generate_html_report([(path, metadata)])
+        self.assertIn('<b>Test configuration:</b></td><td>camera.json</td>', document)
+        metadata["settings"]["environment"] = {}
+        document = generate_html_report([(path, metadata)])
+        self.assertIn('<b>Test configuration:</b></td><td>N/A</td>', document)
 
     def test_cli_discovers_runs_without_positional_arguments(self):
         self.make_run("cpu")

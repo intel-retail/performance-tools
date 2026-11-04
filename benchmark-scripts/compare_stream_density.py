@@ -100,6 +100,79 @@ def read_power_limits(powercap_dir=Path("/sys/class/powercap/intel-rapl:0")):
     return limits
 
 
+def read_memory_details(edac_root=Path("/sys/devices/system/edac/mc")):
+    devices = []
+    source = None
+    try:
+        result = subprocess.run(["dmidecode", "--type", "17"], capture_output=True,
+                                text=True, check=False, timeout=10)
+        output = result.stdout if result.returncode == 0 else ""
+        if output:
+            for block in re.split(r"\n\s*\n", output):
+                fields = dict(line.strip().split(":", 1) for line in block.splitlines()
+                              if ":" in line)
+                fields = {key: value.strip() for key, value in fields.items()}
+                size = fields.get("Size", "")
+                if not re.fullmatch(r"\d+\s+(?:MB|GB|TB)", size):
+                    continue
+                speed = fields.get("Configured Memory Speed", fields.get("Configured Clock Speed", ""))
+                if not re.fullmatch(r"\d+\s+(?:MT/s|MHz)", speed):
+                    speed = None
+                devices.append({"size": size, "speed": speed,
+                                "locator": fields.get("Locator"),
+                                "bank_locator": fields.get("Bank Locator")})
+            if devices:
+                source = "dmidecode type 17"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    channels = set()
+    if devices:
+        for device in devices:
+            location = f'{device.get("bank_locator") or ""} {device.get("locator") or ""}'
+            channel = re.search(r"\bchannel[\s_-]*([a-z0-9]+)\b", location, re.IGNORECASE)
+            if channel:
+                socket = re.search(r"\b(?:cpu|p|socket)[\s_-]*(\d+)\b", location, re.IGNORECASE)
+                channels.add((socket.group(1) if socket else "0", channel.group(1).upper()))
+    else:
+        for dimm in sorted(Path(edac_root).glob("mc*/dimm*")):
+            try:
+                size_mb = int((dimm / "size").read_text().strip())
+                if size_mb <= 0:
+                    continue
+                location = (dimm / "dimm_location").read_text().strip()
+                channel = re.search(r"\bchannel\s+(\d+)\b", location)
+                if channel:
+                    channels.add((dimm.parent.name, channel.group(1)))
+                size = f"{size_mb // 1024} GB" if size_mb % 1024 == 0 else f"{size_mb} MB"
+                devices.append({"size": size, "speed": None,
+                                "locator": location, "bank_locator": dimm.parent.name})
+            except (OSError, ValueError):
+                continue
+        if devices:
+            source = "EDAC sysfs"
+    sizes = sorted({device["size"] for device in devices})
+    speeds = sorted({device["speed"] for device in devices if device["speed"]})
+    edac = source == "EDAC sysfs"
+    return {"memory_devices": devices, "memory_info_source": source,
+            "mem_channels": f"{len(channels)}-channel" + (" (EDAC logical)" if edac else "")
+            if channels else None,
+            "mem_per_dimm": "; ".join(sizes) + (" (EDAC device)" if edac else "") if sizes else None,
+            "mem_speed": "; ".join(speeds) or None}
+
+
+def read_npu_driver(module_root=Path("/sys/module/intel_vpu")):
+    module_root = Path(module_root)
+    try:
+        version = (module_root / "version").read_text().strip()
+        if version:
+            return f"intel_vpu v{version.split()[0]}"
+    except OSError:
+        pass
+    if module_root.is_dir():
+        return f"intel_vpu (kernel {platform.release()}; module version unavailable)"
+    return None
+
+
 def camera_targets(camera):
     targets = {}
     for index, entry in enumerate(camera.get("lane_config", {}).get("cameras", [])):
@@ -206,6 +279,9 @@ def capture_run(results_dir, repo_root, env, settings):
             "system_model": system["model"], "cpu_cores": psutil.cpu_count(logical=False),
             "logical_cpus": psutil.cpu_count(), "ram_bytes": psutil.virtual_memory().total,
             "gpu_names": accelerator_names["gpu"], "npu_names": accelerator_names["npu"],
+            "arch": platform.machine() or None,
+            "npu_driver": read_npu_driver(),
+            **read_memory_details(),
             **read_power_limits(),
         },
         "gpu_metric_devices": gpu_metric_devices(),
@@ -444,6 +520,7 @@ def run_metrics(path, metadata):
     gpu_power = {}
     package_power = {}
     window_utilisation = {}
+    interval_utilisation = {}
     for container, record in windows.items():
         stream_count = sum(number(raw) is not None and number(raw) > 0
                            for raw in record.get("stream_fps", {}).values())
@@ -462,8 +539,11 @@ def run_metrics(path, metadata):
             if (("Power Draw W" in key or "GPU Power (W)" in key)
                     and ("GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices))):
                 power[label] = value / stream_count
-            if "Utilization %" in key and "Memory" not in key and matches_accelerator(key, accelerator, gpu_devices):
-                window_utilisation[label] = value
+            if "Utilization %" in key and "Memory" not in key:
+                if "GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices):
+                    interval_utilisation[label] = value
+                if matches_accelerator(key, accelerator, gpu_devices):
+                    window_utilisation[label] = value
     utilisation = {key: value for key, raw in metrics.items()
                    if "Utilization %" in key and "Memory" not in key
                    and matches_accelerator(key, accelerator, gpu_devices)
@@ -483,6 +563,7 @@ def run_metrics(path, metadata):
         "power": power,
         "gpu_power": gpu_power,
         "package_power": package_power,
+        "interval_utilisation": interval_utilisation,
         "utilisation": window_utilisation or utilisation,
         "utilisation_period": "measurement interval" if window_utilisation else "collector period (not interval-aligned)",
     }
