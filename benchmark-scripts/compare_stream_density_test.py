@@ -150,6 +150,9 @@ class ComparisonTest(unittest.TestCase):
         with patch.object(report.platform, "node", return_value="lab-host"), \
                 patch.object(report.subprocess, "run", side_effect=FileNotFoundError), \
                 patch.object(report, "gpu_metric_devices", return_value={}), \
+                patch.object(report, "read_power_limits", return_value={
+                    "constraint_0_power_limit_uw": 30000000,
+                    "constraint_1_power_limit_uw": 64000000}), \
                 patch.dict("sys.modules", {"openvino": SimpleNamespace(Core=lambda: core)}), \
                 patch.object(psutil, "cpu_count", side_effect=lambda logical=True: 16 if logical else 8), \
                 patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(total=32 * 1024 ** 3)):
@@ -161,10 +164,25 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(metadata["hardware"]["ram_bytes"], 32 * 1024 ** 3)
         self.assertIn("GPU.0: Test GPU.0", metadata["hardware"]["gpu_names"])
         self.assertIn("NPU: Test NPU", metadata["hardware"]["npu_names"])
+        self.assertEqual(metadata["hardware"]["constraint_0_power_limit_uw"], 30000000)
+        self.assertEqual(metadata["hardware"]["constraint_1_power_limit_uw"], 64000000)
         self.assertEqual(metadata["settings"]["pass_tolerance_ratio"], 0.95)
         self.assertEqual(metadata["settings"]["consecutive_passes"], 2)
         self.assertEqual(metadata["settings"]["consecutive_fails"], 2)
         self.assertEqual(report.test_configuration(metadata)["Throughput threshold (FPS)"], "28.50")
+
+    def test_power_limits_are_read_and_displayed_in_watts(self):
+        path, metadata = self.make_run("power-limits")
+        (path / "constraint_0_power_limit_uw").write_text("30000000\n")
+        (path / "constraint_1_power_limit_uw").write_text("64000000\n")
+        self.assertEqual(report.read_power_limits(path), {
+            "constraint_0_power_limit_uw": 30000000,
+            "constraint_1_power_limit_uw": 64000000,
+        })
+        metadata["hardware"].update(report.read_power_limits(path))
+        details = report.hardware_details(metadata)
+        self.assertEqual(details["PL1 power limit (W)"], 30)
+        self.assertEqual(details["PL2 power limit (W)"], 64)
 
     def test_test_configuration_preserves_per_camera_targets_and_unknown_history(self):
         _, metadata = self.make_run("targets")
@@ -211,6 +229,12 @@ class ComparisonTest(unittest.TestCase):
 
         path, metadata = self.make_run("html")
         metadata["hardware"]["hostname"] = '<script>alert("host")</script>'
+        metadata["accelerator"] = "GPU"
+        metadata["hardware"]["gpu_names"] = ["Test GPU"]
+        records = [json.loads(line) for line in (path / report.SAMPLES_FILE).read_text().splitlines()]
+        records[0]["hardware_metrics"]["GPU_1 GPU Power (W)"] = 12.5
+        (path / report.SAMPLES_FILE).write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n")
         stream_density.save_measurement_interval(
             path, "gst", 2, 1, "pass", {"stream0": 29, "stream1": 31}, 100)
         document = generate_html_report([(path, metadata)])
@@ -219,7 +243,8 @@ class ComparisonTest(unittest.TestCase):
         self.assertNotIn("threshold-note", document)
         self.assertNotIn("Avg latency", document)
         for title in ("Hardware", "Test &amp; Software", "Stream Density Summary",
-                      "KPI Comparison Table", "Highest per-stream p95", "Per-Stream FPS Heatmaps"):
+                      "KPI Comparison Table", "Highest per-stream p95",
+                      "GPU power reported by qmassa (W)", "Per-Stream FPS Heatmaps"):
             self.assertIn(title, document)
 
         class Images(HTMLParser):

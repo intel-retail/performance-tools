@@ -88,6 +88,18 @@ def gpu_metric_devices():
     return mapping
 
 
+def read_power_limits(powercap_dir=Path("/sys/class/powercap/intel-rapl:0")):
+    limits = {}
+    for constraint in (0, 1):
+        key = f"constraint_{constraint}_power_limit_uw"
+        try:
+            value = int((Path(powercap_dir) / key).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        limits[key] = value
+    return limits
+
+
 def camera_targets(camera):
     targets = {}
     for index, entry in enumerate(camera.get("lane_config", {}).get("cameras", [])):
@@ -194,6 +206,7 @@ def capture_run(results_dir, repo_root, env, settings):
             "system_model": system["model"], "cpu_cores": psutil.cpu_count(logical=False),
             "logical_cpus": psutil.cpu_count(), "ram_bytes": psutil.virtual_memory().total,
             "gpu_names": accelerator_names["gpu"], "npu_names": accelerator_names["npu"],
+            **read_power_limits(),
         },
         "gpu_metric_devices": gpu_metric_devices(),
         "os": os_info.get("PRETTY_NAME", platform.system()),
@@ -428,6 +441,7 @@ def run_metrics(path, metadata):
     accelerator = metadata["accelerator"]
     gpu_devices = metadata.get("gpu_metric_devices", {})
     power = {}
+    gpu_power = {}
     package_power = {}
     window_utilisation = {}
     for container, record in windows.items():
@@ -442,6 +456,9 @@ def run_metrics(path, metadata):
             label = f"{container}: {key}" if len(windows) > 1 else key
             if "Power Draw W" in key and "GPU" not in key.upper():
                 package_power[label] = value
+            if ("GPU Power (W)" in key
+                    and matches_accelerator(key, accelerator, gpu_devices)):
+                gpu_power[label] = value
             if (("Power Draw W" in key or "GPU Power (W)" in key)
                     and ("GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices))):
                 power[label] = value / stream_count
@@ -464,6 +481,7 @@ def run_metrics(path, metadata):
         **percentiles,
         "highest_stream_p95": highest_p95,
         "power": power,
+        "gpu_power": gpu_power,
         "package_power": package_power,
         "utilisation": window_utilisation or utilisation,
         "utilisation_period": "measurement interval" if window_utilisation else "collector period (not interval-aligned)",
@@ -521,6 +539,8 @@ def test_configuration(metadata):
 def hardware_details(metadata):
     hardware = metadata["hardware"]
     ram = number(hardware.get("ram_bytes"))
+    pl1 = number(hardware.get("constraint_0_power_limit_uw"))
+    pl2 = number(hardware.get("constraint_1_power_limit_uw"))
     return {
         "Host": hardware.get("hostname"), "System vendor": hardware.get("system_vendor"),
         "System model": hardware.get("system_model"), "CPU": hardware["cpu"],
@@ -529,6 +549,8 @@ def hardware_details(metadata):
         "RAM (GiB)": ram / 1024 ** 3 if ram is not None else None,
         "GPU": "; ".join(hardware.get("gpu_names", [])) or None,
         "NPU": "; ".join(hardware.get("npu_names", [])) or None,
+        "PL1 power limit (W)": pl1 / 1_000_000 if pl1 is not None else None,
+        "PL2 power limit (W)": pl2 / 1_000_000 if pl2 is not None else None,
         "Accelerator identities": "; ".join(hardware.get("accelerators", [])) or None,
     }
 
