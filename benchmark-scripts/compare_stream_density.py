@@ -288,6 +288,7 @@ def capture_run(results_dir, repo_root, env, settings):
         "os": os_info.get("PRETTY_NAME", platform.system()),
         "kernel": platform.release(),
         "camera_config": camera,
+        "camera_config_file": Path(env.get("CAMERA_STREAM", "camera_to_workload.json")).name,
         "pipeline_config": pipeline,
         "settings": settings,
     }

@@ -16,7 +16,7 @@ import matplotlib.ticker as mticker
 
 FMT = {
     "stream_density":    ("Stream density",             "streams", "{:.0f}"),
-    "total_fps":         ("Throughput",                 "FPS",     "{:.2f}"),
+    "total_fps":         ("Throughput",                 "fps",     "{:.2f}"),
     "avg_fps":           ("FPS/stream",                 "fps",     "{:.2f}"),
     "latency_p50":       ("Pooled latency p50",         "ms",      "{:.1f}"),
     "latency_p95":       ("Pooled latency p95",         "ms",      "{:.1f}"),
@@ -28,7 +28,7 @@ FMT = {
     "gpu_power_reported":("GPU power (reported source)", "W",       "{}"),
     "proc_power_w":      ("Avg Processor Package Power","W",        "{:.1f}"),
     "power_scope":       ("Power/stream (source scope)", "W/stream", "{}"),
-    "utilisation_scope": ("Utilisation (source scope)", "%",        "{}"),
+    "utilisation_scope": ("Utilization (source scope)", "%",        "{}"),
     "status":            ("Sweep status",               "",         "{}"),
     "last_passing":      ("Last passing lanes (not confirmed)", "", "{}"),
 }
@@ -220,7 +220,7 @@ def plot_fps_heatmap(steps: list[dict], hw: str, out_path: str, target_fps: floa
 
     ax.axhline(y=-0.5, color="none")
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label("FPS", fontsize=9)
+    cbar.set_label("fps", fontsize=9)
     if target_fps is not None:
         cbar.ax.axhline(y=(target_fps - vmin) / (vmax - vmin), color="white",
                         linewidth=1.5, linestyle="--")
@@ -278,10 +278,10 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     hardware_html = ""
     software_html = ""
-    for kpi in all_kpis:
+    for index, kpi in enumerate(all_kpis):
         si = kpi.get("system_info", system_info)
         hardware_rows = [
-            ("Host", si["hostname"]), ("System vendor", si["system_vendor"]),
+            ("Hostname", si["hostname"]), ("System vendor", si["system_vendor"]),
             ("System model", si["system_model"]), ("CPU", si["cpu_model"]),
             ("CPU Cores", si["cpu_cores"]),
             ("Logical CPUs", si["logical_cpus"]),
@@ -293,7 +293,7 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
             ("PL1 / PL2", f'{si["pl1_w"]} &nbsp;/&nbsp; {si["pl2_w"]}'),
             ("OS", si["os_name"]), ("Kernel", f'{si["kernel"]} ({si["arch"]})'),
         ]
-        hardware_html += f'<h3>{kpi["hw"]}</h3><table>' + "".join(
+        hardware_html += f'<h3 style="color:#0071c5;">{kpi["hw"]}</h3><table>' + "".join(
             f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
             for label, value in hardware_rows) + '</table>'
         software_rows = "".join(
@@ -303,14 +303,17 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
             f'<tr><td><b>{stage["type"]}:</b></td><td>{stage["device"]} &mdash; '
             f'{stage["model"]} ({stage["precision"]})</td></tr>'
             for stage in kpi.get("pipeline_steps", []))
-        software_html += f'<h3>{kpi["hw"]}</h3><table>{software_rows}{stage_rows}</table>'
+        if index == len(all_kpis) - 1:
+            stage_rows += (
+                f'<tr><td><b>Archive:</b></td><td><code>{archive_name}</code></td></tr>'
+                f'<tr><td><b>Generated:</b></td><td>{now_str}</td></tr>')
+        software_html += f'<h3 style="color:#0071c5;">{kpi["hw"]}</h3><table>{software_rows}{stage_rows}</table>'
     sys_html = (
         '<div class="meta-cols"><div class="meta-half">'
         '<div class="meta-heading">&#9881; Hardware</div>'
         f'{hardware_html}</div><div class="meta-divider"></div><div class="meta-half">'
         '<div class="meta-heading">&#128196; Test &amp; Software</div>'
-        f'{software_html}<table><tr><td><b>Archive:</b></td><td><code>{archive_name}</code></td></tr>'
-        f'<tr><td><b>Generated:</b></td><td>{now_str}</td></tr></table></div></div>'
+        f'{software_html}</div></div>'
     )
 
     cards_html = ""
@@ -355,9 +358,9 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     {last_passing}
     <div class="sub">Source run: <b>{k.get('source_run', 'N/A')}</b></div>
     <div class="sub">Total throughput: <b>{'N/A' if k.get('total_fps') is None else f"{k['total_fps']:.1f} fps"}</b></div>
-    <div class="sub">FPS/stream: <b>{'N/A' if fps is None else f'{fps:.2f}'}</b></div>
+    <div class="sub">FPS/stream (fps): <b>{'N/A' if fps is None else f'{fps:.2f}'}</b></div>
     {latency_html}
-    <div class="sub">Power/stream (W, source scope): <b>{k.get('power_scope', 'N/A')}</b></div>
+    <div class="sub">Power/stream (W/stream, source scope): <b>{k.get('power_scope', 'N/A')}</b></div>
     <div class="sub">CPU util: <b>{'N/A' if cpu is None else f'{cpu:.1f}%'}</b> &nbsp;
       GPU: <b>{'N/A' if gpu is None else f'{gpu:.1f}%'}</b> &nbsp;
       NPU: <b>{'N/A' if npu is None else f'{npu:.1f}%'}</b></div>
@@ -372,6 +375,8 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     header_cells = "".join(f"<th>{t}</th>" for t in targets)
     rows_html = ""
     for key, (label, unit, fmt) in FMT.items():
+        if key == "last_passing" and not any(k.get("last_passing") for k in all_kpis):
+            continue
         cells = "".join(f'<td>{_cell(k.get(key), fmt)}</td>' for k in all_kpis)
         unit_html = f"<span class='unit'>({unit})</span>" if unit else ""
         rows_html += (f"<tr><td><strong>{label}</strong> "
@@ -432,6 +437,19 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
   .chart h3 {{ font-size: 13px; color: #555; margin-bottom: 6px; }}
   .chart img {{ max-width: 620px; display: block; }}
   footer {{ margin-top: 40px; color: #999; font-size: .85em; text-align: center; }}
+    .meta-half, .card, .chart {{ min-width: 0; }}
+    .meta-half td, .sub, p {{ overflow-wrap: anywhere; }}
+    .chart {{ max-width: 100%; box-sizing: border-box; }}
+    .chart img {{ max-width: 100%; width: 620px; height: auto; }}
+    .table-scroll {{ max-width: 100%; overflow-x: auto; }}
+    @media (max-width: 760px) {{
+        body {{ padding: 16px; }}
+        .meta-cols {{ display: block; }}
+        .meta-half {{ padding: 4px 0; }}
+        .meta-half td:first-child {{ white-space: normal; }}
+        .meta-divider {{ width: auto; height: 1px; margin: 12px 0; }}
+        .card {{ flex-basis: 100%; }}
+    }}
 </style>
 </head>
 <body>
@@ -449,11 +467,13 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
 </div>
 
 <h2>KPI Comparison Table</h2>
+<div class="table-scroll">
 <table class="kpi">
   <thead><tr><th>KPI</th>{header_cells}</tr></thead>
   <tbody>
 {rows_html}  </tbody>
 </table>
+</div>
 
 <h2>Comparison Charts</h2>
 <div class="charts">

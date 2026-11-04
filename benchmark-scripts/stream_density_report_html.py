@@ -172,14 +172,14 @@ def generate_html_report(runs):
     all_kpis = []
     for path, metadata in runs:
         settings = test_configuration(metadata)
-        about = metadata["camera_config"].get("_about", {})
-        config_name = about.get("name") if isinstance(about, dict) else None
-        config = config_name or metadata.get("settings", {}).get("environment", {}).get("CAMERA_STREAM")
+        config_file = (metadata.get("camera_config_file") or
+                   metadata.get("settings", {}).get("environment", {}).get("CAMERA_STREAM"))
+        config_file = Path(config_file).name if config_file else None
         rows = [
-            ("Test configuration", config),
-            ("Target FPS per camera", settings["Target FPS per camera"]),
-            ("Effective target FPS per camera", settings["Effective target FPS per camera"]),
-            ("Throughput threshold (FPS)", settings["Throughput threshold (FPS)"]),
+            ("Test configuration", config_file),
+            ("Target FPS per camera (fps)", settings["Target FPS per camera"]),
+            ("Effective target FPS per camera (fps)", settings["Effective target FPS per camera"]),
+            ("Throughput threshold (fps)", settings["Throughput threshold (FPS)"]),
             ("Warmup period (s)", settings["Warmup period (s)"]),
             ("Measurement interval (s)", settings["Measurement interval (s)"]),
             ("Run acceptance criterion", settings["Run acceptance criterion"]),
