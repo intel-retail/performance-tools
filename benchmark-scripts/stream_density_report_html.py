@@ -1,4 +1,4 @@
-"""Map recorded benchmark data to the ASC presentation with issue #249 changes."""
+"""Map recorded benchmark data to the ASC comparison report presentation."""
 
 from datetime import datetime
 from html import escape

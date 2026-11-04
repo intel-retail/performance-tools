@@ -1,7 +1,7 @@
 """Presentation port from the user-supplied analyze-lp_asc-benchmarks.py.
 
 Source: jcork-intel/asc-benchmark-reporting. Data collection remains in the
-calling adapter. Issue #249 changes the report contents, not its visual design.
+calling adapter. Report-specific contents retain the reference visual design.
 """
 
 from datetime import datetime
