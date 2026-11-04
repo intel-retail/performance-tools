@@ -418,7 +418,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(bars[0].get_y() + bars[0].get_height() / 2, 1)
 
     def test_gpu_run_keeps_interval_cpu_npu_and_only_matching_gpu(self):
-        from stream_density_report_html import presentation_metrics, system_info
+        from stream_density_report_html import generate_html_report, presentation_metrics, system_info
 
         path, metadata = self.make_run("all-interval-devices", "GPU.0")
         metadata["gpu_metric_devices"] = {"GPU.0": "GPU_1"}
@@ -436,6 +436,11 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(result["npu_util_pct"], 0)
         self.assertEqual(result["gpu_engine_pct"], 56.63)
         self.assertNotIn("GPU_0", result["utilisation_scope"])
+        expected_utilisation = "CPU Utilization %: 20.68<br>NPU Utilization %: 0.00<br>GPU_1 Compute[CCS] Utilization %: 56.63"
+        self.assertIn(expected_utilisation,
+                  result["utilisation_scope"])
+        document = generate_html_report([(path, metadata)])
+        self.assertIn(expected_utilisation, document)
         self.assertEqual(system_info(metadata)["cpu_cores"], "16")
         self.assertEqual(system_info(metadata)["logical_cpus"], "22")
 

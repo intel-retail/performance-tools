@@ -73,7 +73,7 @@ def presentation_metrics(path, metadata, metrics):
         "power_scope": text(labelled({
             f'{key} ({power_source})' if "GPU" in key.upper() else key: value
             for key, value in metrics["power"].items()})),
-        "utilisation_scope": text(labelled(utilisation)),
+        "utilisation_scope": text(labelled(utilisation)).replace("; ", "<br>"),
     }
 
 
