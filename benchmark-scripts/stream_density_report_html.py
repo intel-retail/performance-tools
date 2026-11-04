@@ -19,6 +19,40 @@ def text(value):
     return escape(cell(value))
 
 
+def source_metric_label(key):
+    container, separator, metric = key.partition(": ")
+    metric = metric if separator else key
+    metric = re.sub(r"\s+\([^)]*\)$", "", metric)
+    if "Power Draw W" in metric and "GPU" not in metric.upper():
+        label = "Package power"
+    elif "GPU Power (W)" in metric:
+        label = "GPU power"
+    elif metric == "CPU Utilization %":
+        label = "CPU utilization"
+    elif metric == "NPU Utilization %":
+        label = "NPU utilization"
+    else:
+        gpu_engine = re.search(
+            r"GPU_(\d+) (Compute|Render/3D|VideoEnhance|Video)\[([A-Z]+)\] Utilization %",
+            metric)
+        if gpu_engine:
+            engine = {
+                "Compute": "compute engine", "Render/3D": "render/3D engine",
+                "VideoEnhance": "video enhancement engine", "Video": "video engine",
+            }[gpu_engine.group(2)]
+            label = f"GPU {gpu_engine.group(1)} {engine} utilization"
+        else:
+            label = re.sub(r"GPU_(\d+)", r"GPU \1", metric)
+            label = label.replace(" Utilization %", " utilization")
+    return f"{container} {label}" if separator else label
+
+
+def source_scope(values):
+    return "<br>".join(
+        f"{text(source_metric_label(key))}: {text(value)}"
+        for key, value in values.items()) or "N/A"
+
+
 def formatted(value, pattern="{:.1f}", unit=""):
     return pattern.format(value) + unit if value is not None else "N/A"
 
@@ -70,10 +104,10 @@ def presentation_metrics(path, metadata, metrics):
         if metrics["gpu_power"] else "N/A",
         "power_per_stream_w": package / metrics["streams"]
         if package is not None and metrics["streams"] else None,
-        "power_scope": text(labelled({
+        "power_scope": source_scope({
             f'{key} ({power_source})' if "GPU" in key.upper() else key: value
-            for key, value in metrics["power"].items()})),
-        "utilisation_scope": text(labelled(utilisation)).replace("; ", "<br>"),
+            for key, value in metrics["power"].items()}),
+        "utilisation_scope": source_scope(utilisation),
     }
 
 

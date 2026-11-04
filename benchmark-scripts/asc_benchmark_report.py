@@ -276,40 +276,43 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     targets = [k["hw"] for k in all_kpis]
     archive_name = os.path.basename(os.path.abspath(out_dir))
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    hardware_html = ""
-    software_html = ""
-    for index, kpi in enumerate(all_kpis):
-        si = kpi.get("system_info", system_info)
-        hardware_rows = [
-            ("Hostname", si["hostname"]), ("System vendor", si["system_vendor"]),
-            ("System model", si["system_model"]), ("CPU", si["cpu_model"]),
-            ("CPU Cores", si["cpu_cores"]),
-            ("Logical CPUs", si["logical_cpus"]),
-            ("Total RAM", f'{si["total_ram_gb"]} &nbsp;({si["mem_channels"]}, '
-             f'{si["mem_per_dimm"]} per memory device, {si["mem_speed"]})'),
-            ("GPU", si["gpu_model"]),
-            ("NPU", f'{si["npu_model"]} &nbsp;<span style="color:#888;font-size:12px;">'
-             f'({si["npu_driver"]})</span>'),
-            ("PL1 / PL2", f'{si["pl1_w"]} &nbsp;/&nbsp; {si["pl2_w"]}'),
-            ("OS", si["os_name"]), ("Kernel", f'{si["kernel"]} ({si["arch"]})'),
-        ]
-        hardware_html += f'<h3 style="color:#0071c5;">{kpi["hw"]}</h3><table>' + "".join(
-            f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
-            for label, value in hardware_rows) + '</table>'
-        software_rows = "".join(
-            f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
-            for label, value in kpi.get("software_rows", []))
-        stage_rows = "".join(
-            f'<tr><td><b>{stage["type"]}:</b></td><td>{stage["device"]} &mdash; '
-            f'{stage["model"]} ({stage["precision"]})</td></tr>'
-            for stage in kpi.get("pipeline_steps", []))
-        if index == len(all_kpis) - 1:
-            stage_rows += (
-                f'<tr><td><b>Archive:</b></td><td><code>{archive_name}</code></td></tr>'
-                f'<tr><td><b>Generated:</b></td><td>{now_str}</td></tr>')
-        software_html += f'<h3 style="color:#0071c5;">{kpi["hw"]}</h3><table>{software_rows}{stage_rows}</table>'
+    first_kpi = all_kpis[0]
+    si = first_kpi.get("system_info", system_info)
+    hardware_rows = [
+        ("Hostname", si["hostname"]), ("System vendor", si["system_vendor"]),
+        ("System model", si["system_model"]), ("CPU", si["cpu_model"]),
+        ("CPU Cores", si["cpu_cores"]),
+        ("Logical CPUs", si["logical_cpus"]),
+        ("Total RAM", f'{si["total_ram_gb"]} &nbsp;({si["mem_channels"]}, '
+         f'{si["mem_per_dimm"]} per memory device, {si["mem_speed"]})'),
+        ("GPU", si["gpu_model"]),
+        ("NPU", f'{si["npu_model"]} &nbsp;<span style="color:#888;font-size:12px;">'
+         f'({si["npu_driver"]})</span>'),
+        ("PL1 / PL2", f'{si["pl1_w"]} &nbsp;/&nbsp; {si["pl2_w"]}'),
+        ("OS", si["os_name"]), ("Kernel", f'{si["kernel"]} ({si["arch"]})'),
+    ]
+    hardware_html = '<table>' + "".join(
+        f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
+        for label, value in hardware_rows) + '</table>'
+    software_rows = "".join(
+        f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
+        for label, value in first_kpi.get("software_rows", [])
+        if label != "Source run")
+    software_html = (
+        f'<table>{software_rows}'
+        f'<tr><td><b>Archive:</b></td><td><code>{archive_name}</code></td></tr>'
+        f'<tr><td><b>Generated:</b></td><td>{now_str}</td></tr></table>')
+    hosts = {kpi.get("system_info", system_info).get("hostname")
+             for kpi in all_kpis}
+    hosts.discard(None)
+    hosts.discard("N/A")
+    host_warning = (
+        '<p style="margin:0 0 10px;padding:8px 10px;background:#fff4e5;'
+        'border-left:3px solid #f28e2b;color:#6b4b1f;">'
+        f'Warning: benchmark runs were captured on different hosts ({", ".join(sorted(hosts))}); '
+        'shared hardware details are from the first run.</p>' if len(hosts) > 1 else "")
     sys_html = (
-        '<div class="meta-cols"><div class="meta-half">'
+        f'{host_warning}<div class="meta-cols"><div class="meta-half">'
         '<div class="meta-heading">&#9881; Hardware</div>'
         f'{hardware_html}</div><div class="meta-divider"></div><div class="meta-half">'
         '<div class="meta-heading">&#128196; Test &amp; Software</div>'
@@ -325,6 +328,7 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
         cpu  = k.get("cpu_util_pct")
         npu  = k.get("npu_util_pct")
         gpu  = k.get("gpu_engine_pct")
+        card_power_scope = k.get("power_scope", "N/A").replace("<br>", "; ")
         tm   = k.get("timing", {})
         t_start = tm.get("start", "N/A")
         t_end   = tm.get("end",   "N/A")
@@ -360,7 +364,7 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     <div class="sub">Total throughput: <b>{'N/A' if k.get('total_fps') is None else f"{k['total_fps']:.1f} fps"}</b></div>
     <div class="sub">FPS/stream (fps): <b>{'N/A' if fps is None else f'{fps:.2f}'}</b></div>
     {latency_html}
-    <div class="sub">Power/stream (W/stream, source scope): <b>{k.get('power_scope', 'N/A')}</b></div>
+    <div class="sub">Power/stream (W/stream, source scope): <b>{card_power_scope}</b></div>
     <div class="sub">CPU util: <b>{'N/A' if cpu is None else f'{cpu:.1f}%'}</b> &nbsp;
       GPU: <b>{'N/A' if gpu is None else f'{gpu:.1f}%'}</b> &nbsp;
       NPU: <b>{'N/A' if npu is None else f'{npu:.1f}%'}</b></div>

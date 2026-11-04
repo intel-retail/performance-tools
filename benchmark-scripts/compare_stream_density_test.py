@@ -184,6 +184,28 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(metadata["settings"]["consecutive_fails"], 2)
         self.assertEqual(report.test_configuration(metadata)["Throughput threshold (FPS)"], "28.50")
 
+    def test_pci_names_are_readable_and_signal_processing_is_not_npu(self):
+        names = report.accelerator_names_from_pci([
+            "00:02.0 VGA compatible controller [0300]: Intel Corporation Device [8086:b080] (rev 04)",
+            "00:0a.0 Signal processing controller [1180]: Intel Corporation Device [8086:7d0d] (rev 01)",
+            "00:0b.0 Processing accelerators [1200]: Intel Corporation Device [8086:b03e] (rev 04)",
+        ])
+        self.assertEqual(names["gpu"], ["Intel GPU (PCI ID b080)"])
+        self.assertEqual(names["npu"], ["Intel NPU (PCI ID b03e)"])
+        sysfs_names = report.accelerator_names_from_pci([
+            "PCI 0000:00:02.0: vendor=0x8086, device=0xb080, class=0x030000, driver=xe",
+            "PCI 0000:00:0b.0: vendor=0x8086, device=0xb03e, class=0x120000, driver=intel_vpu",
+        ])
+        self.assertEqual(sysfs_names, names)
+        _, metadata = self.make_run("legacy-accelerator-names")
+        metadata["hardware"].update(
+            gpu_names=["00:02.0 VGA compatible controller: Intel Corporation Device b080 (rev 04)"],
+            npu_names=["00:0a.0 Signal processing controller: Intel Corporation Device 7d0d (rev 01)",
+                       "00:0b.0 Processing accelerators: Intel Corporation Device b03e (rev 04)"])
+        details = report.hardware_details(metadata)
+        self.assertEqual(details["GPU"], "Intel GPU (PCI ID b080)")
+        self.assertEqual(details["NPU"], "Intel NPU (PCI ID b03e)")
+
     def test_memory_dmi_ignores_empty_slots_and_counts_channels_not_dimms(self):
         blocks = []
         for locator, size in (("ChannelA-DIMM0", "32 GB"), ("ChannelA-DIMM1", "16 GB"),
@@ -356,8 +378,28 @@ class ComparisonTest(unittest.TestCase):
                   "PL1 / PL2", "OS", "Kernel", "Target FPS per camera (fps)",
                       "Throughput threshold (fps)", "Test configuration", "Archive", "Generated",
                       "System vendor", "System model", "Warmup period (s)",
-                      "Measurement interval (s)", "Run acceptance criterion", "Run duration", "Source run"):
+                      "Measurement interval (s)", "Run acceptance criterion", "Run duration"):
             self.assertIn(f"<b>{label}:</b>", document)
+        self.assertEqual(document.count("&#9881; Hardware"), 1)
+        self.assertEqual(document.count("&#128196; Test &amp; Software"), 1)
+
+    def test_shared_metadata_is_shown_once_and_different_hosts_warn(self):
+        from stream_density_report_html import generate_html_report
+
+        cpu_path, cpu = self.make_run("cpu-shared")
+        gpu_path, gpu = self.make_run("gpu-shared", "GPU")
+        npu_path, npu = self.make_run("npu-shared", "NPU")
+        cpu["hardware"]["hostname"] = "host-a"
+        gpu["hardware"]["hostname"] = "host-b"
+        npu["hardware"]["hostname"] = "host-a"
+        document = generate_html_report([(cpu_path, cpu), (gpu_path, gpu), (npu_path, npu)])
+        self.assertEqual(document.count("&#9881; Hardware"), 1)
+        self.assertEqual(document.count("&#128196; Test &amp; Software"), 1)
+        self.assertEqual(document.count("<b>Test configuration:</b>"), 1)
+        self.assertIn("Warning: benchmark runs were captured on different hosts", document)
+        self.assertIn("host-a, host-b", document)
+        for path in (cpu_path, gpu_path, npu_path):
+            self.assertIn(str(path), document)
 
     def test_reference_metrics_do_not_relabel_average_fps_or_gpu_power(self):
         from stream_density_report_html import presentation_metrics
@@ -428,7 +470,8 @@ class ComparisonTest(unittest.TestCase):
         records[0]["hardware_metrics"].update({
             "CPU Utilization %": 20.68, "NPU Utilization %": 0,
             "GPU_0 Compute[CCS] Utilization %": 99,
-            "GPU_1 Compute[CCS] Utilization %": 56.63})
+            "GPU_1 Compute[CCS] Utilization %": 56.63,
+            "S0 Power Draw W": 12, "GPU_1 GPU Power (W)": 7})
         sample_path.write_text("\n".join(json.dumps(record) for record in records))
         metrics = report.run_metrics(path, metadata)
         result = presentation_metrics(path, metadata, metrics)
@@ -436,11 +479,17 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(result["npu_util_pct"], 0)
         self.assertEqual(result["gpu_engine_pct"], 56.63)
         self.assertNotIn("GPU_0", result["utilisation_scope"])
-        expected_utilisation = "CPU Utilization %: 20.68<br>NPU Utilization %: 0.00<br>GPU_1 Compute[CCS] Utilization %: 56.63"
+        expected_utilisation = "CPU utilization: 20.68<br>NPU utilization: 0.00<br>GPU 1 compute engine utilization: 56.63"
         self.assertIn(expected_utilisation,
                   result["utilisation_scope"])
+        self.assertEqual(result["power_scope"],
+                 "Package power: 6.00<br>GPU power: 3.50")
+        self.assertNotIn("Compute[CCS]", result["utilisation_scope"])
         document = generate_html_report([(path, metadata)])
         self.assertIn(expected_utilisation, document)
+        self.assertIn("Power/stream (W/stream, source scope): <b>Package power: 6.00; GPU power: 3.50</b>",
+                  document)
+        self.assertIn("<td>Package power: 6.00<br>GPU power: 3.50</td>", document)
         self.assertEqual(system_info(metadata)["cpu_cores"], "16")
         self.assertEqual(system_info(metadata)["logical_cpus"], "22")
 
@@ -536,6 +585,9 @@ class ComparisonTest(unittest.TestCase):
 
         cpu_path, cpu = self.make_run("cpu-source")
         gpu_path, gpu = self.make_run("gpu-source", "GPU+NPU")
+        cpu["hardware"].update(system_vendor="Test Vendor", system_model="Test Model")
+        cpu["settings"].update(init_duration=12, measurement_window_seconds=80,
+                    pass_tolerance_ratio=0.9, consecutive_passes=3)
         sample_path = gpu_path / report.SAMPLES_FILE
         sample_path.write_text(sample_path.read_text().replace('"pass"', '"inconclusive"'))
         gpu["settings"].update(init_duration=12, measurement_window_seconds=80,
@@ -547,7 +599,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertIn('Last passing lanes: <b>gst: 2</b> (not confirmed)', document)
         self.assertIn('style="color:#b07aa1;">GPU+NPU</h3>', document)
         self.assertIn('style="color:#b07aa1;">N/A</div>', document)
-        for expected in (str(cpu_path), str(gpu_path), "Checkout", "Test Vendor", "Test Model",
+        for expected in (str(cpu_path), str(gpu_path), "Test Vendor", "Test Model",
                          "3 consecutive passes", "27.00", "INT8"):
             self.assertIn(expected, document)
         self.assertEqual(document.count('<th>CPU</th>'), 1)
@@ -626,7 +678,8 @@ class ComparisonTest(unittest.TestCase):
         path, metadata = self.make_run("heading-labels", "GPU")
         metadata["camera_config_file"] = "camera_checkout.json"
         document = generate_html_report([(path, metadata)])
-        self.assertEqual(document.count('<h3 style="color:#0071c5;">GPU</h3>'), 2)
+        self.assertEqual(document.count("&#9881; Hardware"), 1)
+        self.assertEqual(document.count("&#128196; Test &amp; Software"), 1)
         self.assertIn('<h3 style="color:#f28e2b;">GPU</h3>', document)
         self.assertIn('<b>Hostname:</b>', document)
         self.assertNotIn('<b>Host:</b>', document)

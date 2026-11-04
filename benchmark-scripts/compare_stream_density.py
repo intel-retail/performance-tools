@@ -52,7 +52,7 @@ def pci_hardware(root=Path("/sys/bus/pci/devices")):
     for path in sorted(root.glob("*")):
         try:
             device_class = (path / "class").read_text().strip()
-            if not device_class.startswith(("0x03", "0x0b", "0x12")):
+            if not device_class.startswith(("0x03", "0x12")):
                 continue
             vendor = (path / "vendor").read_text().strip()
             device = (path / "device").read_text().strip()
@@ -86,6 +86,37 @@ def gpu_metric_devices():
     except (ImportError, RuntimeError, OSError):
         pass
     return mapping
+
+
+def readable_accelerator_name(line, kind):
+    pci_id = re.search(r"\[([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\]", line)
+    sysfs_id = re.search(r"vendor=0x([0-9a-fA-F]+), device=0x([0-9a-fA-F]+)", line)
+    generic_id = re.search(r"\bDevice\s+([0-9a-fA-F]{4})\b", line, re.IGNORECASE)
+    match = pci_id or sysfs_id
+    device_id = match.group(2).lower() if match else generic_id.group(1).lower() if generic_id else None
+    if sysfs_id:
+        vendor = "Intel " if sysfs_id.group(1).lower() == "8086" else ""
+        return f"{vendor}{kind} (PCI ID {device_id})"
+    description = re.sub(r"^\S+\s+[^:]+:\s*", "", line).strip()
+    description = re.sub(r"\s+\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]", "", description)
+    description = re.sub(r"\s+\(rev [^)]+\)$", "", description).strip()
+    if re.search(r"\bDevice\b", description, re.IGNORECASE):
+        vendor = "Intel " if "Intel" in description or (match and match.group(1).lower() == "8086") else ""
+        return f"{vendor}{kind} (PCI ID {device_id})" if device_id else f"{vendor}{kind}"
+    return description or (f"{kind} (PCI ID {device_id})" if device_id else kind)
+
+
+def accelerator_names_from_pci(lines):
+    names = {"gpu": [], "npu": []}
+    for line in lines:
+        lowered = line.lower()
+        if (any(kind in lowered for kind in ("vga", "display", "3d controller"))
+                or "class=0x03" in lowered):
+            names["gpu"].append(readable_accelerator_name(line, "GPU"))
+        if ("neural" in lowered or "processing accelerators" in lowered
+                or "class=0x12" in lowered):
+            names["npu"].append(readable_accelerator_name(line, "NPU"))
+    return names
 
 
 def read_power_limits(powercap_dir=Path("/sys/class/powercap/intel-rapl:0")):
@@ -230,22 +261,17 @@ def capture_run(results_dir, repo_root, env, settings):
                 break
     try:
         hardware = subprocess.run(
-            ["lspci"], capture_output=True, text=True, check=False,
+            ["lspci", "-nn"], capture_output=True, text=True, check=False,
             timeout=10).stdout.splitlines()
         hardware = [line for line in hardware if any(
-            kind in line.lower() for kind in ("vga", "display", "3d controller", "neural", "processing accelerators", "signal processing"))]
+            kind in line.lower() for kind in ("vga", "display", "3d controller", "neural", "processing accelerators"))]
     except (OSError, subprocess.TimeoutExpired):
         hardware = []
     if not hardware:
         hardware = pci_hardware()
     if not hardware and any(device != "CPU" for device in devices):
         hardware = ["Accelerator hardware identity unavailable: neither PCI names nor sysfs IDs were accessible"]
-    accelerator_names = {"gpu": [], "npu": []}
-    for line in hardware:
-        if any(kind in line.lower() for kind in ("vga", "display", "3d controller")):
-            accelerator_names["gpu"].append(line)
-        if any(kind in line.lower() for kind in ("neural", "processing accelerators", "signal processing")):
-            accelerator_names["npu"].append(line)
+    accelerator_names = accelerator_names_from_pci(hardware)
     try:
         from openvino import Core
         core = Core()
@@ -254,7 +280,8 @@ def capture_run(results_dir, repo_root, env, settings):
             if kind in accelerator_names:
                 try:
                     name = str(core.get_property(device, "FULL_DEVICE_NAME"))
-                    accelerator_names[kind].append(f"{device}: {name}")
+                    if name:
+                        accelerator_names[kind] = [f"{device}: {name}"]
                 except RuntimeError:
                     continue
     except (ImportError, RuntimeError, OSError):
@@ -629,8 +656,12 @@ def hardware_details(metadata):
         "CPU cores (physical)": hardware.get("cpu_cores"),
         "Logical CPUs": hardware.get("logical_cpus"),
         "RAM (GiB)": ram / 1024 ** 3 if ram is not None else None,
-        "GPU": "; ".join(hardware.get("gpu_names", [])) or None,
-        "NPU": "; ".join(hardware.get("npu_names", [])) or None,
+        "GPU": "; ".join(readable_accelerator_name(name, "GPU")
+                   for name in hardware.get("gpu_names", [])) or None,
+        "NPU": "; ".join(
+            readable_accelerator_name(name, "NPU")
+            for name in hardware.get("npu_names", [])
+            if "signal processing" not in name.lower()) or None,
         "PL1 power limit (W)": pl1 / 1_000_000 if pl1 is not None else None,
         "PL2 power limit (W)": pl2 / 1_000_000 if pl2 is not None else None,
         "Accelerator identities": "; ".join(hardware.get("accelerators", [])) or None,
