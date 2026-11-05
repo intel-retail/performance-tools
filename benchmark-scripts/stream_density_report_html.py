@@ -26,7 +26,8 @@ def source_metric_label(key):
     if "Power Draw W" in metric and "GPU" not in metric.upper():
         label = "Package power"
     elif "GPU Power (W)" in metric:
-        label = "GPU power"
+        gpu_power = re.search(r"GPU_(\d+) GPU Power \(W\)", metric)
+        label = f"GPU {gpu_power.group(1)} power" if gpu_power else "GPU power"
     elif metric == "CPU Utilization %":
         label = "CPU utilization"
     elif metric == "NPU Utilization %":

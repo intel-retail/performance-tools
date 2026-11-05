@@ -396,19 +396,6 @@ def number(value):
         return None
 
 
-def matches_accelerator(metric, accelerator, gpu_devices=None):
-    indexed = re.search(r"\bGPU_(\d+)\b", metric, re.IGNORECASE)
-    for device in accelerator.upper().split("+"):
-        if device == "GPU" and "GPU" in metric.upper():
-            return True
-        if device.startswith("GPU."):
-            if indexed and (gpu_devices or {}).get(device) == f"GPU_{indexed.group(1)}":
-                return True
-        elif device in ("CPU", "NPU") and device in metric.upper():
-            return True
-    return False
-
-
 def snapshot_hardware_logs(results_dir):
     snapshots = {}
     for path in Path(results_dir).rglob("*"):
@@ -542,8 +529,6 @@ def run_metrics(path, metadata):
     status = ("fail" if "fail" in statuses else
               "inconclusive" if "inconclusive" in statuses else
               "pass" if statuses == {"pass"} else "unknown")
-    accelerator = metadata["accelerator"]
-    gpu_devices = metadata.get("gpu_metric_devices", {})
     power = {}
     gpu_power = {}
     package_power = {}
@@ -561,20 +546,15 @@ def run_metrics(path, metadata):
             label = f"{container}: {key}" if len(windows) > 1 else key
             if "Power Draw W" in key and "GPU" not in key.upper():
                 package_power[label] = value
-            if ("GPU Power (W)" in key
-                    and matches_accelerator(key, accelerator, gpu_devices)):
+            if "GPU Power (W)" in key:
                 gpu_power[label] = value
-            if (("Power Draw W" in key or "GPU Power (W)" in key)
-                    and ("GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices))):
+            if "Power Draw W" in key or "GPU Power (W)" in key:
                 power[label] = value / stream_count
             if "Utilization %" in key and "Memory" not in key:
-                if "GPU" not in key.upper() or matches_accelerator(key, accelerator, gpu_devices):
-                    interval_utilisation[label] = value
-                if matches_accelerator(key, accelerator, gpu_devices):
-                    window_utilisation[label] = value
+                interval_utilisation[label] = value
+                window_utilisation[label] = value
     utilisation = {key: value for key, raw in metrics.items()
                    if "Utilization %" in key and "Memory" not in key
-                   and matches_accelerator(key, accelerator, gpu_devices)
                    and (value := number(raw)) is not None}
     return {
         "status": status,

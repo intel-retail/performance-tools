@@ -459,10 +459,10 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(bars[0].get_width(), 20)
         self.assertEqual(bars[0].get_y() + bars[0].get_height() / 2, 1)
 
-    def test_gpu_run_keeps_interval_cpu_npu_and_only_matching_gpu(self):
+    def test_cpu_run_keeps_all_interval_cpu_npu_and_gpu_metrics(self):
         from stream_density_report_html import generate_html_report, presentation_metrics, system_info
 
-        path, metadata = self.make_run("all-interval-devices", "GPU.0")
+        path, metadata = self.make_run("all-interval-devices", "CPU")
         metadata["gpu_metric_devices"] = {"GPU.0": "GPU_1"}
         metadata["hardware"].update(cpu_cores=16, logical_cpus=22)
         sample_path = path / report.SAMPLES_FILE
@@ -471,25 +471,29 @@ class ComparisonTest(unittest.TestCase):
             "CPU Utilization %": 20.68, "NPU Utilization %": 0,
             "GPU_0 Compute[CCS] Utilization %": 99,
             "GPU_1 Compute[CCS] Utilization %": 56.63,
-            "S0 Power Draw W": 12, "GPU_1 GPU Power (W)": 7})
+            "S0 Power Draw W": 12, "GPU_0 GPU Power (W)": 5,
+            "GPU_1 GPU Power (W)": 7})
         sample_path.write_text("\n".join(json.dumps(record) for record in records))
         metrics = report.run_metrics(path, metadata)
         result = presentation_metrics(path, metadata, metrics)
         self.assertEqual(result["cpu_util_pct"], 20.68)
         self.assertEqual(result["npu_util_pct"], 0)
-        self.assertEqual(result["gpu_engine_pct"], 56.63)
-        self.assertNotIn("GPU_0", result["utilisation_scope"])
-        expected_utilisation = "CPU utilization: 20.68<br>NPU utilization: 0.00<br>GPU 1 compute engine utilization: 56.63"
+        self.assertEqual(result["gpu_engine_pct"], 77.815)
+        expected_utilisation = (
+            "CPU utilization: 20.68<br>NPU utilization: 0.00<br>"
+            "GPU 0 compute engine utilization: 99.00<br>"
+            "GPU 1 compute engine utilization: 56.63")
         self.assertIn(expected_utilisation,
                   result["utilisation_scope"])
         self.assertEqual(result["power_scope"],
-                 "Package power: 6.00<br>GPU power: 3.50")
-        self.assertNotIn("Compute[CCS]", result["utilisation_scope"])
+                 "Package power: 6.00<br>GPU 0 power: 2.50<br>GPU 1 power: 3.50")
         document = generate_html_report([(path, metadata)])
         self.assertIn(expected_utilisation, document)
-        self.assertIn("Power/stream (W/stream, source scope): <b>Package power: 6.00; GPU power: 3.50</b>",
+        self.assertIn("Power/stream (W/stream, source scope): <b>Package power: 6.00; GPU 0 power: 2.50; GPU 1 power: 3.50</b>",
                   document)
-        self.assertIn("<td>Package power: 6.00<br>GPU power: 3.50</td>", document)
+        self.assertIn("<td>Package power: 6.00<br>GPU 0 power: 2.50<br>GPU 1 power: 3.50</td>", document)
+        self.assertIn("GPU_0 GPU Power (W): 5.00", result["gpu_power_reported"])
+        self.assertIn("GPU_1 GPU Power (W): 7.00", result["gpu_power_reported"])
         self.assertEqual(system_info(metadata)["cpu_cores"], "16")
         self.assertEqual(system_info(metadata)["logical_cpus"], "22")
 
@@ -738,12 +742,20 @@ class ComparisonTest(unittest.TestCase):
         records[0]["hardware_metrics"] = report.read_metrics(path / "metrics.csv")
         sample_path.write_text("\n".join(json.dumps(record) for record in records))
         metrics = report.run_metrics(path, metadata)
-        self.assertEqual(metrics["power"], {"GPU_1 GPU Power (W)": 45})
-        self.assertEqual(metrics["utilisation"], {"GPU_1 Compute[CCS] Utilization %": 99})
+        self.assertEqual(metrics["power"], {
+            "GPU_0 GPU Power (W)": 6, "GPU_1 GPU Power (W)": 45})
+        self.assertEqual(metrics["gpu_power"], {
+            "GPU_0 GPU Power (W)": 12, "GPU_1 GPU Power (W)": 90})
+        self.assertEqual(metrics["utilisation"], {
+            "GPU_0 Compute[CCS] Utilization %": 75,
+            "GPU_1 Compute[CCS] Utilization %": 99})
         metadata.pop("gpu_metric_devices")
         metrics = report.run_metrics(path, metadata)
-        self.assertEqual(metrics["power"], {})
-        self.assertEqual(metrics["utilisation"], {})
+        self.assertEqual(metrics["power"], {
+            "GPU_0 GPU Power (W)": 6, "GPU_1 GPU Power (W)": 45})
+        self.assertEqual(metrics["utilisation"], {
+            "GPU_0 Compute[CCS] Utilization %": 75,
+            "GPU_1 Compute[CCS] Utilization %": 99})
 
     def test_gpu_mapping_matches_pci_identity_not_card_index(self):
         card = self.root / "card1" / "device"
@@ -809,7 +821,7 @@ class ComparisonTest(unittest.TestCase):
         (path / "metrics.csv").unlink()
         (path / "npu_usage.csv").write_text("percent_usage\n50\n70\n")
         metrics = report.run_metrics(path, metadata)
-        self.assertEqual(metrics["utilisation"], {"NPU Utilization %": 60})
+        self.assertEqual(metrics["utilisation"], {"CPU Utilization %": 50})
         self.assertEqual(metrics["streams"], 2)
         self.assertFalse((path / "metrics.csv").exists())
 
