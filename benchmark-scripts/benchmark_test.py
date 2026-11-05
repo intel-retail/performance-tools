@@ -325,5 +325,39 @@ class Testing(unittest.TestCase):
         self.assertIn('Result: Fail', output)
         self.assertIn('did not meet the target', output)
 
+    def test_failed_sweep_does_not_publish_unconfirmed_density(self):
+        output = self._result_output(stream_density.STATUS_FAIL, 10, 20)
+        self.assertIn('Result: Fail', output)
+        self.assertNotIn('Stream density completed', output)
+        self.assertNotIn('stream density 20 streams', output)
+
+    def test_failed_sweep_does_not_publish_limit_note(self):
+        output = self._result_output(
+            stream_density.STATUS_FAIL, 0, 0, 'unconfirmed memory limit')
+        self.assertIn('Result: Fail', output)
+        self.assertNotIn('Note:', output)
+
+    def test_main_captures_metadata_around_density_sweep(self):
+        with tempfile.TemporaryDirectory() as results_dir:
+            args = SimpleNamespace(
+                target_fps=[30], container_names=['gst'], results_dir=results_dir,
+                compose_file=['compose.yml'], benchmark_type='default',
+                target_device='CPU', retail_use_case_root='.',
+                measurement_window_seconds=100, init_duration=10,
+                density_increment=1, parser_script='parser.py', parser_args='')
+            calls = mock.Mock()
+            calls.capture.return_value = {'started_at': 'test'}
+            calls.sweep.return_value = [(30, 'gst', 2, stream_density.STATUS_PASS, 2, None)]
+            with mock.patch.object(benchmark, 'parse_args', return_value=args), \
+                    mock.patch.object(benchmark, 'capture_run', calls.capture), \
+                    mock.patch.object(benchmark, 'finish_run', calls.finish), \
+                    mock.patch.object(stream_density, 'run_stream_density', calls.sweep), \
+                    mock.patch.object(subprocess, 'run'), redirect_stdout(io.StringIO()):
+                benchmark.main()
+            self.assertEqual([entry[0] for entry in calls.mock_calls],
+                             ['capture', 'sweep', 'finish'])
+            calls.finish.assert_called_once_with(results_dir, {'started_at': 'test'})
+            self.assertEqual(calls.capture.call_args.args[3]['target_fps'], [30])
+
 if __name__ == '__main__':
     unittest.main()

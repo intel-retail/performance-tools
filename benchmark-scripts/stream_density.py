@@ -17,6 +17,7 @@ import json
 import math
 import csv
 from datetime import datetime
+from compare_stream_density import snapshot_hardware_logs, window_hardware_metrics
 
 # Constants:
 TARGET_FPS_KEY = "TARGET_FPS"
@@ -1182,14 +1183,20 @@ def run_pipeline_iterations(
         # without ready logs, counts as a failing interval.
         invalid_reason = None
         if logs_ready:
+            hardware_start = snapshot_hardware_logs(results_dir)
             (window_start_offsets, window_end_offsets,
              actual_measurement_seconds, sample_counts,
              enough_samples) = collect_measurement_window(
                 num_pipelines, results_dir, container_name,
                 measurement_window_seconds)
+            hardware_end = snapshot_hardware_logs(results_dir)
             window_number += 1
             if not enough_samples:
                 invalid_reason = "Inconclusive"
+                save_measurement_interval(
+                    results_dir, container_name, num_pipelines,
+                    window_number, "inconclusive", {},
+                    actual_measurement_seconds)
                 print(
                     "INFO: INCONCLUSIVE: Measurement interval did not collect "
                     f"{MIN_SAMPLES_PER_STREAM} samples from every pipeline log "
@@ -1256,6 +1263,10 @@ def run_pipeline_iterations(
             if fps >= pass_thresholds[name]
         }
         all_streams_meet_target = bool(stream_fps_dict) and len(passing_streams) == len(stream_fps_dict)
+        save_measurement_interval(
+            results_dir, container_name, num_pipelines, window_number,
+            STATUS_PASS if all_streams_meet_target else STATUS_FAIL,
+            stream_fps_dict, actual_measurement_seconds)
         latency_samples_by_stream = extract_window_latency_samples(
             results_dir, container_name,
             window_start_offsets, window_end_offsets)
@@ -1355,7 +1366,8 @@ def run_pipeline_iterations(
                     save_window_latency_samples(
                         results_dir, container_name, num_pipelines,
                         latency_samples_by_stream,
-                        stream_fps=stream_fps_dict)
+                        stream_fps=stream_fps_dict,
+                        hardware_metrics=window_hardware_metrics(hardware_start, hardware_end))
                     latency_sample_count = sum(
                         len(samples)
                         for samples in latency_samples_by_stream.values())
@@ -1656,8 +1668,23 @@ def extract_window_latency_samples(results_dir, container_name,
     return samples_by_stream
 
 
+def save_measurement_interval(results_dir, container_name, lane_count,
+                              interval_id, status, stream_fps, duration_seconds):
+    """Append interval history separately from final confirmed latency samples."""
+    os.makedirs(results_dir, exist_ok=True)
+    record = {
+        "record_type": "measurement_interval", "container_name": container_name,
+        "lane_count": lane_count, "interval_id": interval_id, "status": status,
+        "stream_fps": dict(stream_fps), "duration_seconds": duration_seconds,
+        "recorded_at": datetime.now().astimezone().isoformat(),
+    }
+    with open(os.path.join(results_dir, LATENCY_SAMPLES_FILENAME), "a",
+              encoding="utf-8") as output_file:
+        output_file.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
 def save_window_latency_samples(results_dir, container_name, num_pipelines,
-                                samples_by_stream, stream_fps):
+                                samples_by_stream, stream_fps, hardware_metrics=None):
     """Append raw latency samples and time-weighted per-stream FPS from the
     final confirming FPS window."""
     os.makedirs(results_dir, exist_ok=True)
@@ -1668,6 +1695,7 @@ def save_window_latency_samples(results_dir, container_name, num_pipelines,
         "window_id": datetime.now().astimezone().isoformat(),
         "stream_fps": dict(stream_fps),
         "samples_by_stream": samples_by_stream,
+        "hardware_metrics": hardware_metrics or {},
     }
     with open(output_path, "a", encoding="utf-8") as output_file:
         json.dump(record, output_file, separators=(",", ":"))

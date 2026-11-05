@@ -33,6 +33,81 @@ python benchmark-scripts/benchmark.py \
 	--target_device GPU.1
 ```
 
+## Stream Density Comparison Report
+
+Combine saved stream-density runs into one offline HTML report with embedded
+charts and a Markdown copy. Runs made through `benchmark-scripts/benchmark.py`
+save `run_metadata.json` with hardware, camera/pipeline configurations, stage
+precision, benchmark settings and duration.
+
+From the loss-prevention repository root, after running the same configuration
+on the desired accelerators:
+
+```bash
+python3 performance-tools/benchmark-scripts/compare_stream_density.py
+```
+
+When using the loss-prevention Makefile, the equivalent command also prepares
+the benchmark virtual environment and dependencies:
+
+```bash
+make combined-report
+make combined-report RESULTS_DIR=/path/to/benchmark
+make combined-report REPORT_ARGS='--since 2026-10-01 --until 2026-10-27'
+```
+
+`REPORT_ARGS` forwards generator arguments; relative paths resolve from the
+loss-prevention root. Default outputs are `benchmark/stream_density_report.html`
+and `benchmark/stream_density_report.md`. `RESULTS_DIR` overrides the search path.
+
+```bash
+python3 performance-tools/benchmark-scripts/compare_stream_density.py \
+	benchmark/run-a benchmark/run-b --output comparison.md
+python3 performance-tools/benchmark-scripts/compare_stream_density.py \
+	--results-dir benchmark --since 2026-10-01 --until 2026-10-27
+```
+
+Selection and output:
+
+- Uses the newest completed run per accelerator for the newest configuration.
+	Configuration matching includes camera settings, active stages and precision,
+	but ignores device assignments. Heterogeneous combinations remain separate targets.
+- `--config ID` selects a saved configuration. Explicit directories and date
+	filters use the same selection rule. Dates filter start times, default to UTC,
+	and `--until YYYY-MM-DD` includes the whole day.
+- `--output comparison.html` or `--output comparison.md` writes both formats.
+	Execution is unattended; no matching runs returns a nonzero exit code.
+	Incomplete or invalid metadata is skipped.
+
+Report contents and measurements:
+
+- Reference-style hardware/software sections, accelerator cards, a KPI table,
+	five comparison charts and per-stream fps heatmaps. The description comes
+	from the saved camera config's `_about` block; Test configuration shows only
+	its saved filename. The layout adapts to narrow screens.
+- Displays stage precision, per-camera targets, throughput thresholds, warmup,
+	measurement interval, acceptance criterion, duration and source runs.
+	Targets use positive `targetFps`, falling back to `fps`; thresholds use the
+	effective targets after any benchmark overrides.
+- Throughput and per-stream rate use the final confirmed interval. Latency is
+	pooled p50/p95/p99 plus the highest per-stream p95, not mean latency.
+- HTML power and utilization use only aligned measurement-interval samples.
+	Power retains its collector/source scope; per-stream power uses the same
+	container's stream count. Markdown may show explicitly labelled collector-period
+	utilization. Missing data remains `N/A`, never estimated or replaced with zero.
+- Failed and inconclusive sweeps retain their status without confirmed KPIs.
+	An inconclusive run's last passing lane count is shown only when recorded,
+	marked as not confirmed and never presented as a stream count.
+- Heatmaps keep the last recorded event per active stream count, sorted by
+	count. Gray cells indicate missing samples. Heatmaps without history and
+	charts without measurements are omitted.
+
+Hardware details come from saved run metadata, never the report-generation
+host. New runs automatically collect architecture, available memory details,
+NPU-driver version and PL1/PL2 limits where accessible; unavailable fields stay
+`N/A`. Indexed GPU metrics require a recorded PCI-identity match. No manual
+hardware files or privileged prompts are required.
+
 ## Smart Kiosk Voice-to-Voice (V2V) Benchmark
 
 `benchmark-scripts/benchmark_smart_kiosk_v2v.py` measures end-to-end
