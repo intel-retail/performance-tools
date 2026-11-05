@@ -378,8 +378,9 @@ class ComparisonTest(unittest.TestCase):
                   "PL1 / PL2", "OS", "Kernel", "Target FPS per camera (fps)",
                       "Throughput threshold (fps)", "Test configuration", "Archive", "Generated",
                       "System vendor", "System model", "Warmup period (s)",
-                      "Measurement interval (s)", "Run acceptance criterion", "Run duration"):
+                      "Measurement interval (s)", "Run acceptance criterion"):
             self.assertIn(f"<b>{label}:</b>", document)
+        self.assertNotIn("<b>Run duration:</b>", document)
         self.assertEqual(document.count("&#9881; Hardware"), 1)
         self.assertEqual(document.count("&#128196; Test &amp; Software"), 1)
 

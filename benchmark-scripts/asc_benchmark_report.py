@@ -297,7 +297,7 @@ def generate_html_report(all_kpis: list[dict], out_dir: str,
     software_rows = "".join(
         f'<tr><td><b>{label}:</b></td><td>{value}</td></tr>'
         for label, value in first_kpi.get("software_rows", [])
-        if label != "Source run")
+        if label not in ("Source run", "Run duration"))
     software_html = (
         f'<table>{software_rows}'
         f'<tr><td><b>Archive:</b></td><td><code>{archive_name}</code></td></tr>'
