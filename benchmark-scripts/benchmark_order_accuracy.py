@@ -75,7 +75,44 @@ class OrderAccuracyBenchmark:
         # YOLO_MODEL_PATH is set by the Makefile (YOLO_MODEL_PATH ?= ...) based on TARGET_DEVICE
         # and exported via the bare 'export' directive, so it arrives in os.environ already.
         # No fallback needed here — keep model selection as a single source of truth in the Makefile.
-        
+
+    def _capture_run_metadata(self) -> Dict:
+        """
+        Snapshot the active model configuration so every results file is
+        self-describing. Captures OVMS_MODEL_NAME (from a compose-adjacent .env
+        when present), the target device, and the VLM image max_size (parsed from
+        src/services/vlm_client.py when present).
+        """
+        metadata = {
+            "model_name": None,
+            "target_device": self.target_device,
+            "image_max_size": None,
+        }
+        try:
+            compose_dir = os.path.dirname(self.compose_files[0]) if self.compose_files else "."
+            env_path = os.path.join(compose_dir, ".env")
+            if os.path.exists(env_path):
+                with open(env_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("OVMS_MODEL_NAME="):
+                            metadata["model_name"] = line.split("=", 1)[1].strip()
+
+            vlm_client_path = os.path.join(compose_dir, "src", "services", "vlm_client.py")
+            if os.path.exists(vlm_client_path):
+                with open(vlm_client_path, "r") as f:
+                    for line in f:
+                        if "max_size=" in line and line.strip().startswith("max_size"):
+                            try:
+                                metadata["image_max_size"] = int(
+                                    line.split("max_size=")[1].split(",")[0].strip()
+                                )
+                            except (ValueError, IndexError):
+                                pass
+        except Exception as e:
+            print(f"Warning: Could not capture run metadata: {e}")
+        return metadata
+
     def docker_compose_cmd(
         self,
         action: str,
@@ -174,6 +211,10 @@ class OrderAccuracyBenchmark:
         
         # Collect metrics
         results = self._collect_metrics(workers)
+
+        # Stamp this run with the model/precision/resolution that was actually
+        # under test, so results files are self-describing for later comparison.
+        results["run_config"] = self._capture_run_metadata()
         
         # Collect VLM metrics from vlm_metrics_logger
         results["vlm_metrics"] = self._collect_vlm_logger_metrics()
@@ -340,8 +381,65 @@ class OrderAccuracyBenchmark:
                     pass
             if count > 0:
                 worker_results["avg_latency_ms"] = total_latency / count
-        
+
+        # Per-call latency/accuracy distribution across all iterations & images,
+        # since a single mean hides run-to-run variance and per-image differences.
+        latencies = [
+            d["total_latency_ms"] for d in worker_results["details"]
+            if d.get("success") and d.get("total_latency_ms") is not None
+        ]
+        accuracies = [
+            d["accuracy_score"] for d in worker_results["details"]
+            if d.get("accuracy_score") is not None
+        ]
+        worker_results["latency_stats"] = self._percentile_stats(latencies)
+        worker_results["accuracy_stats"] = self._percentile_stats(accuracies)
+
+        # Per-image breakdown (order_id -> aggregated accuracy/latency), so multi-image
+        # runs (e.g. --iterations 8 cycling MCD-1001..1004) don't collapse into one number.
+        per_image: Dict[str, List[Dict]] = {}
+        for d in worker_results["details"]:
+            oid = d.get("order_id", "unknown")
+            per_image.setdefault(oid, []).append(d)
+        worker_results["per_image"] = {
+            oid: {
+                "count": len(items),
+                "avg_accuracy": self._mean_of_present(items, "accuracy_score"),
+                "avg_latency_ms": self._mean_of_present(items, "total_latency_ms"),
+            }
+            for oid, items in per_image.items()
+        }
+
         return worker_results
+
+    @staticmethod
+    def _mean_of_present(items: List[Dict], key: str) -> float:
+        """Average `key` over items where it is present and non-null; 0.0 if none."""
+        values = [i[key] for i in items if i.get(key) is not None]
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _percentile_stats(values: List[float]) -> Dict:
+        """Compute mean/stddev/p50/p95 for a list of numeric samples."""
+        if not values:
+            return {"count": 0, "mean": 0.0, "stddev": 0.0, "p50": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
+        n = len(values)
+        mean = sum(values) / n
+        variance = sum((v - mean) ** 2 for v in values) / n
+        stddev = variance ** 0.5
+        ordered = sorted(values)
+        def _pct(p):
+            idx = min(n - 1, max(0, round(p / 100.0 * (n - 1))))
+            return ordered[idx]
+        return {
+            "count": n,
+            "mean": round(mean, 2),
+            "stddev": round(stddev, 2),
+            "p50": round(_pct(50), 2),
+            "p95": round(_pct(95), 2),
+            "min": round(ordered[0], 2),
+            "max": round(ordered[-1], 2),
+        }
     
     def _clean_pipeline_logs(self):
         """Remove previous pipeline log and results files to prevent stale data."""
@@ -394,21 +492,27 @@ class OrderAccuracyBenchmark:
             "vlm_inference": {}
         }
         
-        # Calculate FPS from logs
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                total_fps, fps_per_stream, fps_dict = stream_density.calculate_total_fps(
-                    num_pipelines,
-                    self.results_dir,
-                    "order-accuracy"
-                )
-            metrics["fps"] = {
-                "total": total_fps,
-                "per_stream": fps_per_stream,
-                "per_pipeline": fps_dict
-            }
-        except Exception as e:
-            print(f"Warning: Could not calculate FPS: {e}")
+        # Calculate FPS from logs. NOTE: stream_density.calculate_total_fps does not
+        # exist (GStreamer-pipeline-only API) -- it always raised AttributeError here
+        # for the image-based dine-in workflow, which has no GStreamer pipeline logs.
+        # A working FPS derivation for this workflow already runs later in
+        # run_fixed_workers() from worker_results/vlm_metrics, so this dead branch is
+        # skipped entirely instead of emitting a misleading warning on every run.
+        if hasattr(stream_density, "calculate_total_fps"):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    total_fps, fps_per_stream, fps_dict = stream_density.calculate_total_fps(
+                        num_pipelines,
+                        self.results_dir,
+                        "order-accuracy"
+                    )
+                metrics["fps"] = {
+                    "total": total_fps,
+                    "per_stream": fps_per_stream,
+                    "per_pipeline": fps_dict
+                }
+            except Exception as e:
+                print(f"Warning: Could not calculate FPS: {e}")
         
         # Calculate latency from logs
         try:
@@ -576,11 +680,19 @@ class OrderAccuracyBenchmark:
             prefix: Filename prefix
         """
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        
+
+        # Tag filenames with the model under test so results files are
+        # identifiable at a glance without opening them (e.g. which model/precision
+        # a given run measured), instead of a bare timestamp.
+        model_tag = ""
+        model_name = results.get("run_config", {}).get("model_name")
+        if model_name:
+            model_tag = "_" + model_name.replace("/", "-").replace(" ", "-")
+
         # Export JSON
         json_path = os.path.join(
             self.results_dir,
-            f"{prefix}_results_{timestamp}.json"
+            f"{prefix}{model_tag}_results_{timestamp}.json"
         )
         with open(json_path, 'w') as f:
             json.dump(results, f, indent=2)
@@ -589,7 +701,7 @@ class OrderAccuracyBenchmark:
         # Export CSV summary
         csv_path = os.path.join(
             self.results_dir,
-            f"{prefix}_summary_{timestamp}.csv"
+            f"{prefix}{model_tag}_summary_{timestamp}.csv"
         )
         self._write_csv_summary(results, csv_path)
         print(f"Summary exported to: {csv_path}")
