@@ -6,7 +6,7 @@
 
 services:
   benchmark:
-    image: intel/retail-benchmark:2026.0.0
+    image: intel/retail-benchmark:2026.3.0-rc1
     container_name: metrics-collector
     privileged: true
     pid: host
