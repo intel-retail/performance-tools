@@ -186,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument("--query", default="broccoli and carrot")
     parser.add_argument("--description", default="A studio photograph of a freshly brewed cup of coffee on a clean table")
     parser.add_argument("--slogan", default="Fresh coffee")
-    parser.add_argument("--device", choices=("CPU", "GPU"), default="GPU")
+    parser.add_argument("--device", choices=("CPU", "GPU", "NPU"), default="GPU")
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--duration", type=int, default=300, help="minimum capture duration in seconds")
     parser.add_argument("--timeout", type=int, default=400)
